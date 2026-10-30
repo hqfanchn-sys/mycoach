@@ -1,0 +1,72 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Global Process Framework        ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "Framework.ahk"
+#Include "GUI.ahk"
+#Include "Message.ahk"
+#Include "Progress.ahk"
+#Include "Configuration.ahk"
+#Include "Startup.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework\Extensions\Task.ahk"
+#Include "..\Framework\Extensions\Messages.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                    Public Function Declaration Section                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+startupProcess() {
+	global kLogStartup
+
+	local isCritical := Task.CriticalHandler
+
+	if kLogStartup
+		logMessage(kLogOff, "Starting process...")
+
+	ProcessSetPriority("L")
+
+	guardExit(arguments*) {
+		if ((arguments.Length > 0) && inList(["Logoff", "Shutdown"], arguments[1]))
+			return false
+
+		if (isCritical() && kGuardExit && !GetKeyState("Ctrl")) {
+			withBlockedWindows(MsgDlg, translate("Please wait until all tasks have been finished."), StrSplit(A_ScriptName, ".")[1], 262192)
+			
+			return true
+		}
+		else
+			return false
+	}
+
+	Task.CriticalHandler := (*) => guardExit()
+
+	OnExit(guardExit, -1)
+
+	if kLogStartup
+		logMessage(kLogOff, "Starting message handler...")
+
+	MessageManager.resume()
+
+	kLogStartup := false
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Initialization Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+MessageManager.pause()

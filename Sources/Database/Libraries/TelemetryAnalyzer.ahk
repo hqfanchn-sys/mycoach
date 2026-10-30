@@ -1,0 +1,2525 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Telemetry Analyzer              ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Extensions\JSON.ahk"
+#Include "..\..\Framework\Extensions\Math.ahk"
+#Include "TelemetryCollector.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class Section {
+	iTrackSection := false
+
+	Type {
+		Get {
+			throw "Virtual property Section.Type must be implemented in a subclass..."
+		}
+	}
+
+	TrackSection {
+		Get {
+			return this.iTrackSection
+		}
+	}
+
+	Nr {
+		Get {
+			return this.TrackSection.Nr
+		}
+	}
+
+	Name {
+		Get {
+			local name
+
+			if this.TrackSection.HasProp("Name") {
+				name := Trim(this.TrackSection.Name)
+
+				return ((name != "") ? name : false)
+			}
+			else
+				return false
+		}
+	}
+
+	Length {
+		Get {
+			return this.TrackSection.Length
+		}
+	}
+
+	Time {
+		Get {
+			throw "Virtual property Section.Time must be implemented in a subclass..."
+		}
+	}
+
+	MinLateralGForce {
+		Get {
+			throw "Virtual property Section.MinLateralGForce must be implemented in a subclass..."
+		}
+	}
+
+	MaxLateralGForce {
+		Get {
+			throw "Virtual property Section.MaxLateralGForce must be implemented in a subclass..."
+		}
+	}
+
+	AvgLateralGForce {
+		Get {
+			throw "Virtual property Section.AvgLateralGForce must be implemented in a subclass..."
+		}
+	}
+
+	MinSpeed {
+		Get {
+			throw "Virtual property Section.MinSpeed must be implemented in a subclass..."
+		}
+	}
+
+	MaxSpeed {
+		Get {
+			throw "Virtual property Section.MaxSpeed must be implemented in a subclass..."
+		}
+	}
+
+	AvgSpeed {
+		Get {
+			throw "Virtual property Section.AvgSpeed must be implemented in a subclass..."
+		}
+	}
+
+	Descriptor {
+		Get {
+			local descriptor := {Type: this.Type, Length: (nullRound(this.Length, 1) . " Meter")
+							   , Time: (nullRound(this.Time / 1000, 2) . " Seconds")}
+			local name := this.Name
+
+			if name
+				descriptor.Name := name
+
+			return descriptor
+		}
+	}
+
+	JSON {
+		Get {
+			return JSON.print(this.Descriptor, "  ")
+		}
+	}
+
+	__New(trackSection) {
+		this.iTrackSection := trackSection
+	}
+}
+
+class Corner extends Section {
+	iDirection := "Left"				; OneOf("Left", "Right")
+	iCurvature := 0.0					; Higher values -> sharper corner
+
+	iBrakingStart := 0					; Distance from the apex, where braking starts
+	iRollingStart := 0					; Distance from the apex, where accelerating starts
+	iAcceleratingStart := 0				; Distance from the apex, where accelerating starts
+
+	iBrakeCurve := []
+	iThrottleCurve := []
+
+	iBrakingTime := 0					; Time of the braking phase in seconds
+	iRollingTime := 0					; Time of the rolling phase in seconds
+	iAcceleratingTime := 0				; Time of the acceleration phase in seconds
+
+	iBrakingSpeed := 0					; Speed at the braking point in km/h
+	iRollingSpeed := 0					; Speed at the apex in km/h
+	iAcceleratingInitialSpeed := 0		; Spped at the start of acceleration in km/h
+
+	iBrakingLength := 0					; Length of the braking phase in meters
+	iRollingLength := 0					; Length of the rolling phase in meters
+	iAcceleratingLength := 0			; Length of the acceleration phase in meters
+
+	iRollingGear := 0					; Min gear during rolling phase
+	iRollingRPM := 0					; Min RPM during rolling phase
+
+	iAcceleratingGear := 0				; Gear at start of the accelerating phase
+	iAcceleratingRPM := 0				; RPM at start of the accelarating phase
+	iAcceleratingFinalSpeed := 0		; Speed at the end of the accelerating phase
+
+	iMaxSteering := 0					; -1 -> 1
+
+	iMinLateralGForce := 0				; Min G Force around apex (rolling phase)
+	iMaxLateralGForce := 0				; Max G Force around apex (rolling phase)
+	iAvgLateralGForce := 0				; Avg G Force around apex (rolling phase)
+	iMinSpeed := 0						; Min Speed around apex (rolling phase)
+	iMaxSpeed := 0						; Max Speed around apex (rolling phase)
+	iAvgSpeed := 0						; Avg Speed around apex (rolling phase)
+
+	iTCActivations := 0					; Percentage of TC activations (each meter is one tick)
+	iABSActivations := 0				; Percentage of ABS activations (each meter is one tick)
+
+	iMaxBrakePressure := 0				; Percentage
+	iBrakePressureRampUp := 0			; Meters
+
+	iSteeringCorrections:= 0			; Count
+	iThrottleCorrections:= 0			; Count
+	iBrakeCorrections:= 0				; Count
+
+	iSteeringSmoothness := 0			; Percentage
+	iThrottleSmoothness := 0			; Percentage
+	iBrakeSmoothness := 0				; Percentage
+
+	Type {
+		Get {
+			return "Corner"
+		}
+	}
+
+	Direction {
+		Get {
+			return this.iDirection
+		}
+	}
+
+	Curvature {
+		Get {
+			return this.iCurvature
+		}
+	}
+
+	Time[part := "Overall"] {
+		Get {
+			if (part = "Overall")
+				return (this.iBrakingTime + this.iRollingTime + this.iAcceleratingTime)
+			else if ((part = "Entry") || (part = "Braking"))
+				return this.iBrakingTime
+			else if ((part = "Apex") || (part = "Rolling"))
+				return this.iRollingTime
+			else if ((part = "Exit") || (part = "Accelerating"))
+				return this.iAcceleratingTime
+			else
+				return 0
+		}
+	}
+
+	Start[part := "Overall"] {
+		Get {
+			if (part = "Overall")
+				return Min(nullZero(this.iBrakingStart), nullZero(this.iRollingStart), nullZero(this.iAcceleratingStart))
+			else if ((part = "Entry") || (part = "Braking"))
+				return nullZero(this.iBrakingStart)
+			else if ((part = "Apex") || (part = "Rolling"))
+				return nullZero(this.iRollingStart)
+			else if ((part = "Exit") || (part = "Accelerating"))
+				return nullZero(this.iAcceleratingStart)
+			else
+				return 0
+		}
+	}
+
+	Speed[part := "Rolling"] {
+		Get {
+			if ((part = "Entry") || (part = "Braking"))
+				return this.iBrakingSpeed
+			else if ((part = "Apex") || (part = "Rolling"))
+				return this.iRollingSpeed
+			else if ((part = "Exit") || (part = "Accelerating"))
+				return this.iAcceleratingInitialSpeed
+			else
+				return 0
+		}
+	}
+
+	Length[part := "Overall"] {
+		Get {
+			if (part = "Overall")
+				return (this.iBrakingLength + this.iRollingLength + this.iAcceleratingLength)
+			else if ((part = "Entry") || (part = "Braking"))
+				return this.iBrakingLength
+			else if ((part = "Apex") || (part = "Rolling"))
+				return this.iRollingLength
+			else if ((part = "Exit") || (part = "Accelerating"))
+				return this.iAcceleratingLength
+			else
+				return 0
+		}
+	}
+
+	RollingGear {
+		Get {
+			return this.iRollingGear
+		}
+	}
+
+	RollingRPM {
+		Get {
+			return Round(this.iRollingRPM)
+		}
+	}
+
+	AcceleratingGear {
+		Get {
+			return this.iAcceleratingGear
+		}
+	}
+
+	AcceleratingRPM {
+		Get {
+			return Round(this.iAcceleratingRPM)
+		}
+	}
+
+	AcceleratingSpeed {
+		Get {
+			return this.iAcceleratingFinalSpeed
+		}
+	}
+
+	MaxSteering {
+		Get {
+			return this.iMaxSteering
+		}
+	}
+
+	MinLateralGForce {
+		Get {
+			return this.iMinLateralGForce
+		}
+	}
+
+	MaxLateralGForce {
+		Get {
+			return this.iMaxLateralGForce
+		}
+	}
+
+	AvgLateralGForce {
+		Get {
+			return this.iAvgLateralGForce
+		}
+	}
+
+	MinSpeed {
+		Get {
+			return this.iMinSpeed
+		}
+	}
+
+	MaxSpeed {
+		Get {
+			return this.iMaxSpeed
+		}
+	}
+
+	AvgSpeed {
+		Get {
+			return this.iAvgSpeed
+		}
+	}
+
+	BrakingStart {
+		Get {
+			return this.iBrakingStart
+		}
+	}
+
+	BrakingX {
+		Get {
+			return this.iBrakingX
+		}
+	}
+
+	BrakingY {
+		Get {
+			return this.iBrakingY
+		}
+	}
+
+	BrakeCurve {
+		Get {
+			return this.iBrakeCurve
+		}
+	}
+
+	AcceleratingStart {
+		Get {
+			return this.iAcceleratingStart
+		}
+	}
+
+	AcceleratingX {
+		Get {
+			return this.iAcceleratingX
+		}
+	}
+
+	AcceleratingY {
+		Get {
+			return this.iAcceleratingY
+		}
+	}
+
+	ThrottleCurve {
+		Get {
+			return this.iThrottleCurve
+		}
+	}
+
+	MaxBrakePressure {
+		Get {
+			return this.iMaxBrakePressure
+		}
+	}
+
+	BrakePressureRampUp {
+		Get {
+			return this.iBrakePressureRampUp
+		}
+	}
+
+	TCActivations {
+		Get {
+			return this.iTCActivations
+		}
+	}
+
+	ABSActivations {
+		Get {
+			return this.iABSActivations
+		}
+	}
+
+	SteeringSmoothness {
+		Get {
+			return this.iSteeringSmoothness
+		}
+	}
+
+	SteeringCorrections {
+		Get {
+			return this.iSteeringCorrections
+		}
+	}
+
+	ThrottleSmoothness {
+		Get {
+			return this.iThrottleSmoothness
+		}
+	}
+
+	ThrottleCorrections {
+		Get {
+			return this.iThrottleCorrections
+		}
+	}
+
+	BrakeSmoothness {
+		Get {
+			return this.iBrakeSmoothness
+		}
+	}
+
+	BrakeCorrections {
+		Get {
+			return this.iBrakeCorrections
+		}
+	}
+
+	Descriptor {
+		Get {
+			local descriptor := super.Descriptor
+			local smoothness
+
+			descriptor.Nr := this.Nr
+			descriptor.Direction := this.Direction
+			descriptor.Curvature := Round(this.Curvature, 2)
+
+			if (this.Start["Entry"] && (this.Start["Entry"] != kNull)) {
+				smoothness := nullRound(this.BrakeSmoothness)
+
+				descriptor.Entry := {Phase: "Braking"
+								   , BrakingPoint: (Round(Abs(this.Start["Entry"]), 1) . ((this.Start["Entry"] > 0) ? " Meter before apex" : " Meter after apex"))
+								   , BrakingLength: (nullRound(this.Length["Entry"], 1) . " Meter")
+								   , Duration: (nullRound(this.Time["Entry"] / 1000, 2) . " Seconds")
+								   , MaxBrakePressure: (Round(this.MaxBrakePressure) . " Percent")
+								   , BrakePressureRampUp: (Round(this.BrakePressureRampUp, 1) . " Meter")
+								   , ABSActivations: ((this.ABSActivations > TelemetryAnalyzer.ABSActivationsThreshold) ? (this.ABSActivations . " Percent")
+																														: "Low")
+								   , BrakeCorrections: this.BrakeCorrections
+								   , BrakeSmoothness: ((smoothness < TelemetryAnalyzer.BrakeSmoothnessThreshold) ? (smoothness . " Percent")
+																												 : "Good")}
+			}
+
+			if (this.Start["Apex"] && (this.Start["Apex"] != kNull))
+				descriptor.Apex := {Phase: "Rolling"
+								  , Start: (Round(Abs(this.Start["Apex"]), 1) . ((this.Start["Apex"] > 0) ? " Meter before apex" : " Meter after apex"))
+								  , Length: (nullRound(this.Length["Apex"], 1) . " Meter")
+								  , Duration: (nullRound(this.Time["Apex"] / 1000, 2) . " Seconds")
+								  , Gear: this.RollingGear
+								  , RPM: this.RollingRPM
+								  , LateralGForce: nullRound(this.AvgLateralGForce, 2)
+								  , Speed: (nullRound(this.MinSpeed) . " km/h")}
+			else
+				descriptor.Apex := {Phase: "Rolling"
+								  , LateralGForce: nullRound(this.AvgLateralGForce, 2)
+								  , Speed: (nullRound(this.MinSpeed) . " km/h")}
+
+			if (this.Start["Exit"] && (this.Start["Exit"] != kNull)) {
+				smoothness := nullRound(this.ThrottleSmoothness)
+
+				descriptor.Exit := {Phase: "Accelerating"
+								  , AccelerationStart: (Round(Abs(this.Start["Exit"]), 1) . ((this.Start["Exit"] > 0) ? " Meter after apex" : " Meter before apex"))
+								  , AccelerationLength: (nullRound(this.Length["Exit"], 1) . " Meter")
+								  , Duration: (nullRound(this.Time["Exit"] / 1000, 2) . " Seconds")
+								  , Gear: this.AcceleratingGear
+								  , RPM: this.AcceleratingRPM
+								  , Speed: (nullRound(this.AcceleratingSpeed) . " km/h")
+								  , TCActivations: ((this.TCActivations > TelemetryAnalyzer.TCActivationsThreshold) ? (this.TCActivations . " Percent")
+																													: "Low")
+								  , ThrottleCorrections: this.ThrottleCorrections
+								  , ThrottleSmoothness: ((smoothness < TelemetryAnalyzer.ThrottleSmoothnessThreshold) ? (smoothness . " Percent")
+																													  : "Good")}
+			}
+
+			smoothness := nullRound(this.SteeringSmoothness)
+
+			descriptor.SteeringCorrections := this.SteeringCorrections
+			descriptor.SteeringSmoothness := ((smoothness < TelemetryAnalyzer.SteeringSmoothnessThreshold) ? (smoothness . " Percent")
+																										   : "Good")
+
+			return descriptor
+		}
+	}
+
+	__New(trackSection, direction, curvature
+					  , brakingStart, brakingTime, brakingSpeed, brakingLength, maxBrakePressure, brakePressureRampUp, brakeCurve
+					  , rollingStart, rollingTime, rollingSpeed, rollingLength
+					  , acceleratingStart, acceleratingTime, acceleratingInitialSpeed, acceleratingLength, throttleCurve
+					  , rollingGear, rollingRPM, acceleratingGear, acceleratingRPM, acceleratingFinalSpeed
+					  , maxSteering, minG, maxG, avgG, minSpeed, maxSpeed, avgSpeed, tcActivations, absActivations
+					  , steeringCorrections, steeringSmoothness
+					  , throttleCorrections, throttleSmoothness
+					  , brakeCorrections, brakeSmoothness) {
+		super.__New(trackSection)
+
+		this.iDirection := direction
+		this.iCurvature := curvature
+
+		this.iBrakingStart := brakingStart
+		this.iRollingStart := rollingStart
+		this.iAcceleratingStart := acceleratingStart
+
+		this.iBrakeCurve := brakeCurve
+		this.iThrottleCurve := throttleCurve
+
+		this.iBrakingTime := brakingTime
+		this.iRollingTime := rollingTime
+		this.iAcceleratingTime := acceleratingTime
+
+		this.iBrakingSpeed := brakingSpeed
+		this.iRollingSpeed := rollingSpeed
+		this.iAcceleratingInitialSpeed := acceleratingInitialSpeed
+
+		this.iBrakingLength := brakingLength
+		this.iRollingLength := rollingLength
+		this.iAcceleratingLength := acceleratingLength
+
+		this.iRollingGear := rollingGear
+		this.iRollingRPM := Round(rollingRPM)
+		this.iAcceleratingGear := acceleratingGear
+		this.iAcceleratingRPM := Round(acceleratingRPM)
+		this.iAcceleratingFinalSpeed := acceleratingFinalSpeed
+
+		this.iMaxSteering := maxSteering
+
+		this.iMinLateralGForce := minG
+		this.iMaxLateralGForce := maxG
+		this.iAvgLateralGForce := avgG
+		this.iMinSpeed := minSpeed
+		this.iMaxSpeed := maxSpeed
+		this.iAvgSpeed := avgSpeed
+
+		this.iMaxBrakePressure := maxBrakePressure
+		this.iBrakePressureRampUp := brakePressureRampUp
+
+		this.iTCActivations := tcActivations
+		this.iABSActivations := absActivations
+
+		this.iSteeringSmoothness := steeringSmoothness
+		this.iSteeringCorrections := steeringCorrections
+		this.iThrottleSmoothness := throttleSmoothness
+		this.iThrottleCorrections := throttleCorrections
+		this.iBrakeSmoothness := brakeSmoothness
+		this.iBrakeCorrections := brakeCorrections
+	}
+
+	static fromSection(telemetry, section, startIndex, endIndex) {
+		local index := startIndex
+		local phase := "Approaching"
+		local lastPhase := phase
+		local brakingSpeed := 0
+		local rollingSpeed := 0
+		local acceleratingInitialSpeed := 0
+		local brakingLength := 0
+		local rollingLength := 0
+		local acceleratingLength := 0
+		local brakeCurve := []
+		local throttleCurve := []
+		local brakingTime := 0
+		local rollingTime := 0
+		local acceleratingTime := 0
+		local rollingGear := kNull
+		local rollingRPM := 0
+		local acceleratingGear := 0
+		local acceleratingRPM := 0
+		local acceleratingFinalSpeed := 0
+		local curvature := telemetry.getValue(index, "Curvature", kNull)
+		local speed := kUndefined
+		local latG := kUndefined
+		local absActivations := 0
+		local tcActivations := 0
+		local brakeReference := 0
+		local lastBrake := 0
+		local lastBrakeDelta := 0
+		local brakeCount := 0
+		local brakeChanges := 0
+		local throttleReference := 0
+		local lastThrottle := 0
+		local lastThrottleDelta := 0
+		local throttleCount := 0
+		local throttleChanges := 0
+		local steeringReference := 0
+		local lastSteering := 0
+		local lastSteeringDelta := 0
+		local steeringCount := 0
+		local steeringChanges := 0
+		local sumSteering := 0
+		local speed := telemetry.getValue(index, "Speed")
+		local minSpeed := speed
+		local maxSpeed := speed
+		local speeds := []
+		local latG := Abs(telemetry.getValue(index, "Lat G"))
+		local maxSteering := 0
+		local minLatG := latG
+		local maxLatG := latG
+		local latGs := []
+		local brakingStart := kNull
+		local rollingStart := kNull
+		local acceleratingStart := kNull
+		local maxBrake := 0
+		local brakeRampUp := 0
+		local apexIndex := kNull
+		local brake, throttle, steering, gear, rpm
+		local startIdx, startTime, newCurvature
+
+		distance(from, to := false) {
+			local distance, lastX, lastY, x, y
+
+			if !to {
+				distance := telemetry.getValue(1, "Distance")
+
+				to := from
+				from := 1
+			}
+			else
+				distance := 0
+
+			lastX := telemetry.getValue(from, "PosX")
+			lastY := telemetry.getValue(from, "PosY")
+
+			loop {
+				x := telemetry.getValue(from, "PosX")
+				y := telemetry.getValue(from, "PosY")
+
+				distance += Sqrt(((x - lastX) ** 2) + ((y - lastY) ** 2))
+
+				lastX := x
+				lastY := y
+			} until (++from > to)
+
+			return distance
+		}
+
+		updatePhase(phase, index) {
+			if (phase = "Braking") {
+				brakingLength += distance(startIdx, index)
+				brakingTime += (telemetry.getValue(index, "Time", 0) - startTime)
+			}
+			else if (phase = "Rolling") {
+				rollingLength += distance(startIdx, index)
+				rollingTime += (telemetry.getValue(index, "Time", 0) - startTime)
+			}
+			else if (phase = "Accelerating") {
+				acceleratingLength += distance(startIdx, index)
+				acceleratingTime += (telemetry.getValue(index, "Time", 0) - startTime)
+				acceleratingFinalSpeed := Max(speed, acceleratingFinalSpeed)
+			}
+		}
+
+		while (index <= endIndex) {
+			if !isNumber(curvature) {
+				curvature := telemetry.getValue(index, "Curvature", kNull)
+
+				if isNumber(curvature)
+					apexIndex := index
+			}
+			else {
+				newCurvature := telemetry.getValue(index, "Curvature", kNull)
+
+				if (isNumber(newCurvature) && (newCurvature > curvature)) {
+					apexIndex := index
+
+					curvature := newCurvature
+				}
+			}
+
+			steering := telemetry.getValue(index, "Steering")
+			brake := telemetry.getValue(index, "Brake")
+			throttle := telemetry.getValue(index, "Throttle")
+			speed := telemetry.getValue(index, "Speed")
+			latG := Abs(telemetry.getValue(index, "Lat G"))
+
+			minSpeed := Min(speed, minSpeed)
+			maxSpeed := Max(speed, maxSpeed)
+			speeds.Push(speed)
+
+			minLatG := Min(minLatG, latG)
+			maxLatG := Max(maxLatG, latG)
+			latGs.Push(latG)
+
+			sumSteering += steering
+
+			steeringCount += 1
+
+			maxSteering := Max(steering, Abs(steering))
+
+			if ((lastSteeringDelta > 0) && (steering < lastSteering)) {
+				if ((steeringReference - steering) > 0.05)
+					steeringChanges += 1
+			}
+			else if ((lastSteeringDelta < 0) && (steering > lastSteering)) {
+				if ((steering - steeringReference) > 0.05)
+					steeringChanges += 1
+			}
+			else
+				steeringReference := steering
+
+			if (((sumSteering > 0) && (steering < 0)) || ((sumSteering < 0) && (steering > 0)))
+				steeringChanges += 1
+
+			lastSteeringDelta := (steering - lastSteering)
+			lastSteering := steering
+
+			if (brake > 0.1)
+				phase := "Braking"
+			else if (throttle <= 0.2)
+				phase := "Rolling"
+			else if (phase != "Approaching")
+				phase := "Accelerating"
+
+			if (phase != lastPhase) {
+				updatePhase(lastPhase, index)
+
+				startIdx := index
+				startTime := telemetry.getValue(index, "Time", 0)
+
+				lastPhase := phase
+			}
+
+			if (phase = "Braking") {
+				if (brakingStart == kNull)
+					brakingStart := startIdx
+
+				if nullZero(telemetry.getValue(index, "ABS", false))
+					absActivations += 1
+
+				if (brake > maxBrake) {
+					brakeRampUp := distance(startIdx, index)
+
+					maxBrake := brake
+				}
+
+				brakeCount += 1
+
+				if (brakeCount == 1)
+					brakingSpeed := speed
+
+				brakeCurve.Push({X: telemetry.getValue(index, "PosX"), Y: telemetry.getValue(index, "PosY")
+							   , Distance: telemetry.getValue(index, "Distance")
+							   , Time: telemetry.getValue(index, "Time"), Brake: brake, Steering: steering})
+
+				if ((lastBrakeDelta > 0) && (brake < lastBrake)) {
+					if ((brakeReference - brake) > 0.2)
+						brakeChanges += 1
+				}
+				else if ((lastBrakeDelta < 0) && (brake > lastBrake)) {
+					if ((brake - brakeReference) > 0.2)
+						brakeChanges += 1
+				}
+				else
+					brakeReference := brake
+
+				lastBrakeDelta := (brake - lastBrake)
+				lastBrake := brake
+			}
+			else if (phase = "Rolling") {
+				if (rollingStart == kNull)
+					rollingStart := startIdx
+
+				if (rollingSpeed == 0)
+					rollingSpeed := speed
+				else
+					rollingSpeed := Min(rollingSpeed, speed)
+
+				if (rollingGear == kNull) {
+					rollingGear := telemetry.getValue(index, "Gear")
+					rollingRPM := telemetry.getValue(index, "RPM")
+				}
+				else {
+					gear := telemetry.getValue(index, "Gear")
+					rpm := telemetry.getValue(index, "RPM")
+
+					if (gear < rollingGear) {
+						rollingGear := gear
+						rollingRPM := rpm
+					}
+					else
+						rollingRPM := Min(rpm, rollingRPM)
+				}
+			}
+			else if (phase = "Accelerating") {
+				if (acceleratingStart == kNull) {
+					acceleratingStart := startIdx
+
+					acceleratingGear := telemetry.getValue(index, "Gear")
+					acceleratingRPM := telemetry.getValue(index, "RPM")
+				}
+
+				if nullZero(telemetry.getValue(index, "TC", false))
+					tcActivations += 1
+
+				throttleCount += 1
+
+				if (throttleCount == 1)
+					acceleratingInitialSpeed := speed
+
+				throttleCurve.Push({X: telemetry.getValue(index, "PosX"), Y: telemetry.getValue(index, "PosY")
+								  , Distance: telemetry.getValue(index, "Distance")
+								  , Time: telemetry.getValue(index, "Time"), Throttle: throttle, Steering: steering})
+
+				if ((lastThrottleDelta > 0) && (throttle < lastThrottle)) {
+					if ((throttleReference - throttle) > 0.2)
+						throttleChanges += 1
+				}
+				else if ((lastThrottleDelta < 0) && (throttle > lastThrottle)) {
+					if ((throttle - throttleReference) > 0.2)
+						throttleChanges += 1
+				}
+				else
+					throttleReference := throttle
+
+				lastThrottleDelta := (throttle - lastThrottle)
+				lastThrottle := throttle
+			}
+
+			index += 1
+		}
+
+		updatePhase(phase, index - 1)
+
+		if ((brakingStart != kNull) && (apexIndex != kNull)) {
+			if (brakingStart > apexIndex)
+				brakingStart := - distance(apexIndex, brakingStart)
+			else
+				brakingStart := distance(brakingStart, apexIndex)
+		}
+		else
+			brakingStart := kNull
+
+		if ((rollingStart != kNull) && (apexIndex != kNull)) {
+			if (rollingStart > apexIndex)
+				rollingStart := - distance(apexIndex, rollingStart)
+			else
+				rollingStart := distance(rollingStart, apexIndex)
+		}
+		else
+			rollingStart := kNull
+
+		if ((acceleratingStart != kNull) && (apexIndex != kNull)) {
+			if (acceleratingStart > apexIndex)
+				acceleratingStart := distance(apexIndex, acceleratingStart)
+			else
+				acceleratingStart := - distance(acceleratingStart, apexIndex)
+		}
+		else
+			acceleratingStart := kNull
+
+		return Corner(section, (sumSteering > 0) ? "Right" : "Left", (curvature != kNull) ? curvature : 0
+							 , brakingStart, brakingTime, brakingSpeed, brakingLength, Round(maxBrake * 100), brakeRampUp, brakeCurve
+							 , rollingStart, rollingTime, rollingSpeed, rollingLength
+							 , acceleratingStart, acceleratingTime, acceleratingInitialSpeed, acceleratingLength, throttleCurve
+							 , rollingGear, rollingRPM, acceleratingGear, acceleratingRPM, acceleratingFinalSpeed
+							 , (sumSteering > 0) ? maxSteering : (maxSteering * -1)
+							 , minLatG, maxLatG, average(latGs), minSpeed, maxSpeed, average(speeds)
+							 , (throttleCount ? Round((tcActivations / throttleCount) * 100) : 100)
+							 , (brakeCount ? Round((absActivations / brakeCount) * 100) : 100)
+							 , Max(0, steeringChanges), 100 - (steeringCount ? ((steeringChanges / steeringCount) * 100) : 0)
+							 , Max(0, throttleChanges), 100 - (throttleCount ? ((throttleChanges / throttleCount) * 100): 0)
+							 , Max(0, brakeChanges), 100 - (brakeCount ? ((brakeChanges / brakeCount) * 100) : 0))
+	}
+}
+
+class Straight extends Section {
+	iTime := 0
+
+	iMinSpeed := 0
+	iMaxSpeed := 0
+	iAvgSpeed := 0
+
+	Type {
+		Get {
+			return "Straight"
+		}
+	}
+
+	Time {
+		Get {
+			return this.iTime
+		}
+	}
+
+	MinLateralGForce {
+		Get {
+			return 0
+		}
+	}
+
+	MaxLateralGForce {
+		Get {
+			return 0
+		}
+	}
+
+	AvgLateralGForce {
+		Get {
+			return 0
+		}
+	}
+
+	MinSpeed {
+		Get {
+			return this.iMinSpeed
+		}
+	}
+
+	MaxSpeed {
+		Get {
+			return this.iMaxSpeed
+		}
+	}
+
+	AvgSpeed {
+		Get {
+			return this.iAvgSpeed
+		}
+	}
+
+	Descriptor {
+		Get {
+			local descriptor := super.Descriptor
+
+			descriptor.MinSpeed := (nullRound(this.MinSpeed) . " km/h")
+			descriptor.MaxSpeed := (nullRound(this.MaxSpeed) . " km/h")
+			descriptor.AvgSpeed := (nullRound(this.AvgSpeed) . " km/h")
+
+			return descriptor
+		}
+	}
+
+	__New(trackSection, time, minSpeed, maxSpeed, avgSpeed) {
+		super.__New(trackSection)
+
+		this.iTime := time
+
+		this.iMinSpeed := minSpeed
+		this.iMaxSpeed := maxSpeed
+		this.iAvgSpeed := avgSpeed
+	}
+
+	static fromSection(telemetry, section, startIndex, endIndex) {
+		local index := startIndex
+		local speed := telemetry.getValue(index, "Speed")
+		local minSpeed := speed
+		local maxSpeed := speed
+		local speeds := []
+
+		while (index <= endIndex) {
+			speed := telemetry.getValue(index, "Speed")
+
+			minSpeed := Min(speed, minSpeed)
+			maxSpeed := Max(speed, maxSpeed)
+			speeds.Push(speed)
+
+			index += 1
+		}
+
+		return Straight(section, telemetry.getValue(endIndex - 1, "Time", 0) - telemetry.getValue(startIndex, "Time", 0)
+							   , minSpeed, maxSpeed, average(speeds))
+	}
+}
+
+class Telemetry {
+	iTelemetryAnalyzer := false
+
+	iName := false
+	iFileName := false
+
+	iLap := false
+	iData := []
+
+	iDriver := false
+	iLapTime := false
+	iSectorTimes := false
+
+	iSections := []
+	iBraking := false
+	iAccelerating := false
+
+	iMaxLateralGForce := 0
+	iMaxSpeed := 0
+
+	iMaxGear := 0
+	iMaxRPM := 0
+
+	TelemetryAnalyzer {
+		Get {
+			return this.iTelemetryAnalyzer
+		}
+	}
+
+	Name {
+		Get {
+			if this.iName
+				return this.iName
+			else if this.Lap
+				return (translate("Lap") . A_Space . this.Lap)
+			else
+				return translate("Unknown")
+		}
+	}
+
+	FileName {
+		Get {
+			return this.iFileName
+		}
+	}
+
+	Lap {
+		Get {
+			return this.iLap
+		}
+	}
+
+	Data {
+		Get {
+			return this.iData
+		}
+	}
+
+	Driver {
+		Get {
+			return this.iDriver
+		}
+	}
+
+	LapTime {
+		Get {
+			return this.iLapTime
+		}
+	}
+
+	SectorTimes {
+		Get {
+			return this.iSectorTimes
+		}
+	}
+
+	Sections {
+		Get {
+			return this.iSections
+		}
+
+		Set {
+			return (this.iSections := value)
+		}
+	}
+
+	Braking {
+		Get {
+			if !this.iBraking
+				this.iBraking := this.createBraking()
+
+			return this.iBraking
+		}
+	}
+
+	Accelerating {
+		Get {
+			if !this.iAccelerating
+				this.iAccelerating := this.createAccelerating()
+
+			return this.iAccelerating
+		}
+	}
+
+	MaxLateralGForce {
+		Get {
+			return this.iMaxLateralGForce
+		}
+	}
+
+	MaxSpeed {
+		Get {
+			return this.iMaxSpeed
+		}
+	}
+
+	MaxGear {
+		Get {
+			return this.iMaxGear
+		}
+	}
+
+	MaxRPM {
+		Get {
+			return Round(this.iMaxRPM)
+		}
+	}
+
+	Descriptor {
+		Get {
+			local descriptor := {Lap: this.Lap, MaxLateralGForce: nullRound(this.MaxLateralGForce, 2)
+											  , MaxSpeed: (nullRound(this.MaxSpeed) . " km/h")
+											  , MaxGear: this.MaxGear, MaxRPM: this.MaxRPM
+											  , Sections: collect(this.Sections, (s) => s.Descriptor)}
+			local sectorTimes
+
+			if this.Driver
+				descriptor.Driver := this.Driver
+
+			if this.LapTime
+				descriptor.LapTime := (Round(this.LapTime, 2) . " Seconds")
+
+			if this.SectorTimes {
+				sectorTimes := collect(this.SectorTimes, (t) => Round(t, 2))
+
+				if first(sectorTimes, (s) => (s != 0))
+					descriptor.SectorTimes := sectorTimes
+			}
+
+			return descriptor
+		}
+	}
+
+	JSON {
+		Get {
+			return JSON.print(this.Descriptor, "  ")
+		}
+	}
+
+	__New(analyzer, name, fileName, lap, data, driver := false, lapTime := false, sectorTimes := false) {
+		local maxG := kUndefined
+		local maxSpeed := kUndefined
+		local ignore, section
+
+		this.iTelemetryAnalyzer := analyzer
+
+		this.iName := name
+		this.iFileName := fileName
+
+		this.iLap := lap
+		this.iData := this.smoothChannels(data, ["Steering"])
+
+		this.iDriver := driver
+		this.iLapTime := lapTime
+
+		if (sectorTimes && (sectorTimes.Length > 0) && first(sectorTimes, (s) => (isNumber(s) && (s != 0))))
+			this.iSectorTimes := sectorTimes
+
+		this.iSections := this.createSections(data)
+
+		for ignore, section in this.Sections {
+			if (maxG == kUndefined)
+				maxG := section.MaxLateralGForce
+			else
+				maxG := Max(section.MaxLateralGForce, maxG)
+
+			if (maxSpeed == kUndefined)
+				maxSpeed := section.MaxSpeed
+			else
+				maxSpeed := Max(section.MaxSpeed, maxSpeed)
+		}
+
+		loop data.Length {
+			this.iMaxGear := Max(this.getValue(A_Index, "Gear", 0), this.iMaxGear)
+			this.iMaxRPM := Max(this.getValue(A_Index, "RPM", 0), this.iMaxRPM)
+		}
+
+		if (maxG != kUndefined) {
+			this.iMaxLateralGForce := maxG
+			this.iMaxSpeed := maxSpeed
+		}
+	}
+
+	smoothChannels(data, channels, window := 5) {
+		local channelHandler := Map()
+		local ignore, channel, entry
+
+		smoothValue(values, value) {
+			values.Push(value)
+
+			while (values.Length > window)
+				values.RemoveAt(1)
+
+			return average(values)
+		}
+
+		data := data.Clone()
+
+		for ignore, channel in channels
+			channelHandler[channel] := [TelemetryAnalyzer.Schema[channel].Indices[1], []]
+
+		for index, entry in data {
+			entry := entry.Clone()
+
+			for channel, handler in channelHandler
+				entry[handler[1]] := smoothValue(handler[2], entry[handler[1]])
+
+			data[index] := entry
+		}
+
+		return data
+	}
+
+	createSections(data) {
+		local trackSections := this.TelemetryAnalyzer.TrackSections
+		local sections := []
+		local lastSection, startIndex, ignore, section
+
+		if (trackSections.Length > 0) {
+			lastSection := trackSections[1]
+			startIndex := TelemetryAnalyzer.getTelemetryCoordinateIndex(data, lastSection.X, lastSection.Y)
+
+			for ignore, section in trackSections {
+				if (A_Index = 1)
+					continue
+
+				index := TelemetryAnalyzer.getTelemetryCoordinateIndex(data, section.X, section.Y)
+
+				if index {
+					if startIndex
+						try {
+							if (lastSection.Type = "Corner")
+								sections.Push(Corner.fromSection(this, lastSection, startIndex, Max(1, index - 1)))
+							else
+								sections.Push(Straight.fromSection(this, lastSection, startIndex, Max(1, index - 1)))
+						}
+						catch Any as exception {
+							logError(exception)
+						}
+
+					startIndex := index
+				}
+
+				lastSection := section
+			}
+		}
+
+		this.iSections := sections
+
+		return sections
+	}
+
+	createBraking() {
+		local braking := []
+		local ignore, section, brake
+
+		for ignore, section in this.Sections
+			if (isInstance(section, Corner) && (section.BrakeCurve.Length > 0)) {
+				brake := section.BrakeCurve[1]
+
+				braking.Push({X: brake.X, Y: brake.Y, Start: brake.Distance, Speed: section.Speed["Braking"]
+							, Length: section.Length["Braking"], Time: brake.Time
+							, MaxSteering: section.MaxSteering, Curve: section.BrakeCurve})
+			}
+
+		return braking
+	}
+
+	createAccelerating() {
+		local accelerating := []
+		local ignore, section, throttle
+
+		for ignore, section in this.Sections
+			if (isInstance(section, Corner) && (section.ThrottleCurve.Length > 0)) {
+				throttle := section.ThrottleCurve[1]
+
+				accelerating.Push({X: throttle.X, Y: throttle.Y, Start: throttle.Distance, Speed: section.Speed["Accelerating"]
+								 , Length: section.Length["Accelerating"], Time: throttle.Time
+								 , MaxSteering: section.MaxSteering, Curve: section.ThrottleCurve})
+			}
+
+		return accelerating
+	}
+
+	findSection(x, y, threshold := 10) {
+		local section := this.TelemetryAnalyzer.findSection(x, y, threshold)
+		local ignore, candidate
+
+		for ignore, candidate in this.Sections
+			if (candidate.TrackSection = section)
+				return candidate
+
+		return false
+	}
+
+	findCoordinates(channel, value, &x, &y, channels*) {
+		local lowIndex := 1
+		local highIndex := this.Data.Length
+		local cIndex, cValue
+
+		while (lowIndex <= highIndex) {
+			cIndex := (lowIndex + Round((highIndex - lowIndex) / 2))
+			cValue := this.getValue(cIndex, channel, kUndefined)
+
+			if (cValue = kUndefined)
+				break
+			else if value < cValue
+				highIndex := cIndex - 1
+			else
+				lowIndex := cIndex + 1
+
+			if (lowIndex > highIndex) {
+				x := this.getValue(cIndex, "PosX")
+				y := this.getValue(cIndex, "PosY")
+
+				for ignore, channel in channels
+					%channel% := this.getValue(cIndex, %channel%)
+
+				return true
+			}
+		}
+
+		return false
+	}
+
+	getValue(index, name, default := kUndefined) {
+		return TelemetryAnalyzer.getValue(this.Data[index], name, default)
+	}
+}
+
+class TelemetryAnalyzer {
+	static WheelTypes := CaseInsenseMap("FrontLeft", "FL", "FrontRight", "FR"
+									  , "RearLeft", "RL", "RearRight", "RR"
+									  , "Front Left", "FL", "Front Right", "FR"
+									  , "Rear Left", "RL", "Rear Right", "RR"
+									  , "FL", "Front Left", "FR", "Front Right"
+									  , "RL", "Rear Left", "RR", "Rear Right"
+									  , "FL", "FL", "FR", "FR", "RL", "RL", "RR", "RR")
+
+	static sSchema := false
+
+	static sTCActivationsThreshold := 20
+	static sABSActivationsThreshold := 30
+	static SteeringSmoothnessThreshold := 90
+	static sThrottleSmoothnessThreshold := 90
+	static sBrakeSmoothnessThreshold := 90
+
+	iSimulator := false
+	iTrack := false
+
+	iTrackMap := false
+	iTrackSections := []
+
+	static Schema {
+		Get {
+			return TelemetryAnalyzer.sSchema
+		}
+	}
+
+	Schema {
+		Get {
+			return TelemetryAnalyzer.Schema
+		}
+	}
+
+	Simulator {
+		Get {
+			return this.iSimulator
+		}
+	}
+
+	Track {
+		Get {
+			return this.iTrack
+		}
+	}
+
+	TrackMap {
+		Get {
+			if !this.iTrackMap
+				this.iTrackMap := SessionDatabase().getTrackMap(this.Simulator, this.Track)
+
+			return this.iTrackMap
+		}
+	}
+
+	TrackSections {
+		Get {
+			if ((this.iTrackSections.Length = 0) && this.TrackMap)
+				this.iTrackSections := this.createTrackSections()
+
+			return this.iTrackSections
+		}
+	}
+
+	static TCActivationsThreshold {
+		Get {
+			return TelemetryAnalyzer.sTCActivationsThreshold
+		}
+
+		Set {
+			return (TelemetryAnalyzer.sTCActivationsThreshold := value)
+		}
+	}
+
+	static ABSActivationsThreshold {
+		Get {
+			return TelemetryAnalyzer.sABSActivationsThreshold
+		}
+
+		Set {
+			return (TelemetryAnalyzer.sABSActivationsThreshold := value)
+		}
+	}
+
+	static SteeringSmoothnessThreshold {
+		Get {
+			return TelemetryAnalyzer.sSteeringSmoothnessThreshold
+		}
+
+		Set {
+			return (TelemetryAnalyzer.sSteeringSmoothnessThreshold := value)
+		}
+	}
+
+	static ThrottleSmoothnessThreshold {
+		Get {
+			return TelemetryAnalyzer.sThrottleSmoothnessThreshold
+		}
+
+		Set {
+			return (TelemetryAnalyzer.sThrottleSmoothnessThreshold := value)
+		}
+	}
+
+	static BrakeSmoothnessThreshold {
+		Get {
+			return TelemetryAnalyzer.sBrakeSmoothnessThreshold
+		}
+
+		Set {
+			return (TelemetryAnalyzer.sBrakeSmoothnessThreshold := value)
+		}
+	}
+
+	__New(simulator, track) {
+		local sessionDB := SessionDatabase()
+
+		if !TelemetryAnalyzer.Schema
+			TelemetryAnalyzer.sSchema := this.createTelemetrySchema()
+
+		this.iSimulator := simulator
+		this.iTrack := track
+		this.iTrackMap := sessionDB.getTrackMap(simulator, track)
+	}
+
+	static getTrackCoordinateIndex(trackMap, x, y, threshold := 5) {
+		local index := false
+		local candidateX, candidateY, deltaX, deltaY, coordX, coordY, dX, dY
+
+		if trackMap {
+			candidateX := kUndefined
+			candidateY := false
+			deltaX := false
+			deltaY := false
+
+			loop getMultiMapValue(trackMap, "Map", "Points") {
+				coordX := getMultiMapValue(trackMap, "Points", A_Index . ".X")
+				coordY := getMultiMapValue(trackMap, "Points", A_Index . ".Y")
+
+				dX := Abs(coordX - x)
+				dY := Abs(coordY - y)
+
+				if ((dX <= threshold) && (dY <= threshold) && ((candidateX == kUndefined) || ((dx + dy) < (deltaX + deltaY)))) {
+					candidateX := coordX
+					candidateY := coordY
+					deltaX := dX
+					deltaY := dY
+
+					index := A_Index
+				}
+			}
+
+			return index
+		}
+		else
+			return false
+	}
+
+	static getTelemetryCoordinateIndex(data, x, y, threshold := 25) {
+		local index := false
+		local candidateX := kUndefined
+		local candidateY := false
+		local deltaX := false
+		local deltaY := false
+		local coordX, coordY, dX, dY, ignore, entry
+
+		static posXIndex := TelemetryAnalyzer.Schema["PosX"].Indices[1]
+		static posYIndex := TelemetryAnalyzer.Schema["PosY"].Indices[1]
+
+		if isInstance(data, Telemetry)
+			data := data.Data
+
+		for ignore, entry in data
+			if entry.Has(posXIndex) {
+				coordX := entry[posXIndex]
+				coordY := entry[posYIndex]
+
+				if isNumber(coordX) {
+					dX := Abs(coordX - x)
+					dY := Abs(coordY - y)
+
+					if ((dX <= threshold) && (dY <= threshold) && ((candidateX == kUndefined) || ((dx + dy) < (deltaX + deltaY)))) {
+						candidateX := coordX
+						candidateY := coordY
+						deltaX := dX
+						deltaY := dY
+
+						index := A_Index
+					}
+				}
+				else
+					return false
+			}
+			else
+				return false
+
+		return index
+	}
+
+	getSectionCoordinateIndex(section, &x, &y, &index, offset := 0, threshold := 25) {
+		local trackMap := this.TrackMap
+		local distance := 0
+		local absOffset := Abs(offset)
+		local points, nextX, nextY
+
+		if trackMap {
+			points := getMultiMapValue(trackMap, "Map", "Points")
+
+			x := section.X
+			y := section.Y
+			index := section.Index
+
+			loop {
+				nextX := getMultiMapValue(trackMap, "Points", index . ".X")
+				nextY := getMultiMapValue(trackMap, "Points", index . ".Y")
+
+				distance += Sqrt(((nextX - x) ** 2) + ((nextY - y) ** 2))
+
+				x := nextX
+				y := nextY
+
+				if ((absOffset - distance) <= threshold)
+					break
+
+				if (offset < 0) {
+					if (index = 1)
+						index := points
+					else
+						index -= 1
+				}
+				else {
+					if (index = points)
+						index := 1
+					else
+						index += 1
+				}
+			}
+
+			return true
+		}
+		else
+			return false
+	}
+
+	findTrackRange(telemetry, posX, posY, distance, &startIndex, &endIndex) {
+		local pIndex, pDistance, sDistance, eDistance, data, length
+
+		try {
+			data := telemetry.Data
+			length := data.Length
+
+			pIndex := TelemetryAnalyzer.getTelemetryCoordinateIndex(data, posX, posY)
+			pDistance := telemetry.getValue(pIndex, "Distance")
+
+			sDistance := (pDistance - distance)
+			eDistance := (pDistance + distance)
+
+			loop {
+				if ((pIndex - A_Index <= 1)
+				 || (telemetry.getValue(pIndex - A_Index, "Distance") <= sDistance)) {
+					startIndex := pIndex - A_Index
+
+					break
+				}
+			}
+
+			loop {
+				if ((pIndex + A_Index >= length)
+				 || (telemetry.getValue(pIndex + A_Index, "Distance") >= eDistance)) {
+					endIndex := pIndex + A_Index
+
+					break
+				}
+			}
+
+			startIndex := Max(1, startIndex)
+			endIndex := Min(endIndex, telemetry.Data.Length)
+
+			return true
+		}
+		catch Any as exception {
+			logError(exception)
+
+			return false
+		}
+	}
+
+	findSection(x, y, threshold := 10) {
+		local trackMap := this.TrackMap
+		local lastSection := false
+		local ignore, section, points, sX, sY, distance
+
+		if trackMap {
+			points := getMultiMapValue(trackMap, "Map", "Points")
+
+			for ignore, section in this.TrackSections
+				if !lastSection
+					lastSection := section
+				else {
+					index := lastSection.Index
+
+					while (index < section.Index) {
+						distance := Sqrt(((getMultiMapValue(trackMap, "Points", index . ".X") - x) ** 2)
+									   + ((getMultiMapValue(trackMap, "Points", index . ".Y") - y) ** 2))
+
+						if (distance <= threshold)
+							return lastSection
+
+						index += 1
+					}
+
+					lastSection := section
+				}
+
+			if lastSection
+				return lastSection
+		}
+
+		return false
+	}
+
+	static getValue(data, name, default?) {
+		local channel := TelemetryAnalyzer.Schema[name]
+		local index, value
+
+		if channel.HasProp("Function") {
+			value := channel.Function.Call(data)
+
+			if ((value = kNull) && isSet(default))
+				return default
+			else
+				return value
+		}
+		else {
+			index := channel.Indices[1]
+
+			if data.Has(index) {
+				value := data[index]
+
+				if channel.HasProp("Converter")
+					value := channel.Converter[1](value)
+
+				return value
+			}
+
+			return (isSet(default) ? default : kNull)
+		}
+	}
+
+	loadData(fileName) {
+		local data := []
+		local entry
+
+		loop Read, fileName {
+			entry := string2Values(";", A_LoopReadLine)
+
+			for index, value in entry {
+				if (InStr(value, ":")) {
+					value := string2Values(":", value)
+
+					value := ((value[1] * 60000) + (StrReplace(value[2], ",", ".") * 1000))
+				}
+
+				if !isNumber(value)
+					entry[index] := kNull
+			}
+
+			data.Push(entry)
+		}
+
+		return data
+	}
+
+	requireTrackSections(telemetry) {
+		local trackMap := this.TrackMap
+		local index, section
+
+		if (trackMap && (this.TrackSections.Length = 0)) {
+			this.iTrackSections := this.findTrackSections(telemetry)
+
+			for index, section in this.TrackSections {
+				setMultiMapValue(trackMap, "Sections", index . ".Index", section.Index)
+				setMultiMapValue(trackMap, "Sections", index . ".Nr", section.Nr)
+				setMultiMapValue(trackMap, "Sections", index . ".Type", section.Type)
+				setMultiMapValue(trackMap, "Sections", index . ".Active", section.Active)
+				setMultiMapValue(trackMap, "Sections", index . ".X", section.X)
+				setMultiMapValue(trackMap, "Sections", index . ".Y", section.Y)
+
+				if (section.HasProp("Name") && (Trim(section.Name) != ""))
+					setMultiMapValue(trackMap, "Sections", index . ".Name", section.Name)
+			}
+		}
+	}
+
+	findTrackSections(telemetry) {
+		local trackMap := this.TrackMap
+		local sections := []
+		local count := (trackMap ? getMultiMapValue(trackMap, "Map", "Points") : 0)
+		local index := 1
+		local phase := "Find"
+		local cornerNr := 1
+		local straightNr := 1
+		local startIndex := false
+		local startX, startY, telemetryIndex
+
+		loop {
+			if (index > count)
+				break
+
+			x := getMultiMapValue(trackMap, "Points", index . ".X", 0)
+			y := getMultiMapValue(trackMap, "Points", index . ".Y", 0)
+
+			telemetryIndex := TelemetryAnalyzer.getTelemetryCoordinateIndex(telemetry.Data, x, y)
+
+			if telemetryIndex
+				if ((phase = "Find") || (phase = "Straight")) {
+					if (TelemetryAnalyzer.getValue(telemetry.Data[telemetryIndex], "Brake", 0) > 0) {
+						if (phase = "Straight")
+							sections.Push({Type: "Straight", Active: true, Nr: straightNr++, Index: startIndex, X: startX, Y: startY})
+
+						phase := "Entry"
+						index := Max(1, startIndex + 5, index - 10)
+
+						startIndex := index
+						startX := getMultiMapValue(trackMap, "Points", index . ".X", 0)
+						startY := getMultiMapValue(trackMap, "Points", index . ".Y", 0)
+					}
+				}
+				else if (phase = "Entry") {
+					if (TelemetryAnalyzer.getValue(telemetry.Data[telemetryIndex], "Brake", 0) > 0.3)
+						phase := "Exit"
+				}
+				else if (phase = "Exit") {
+					if (TelemetryAnalyzer.getValue(telemetry.Data[telemetryIndex], "Throttle", 0) = 1.0) {
+						sections.Push({Type: "Corner", Active: true, Nr: cornerNr++, Index: startIndex, X: startX, Y: startY})
+
+						phase := "Straight"
+
+						index := Min(count, index + 10)
+
+						startIndex := index
+						startX := getMultiMapValue(trackMap, "Points", index . ".X", 0)
+						startY := getMultiMapValue(trackMap, "Points", index . ".Y", 0)
+					}
+				}
+
+			index += 1
+		}
+
+		for index, section in sections
+			section.Length := computeSectionLength(trackMap, sections, index, section)
+
+		return sections
+	}
+
+	createTrackSections() {
+		local trackMap := this.TrackMap
+		local straights := 0
+		local corners := 0
+		local sections := []
+		local index, section
+
+		if trackMap {
+			loop getMultiMapValue(trackMap, "Sections", "Count") {
+				sections.Push({Nr: getMultiMapValue(trackMap, "Sections", A_Index . ".Nr")
+							 , Type: getMultiMapValue(trackMap, "Sections", A_Index . ".Type")
+							 , Active: getMultiMapValue(trackMap, "Sections", A_Index . ".Active")
+							 , Index: getMultiMapValue(trackMap, "Sections", A_Index . ".Index")
+							 , X: getMultiMapValue(trackMap, "Sections", A_Index . ".X")
+							 , Y: getMultiMapValue(trackMap, "Sections", A_Index . ".Y")})
+
+				if hasMultiMapValue(trackMap, "Sections", A_Index . ".Name")
+					sections[A_Index].Name := getMultiMapValue(trackMap, "Sections", A_Index . ".Name")
+			}
+
+			for index, section in sections
+				section.Length := computeSectionLength(trackMap, sections, index, section)
+		}
+
+		return sections
+	}
+
+	createTelemetrySchema() {
+		local schema := CaseInsenseMap()
+		local ignore, channel
+
+		for ignore, channel in kTelemetryChannels
+			if (channel.Indices.Length = 1)
+				schema[channel.Name] := channel
+
+		return schema
+	}
+
+	createTelemetry(lap, fileName, driver := false, lapTime := false, sectorTimes := false) {
+		local name
+
+		SplitPath(fileName, , , , &name)
+
+		return Telemetry(this, name, fileName, lap, this.loadData(fileName), driver, lapTime, sectorTimes)
+	}
+
+	analyzeHandling(telemetries, steerLock, steerRatio, wheelBase, trackWidth, thresholds := false) {
+		local MAXVALUES := 6
+		local PI := 3.14159265
+		local wheelBaseMeter := (wheelbase / 100)
+		local accelerations := []
+		local yawRates := []
+		local idealYawRates := []
+		local cornerDynamics := []
+		local issues := newMultiMap()
+		local lastSpeed := kUndefined
+		local slowCount := 0
+		local fastCount := 0
+		local injectOversteer := !inList(["RF2", "LMU"], SessionDatabase.getSimulatorCode(this.Simulator))
+		local type, speed, severity, where, count, phase, key
+		local yawRate, steerAngle, speed, acceleration, accAverage, accCount, slip
+		local steerAngleRadians, radius, perimeter, perimeterSpeed, idealYawRate
+		local ignore, theTelemetry, corner
+
+		pushValue(values, value) {
+			values.Push(value)
+
+            if (values.Length > MAXVALUES)
+                values.RemoveAt(1)
+		}
+
+		averageValue(values, &count) {
+            local summary := sum(values)
+
+            count := values.Length
+
+            return ((count > 0) ? (summary / count) : 0)
+        }
+
+        smoothValue(values, value) {
+			local ignore
+
+			if false {
+				pushValue(values, value)
+
+				return averageValue(values, &ignore)
+			}
+			else
+				return value
+        }
+
+		if !thresholds
+			thresholds := {LowSpeed: 120
+						 , HeavyOversteer: -100, MediumOversteer: -70, LightOversteer: -40
+						 , HeavyUndersteer: 100, MediumUndersteer: 70, LightUndersteer: 40}
+
+		if isInstance(telemetries, Telemetry)
+			telemetries := [telemetries]
+
+		for ignore, theTelemetry in telemetries
+			loop theTelemetry.Data.Length {
+				yawRate := theTelemetry.getValue(A_Index, "YawRate")
+
+				if isNumber(yawRate) {
+					steerAngle := theTelemetry.getValue(A_Index, "Steering")
+					speed := theTelemetry.getValue(A_Index, "Speed")
+					acceleration := ((lastSpeed == kUndefined) ? 0 : (speed - lastSpeed))
+
+					lastSpeed := speed
+
+					pushValue(accelerations, acceleration)
+
+					yawRate := smoothValue(yawRates, yawRate)
+					steerAngleRadians := (- (((steerAngle * steerLock) / 2) / steerRatio) / 57.2958)
+					radius := (wheelBaseMeter / steerAngleRadians)
+					perimeter := (radius * PI * 2)
+					perimeterSpeed := (lastSpeed / 3.6)
+					idealYawRate := smoothValue(idealYawRates, perimeterSpeed / perimeter * 2 * PI)
+
+					if ((Abs(steerAngle) > 0.2) && (speed > 60)) {
+						accAverage := averageValue(accelerations, &accCount)
+						phase := "Apex"
+
+						if (accCount > 0)
+							if (accAverage < -0.2)
+								phase := "Entry"
+							else if (accAverage > 0.1)
+								phase := "Exit"
+
+						if (Abs(yawRate * 57.2958) > 0.1) {
+							slip := Abs(idealYawRate - yawRate)
+
+							if (steerAngle > 0) {
+								if (yawRate > 0) {
+									if injectOversteer
+										slip := ((thresholds.HeavyOversteer - 1) / 57.2989)
+									else
+										slip *= -1
+								}
+								else if (yawRate < idealYawRate)
+									slip *= -1
+							}
+							else {
+								if (yawRate < 0) {
+									if injectOversteer
+										slip := ((thresholds.HeavyOversteer - 1) / 57.2989)
+									else
+										slip *= -1
+								}
+								else if (yawRate > idealYawRate)
+									slip *= -1
+							}
+
+							if (slip != 0)
+								cornerDynamics.Push({Speed: speed, UsOs: (slip * 57.2989 * 1), Phase: phase})
+						}
+					}
+				}
+			}
+
+		for ignore, corner in cornerDynamics {
+			phase := corner.Phase
+
+			if (corner.Speed < thresholds.LowSpeed) {
+				slowCount += 1
+
+				if (corner.UsOs < thresholds.HeavyOversteer)
+					setMultiMapValue(issues, "Oversteer.Slow.Heavy", phase
+										   , getMultiMapValue(issues, "Oversteer.Slow.Heavy", phase, 0) + 1)
+				else if (corner.UsOs < thresholds.MediumOversteer)
+					setMultiMapValue(issues, "Oversteer.Slow.Medium", phase
+										   , getMultiMapValue(issues, "Oversteer.Slow.Medium", phase, 0) + 1)
+				else if (corner.UsOs < thresholds.LightOversteer)
+					setMultiMapValue(issues, "Oversteer.Slow.Light", phase
+										   , getMultiMapValue(issues, "Oversteer.Slow.Light", phase, 0) + 1)
+				else if (corner.UsOs > thresholds.HeavyUndersteer)
+					setMultiMapValue(issues, "Understeer.Slow.Heavy", phase
+										   , getMultiMapValue(issues, "Understeer.Slow.Heavy", phase, 0) + 1)
+				else if (corner.UsOs > thresholds.MediumUndersteer)
+					setMultiMapValue(issues, "Understeer.Slow.Medium", phase
+										   , getMultiMapValue(issues, "Understeer.Slow.Medium", phase, 0) + 1)
+				else if (corner.UsOs > thresholds.LightUndersteer)
+					setMultiMapValue(issues, "Understeer.Slow.Light", phase
+										   , getMultiMapValue(issues, "Understeer.Slow.Light", phase, 0) + 1)
+			}
+			else {
+				fastCount += 1
+
+				if (corner.UsOs < thresholds.HeavyOversteer)
+					setMultiMapValue(issues, "Oversteer.Fast.Heavy", phase
+										   , getMultiMapValue(issues, "Oversteer.Fast.Heavy", phase, 0) + 1)
+				else if (corner.UsOs < thresholds.MediumOversteer)
+					setMultiMapValue(issues, "Oversteer.Fast.Medium", phase
+										   , getMultiMapValue(issues, "Oversteer.Fast.Medium", phase, 0) + 1)
+				else if (corner.UsOs < thresholds.LightOversteer)
+					setMultiMapValue(issues, "Oversteer.Fast.Light", phase
+										   , getMultiMapValue(issues, "Oversteer.Fast.Light", phase, 0) + 1)
+				else if (corner.UsOs > thresholds.HeavyUndersteer)
+					setMultiMapValue(issues, "Understeer.Fast.Heavy", phase
+										   , getMultiMapValue(issues, "Understeer.Fast.Heavy", phase, 0) + 1)
+				else if (corner.UsOs > thresholds.MediumUndersteer)
+					setMultiMapValue(issues, "Understeer.Fast.Medium", phase
+										   , getMultiMapValue(issues, "Understeer.Fast.Medium", phase, 0) + 1)
+				else if (corner.UsOs > thresholds.LightUndersteer)
+					setMultiMapValue(issues, "Understeer.Fast.Light", phase
+										   , getMultiMapValue(issues, "Understeer.Fast.Light", phase, 0) + 1)
+			}
+		}
+
+		for ignore, type in ["Oversteer", "Understeer"]
+			for ignore, speed in ["Slow", "Fast"] {
+				count := ((speed = "Slow") ? slowCount : fastCount)
+
+				if (count > 0)
+					for ignore, severity in ["Heavy", "Medium", "Light"] {
+						key := (type . "." . speed . "." . severity)
+
+						for ignore, where in ["Entry", "Apex", "Exit"]
+							setMultiMapValue(issues, key, where
+										   , Round(100 * getMultiMapValue(issues, key, where, 0) / count))
+					}
+			}
+
+		return issues
+	}
+
+	analyzeSuspension(telemetries, duration, gap
+					, samples, deflectionAverage, accelerationAverage
+					, thresholds := false) {
+		local deflections := []
+		local flAverage := MovingAverage(deflectionAverage)
+		local frAverage := MovingAverage(deflectionAverage)
+		local rlAverage := MovingAverage(deflectionAverage)
+		local rrAverage := MovingAverage(deflectionAverage)
+		local time, flAccelerations, frAccelerations, rlAccelerations, rrAccelerations, bottomOuts
+		local ignore, theTelemetry, deflectionFL, bottomOuts
+
+		computeAccelerations(type, deflections) {
+			local accelerations := []
+			local accAverage := MovingAverage(accelerationAverage)
+			local length := deflections.Length
+			local ignore, deflection
+
+			calculateAcceleration(lastTime, lastDeflection, time, deflection, nextTime, nextDeflection) {
+				local dt1 := (time - lastTime)
+				local dt2 := (nextTime - time)
+				local term1, term2
+
+				if ((dt1 <= 0) || (dt2 <= 0))
+					return 0
+
+				term1 := ((nextDeflection - deflection) / dt2)
+				term2 := ((deflection - lastDeflection) / dt1)
+
+				return (2 * (term1 - term2) / ((dt1 + dt2) / 1000))
+			}
+
+			loop length
+				if ((A_Index > 1) && (A_Index < length))
+					accelerations.Push(Values(accAverage.Add(calculateAcceleration(deflections[A_Index - 1].Time
+																				 , deflections[A_Index - 1].%type%
+																				 , deflections[A_Index].Time
+																				 , deflections[A_Index].%type%
+																				 , deflections[A_Index + 1].Time
+																				 , deflections[A_Index + 1].%type%))
+											, deflections[A_Index].%type%))
+
+			if (accelerations.Length > 0) {
+				accelerations.Push(accelerations[accelerations.Length])
+				accelerations.InsertAt(1, accelerations[1])
+			}
+
+			return accelerations
+		}
+
+		computeBottomOuts(axle, leftAccelerations, rightAccelerations) {
+			local events := []
+			local event := false
+			local leftMagnitude, rightMagnitude, startTime, endTime
+
+			mergeCloseEvents(events) {
+				local merged := []
+				local event
+
+				if (events.Length <= 1)
+					return events
+
+				event := events[1].Clone()
+
+				loop events.Length
+					if (A_Index > 1) {
+						if ((events[A_Index].Start - event.End) < gap) {
+							event.End := events[A_Index].End
+							event.Values := concatenate(event.Values, events[A_Index].Values)
+							event.Acceleration := Max(event.Values*)
+						}
+						else {
+							merged.Push(event)
+
+							event := events[A_Index].Clone()
+						}
+					}
+
+				merged.Push(event)
+
+				return merged
+			}
+
+			loop leftAccelerations.Length {
+				leftMagnitude := Abs(leftAccelerations[A_Index][1])
+				rightMagnitude := Abs(rightAccelerations[A_Index][1])
+
+				if ((leftAccelerations[A_Index][1] < 0) && (rightAccelerations[A_Index][1] < 0)
+				 && ((leftMagnitude >= (thresholds.LightBottomOut - 1)) || (rightMagnitude >= (thresholds.LightBottomOut - 1))
+				  || (event && ((Abs(leftAccelerations[A_Index][2] - leftAccelerations[event.Index][2]) < thresholds.Release) ||
+								(Abs(rightAccelerations[A_Index][2] - rightAccelerations[event.Index][2]) < thresholds.Release))))) {
+					if !event
+						event := {Index: A_Index, Axle: axle, Acceleration: 0, Values: []}
+
+					event.Values.Push(Max(leftMagnitude, rightMagnitude))
+				}
+				else {
+					if event {
+						if ((A_Index - event.Index) >= samples) {
+							startTime := deflections[event.Index].Time
+							endTime := deflections[A_Index].Time
+
+							if ((endTime - startTime) > duration) {
+								event.Start := startTime
+								event.End := endTime
+								event.Acceleration := Max(event.Values*)
+
+								events.Push(event)
+							}
+						}
+
+						event := false
+					}
+				}
+			}
+
+			if (event && (event.Values.Length >= samples)) {
+				startTime := deflections[event.Index].Time
+				endTime := deflections[deflections.Length].Time
+
+				event.Start := startTime
+				event.End := endTime
+				event.Acceleration := Max(event.Values*)
+
+				events.Push(event)
+			}
+
+			return mergeCloseEvents(events)
+		}
+
+		createIssues(bottomOuts) {
+			local issues := newMultiMap()
+			local frontCount := 0
+			local rearCount := 0
+			local ignore, type, severity, key, count
+
+			do(bottomOuts, (bottomOut) {
+				setMultiMapValue(issues, "Suspension.Bottom.Out." . bottomOut.Severity, bottomOut.Axle
+							   , getMultiMapValue(issues, "Suspension.Bottom.Out." . bottomOut.Severity
+														, bottomOut.Axle, 0) + 1)
+
+				if (bottomOut.Axle = "Front")
+					frontCount += 1
+				else
+					rearCount += 1
+			})
+
+			/*
+			for ignore, type in ["Suspension.Bottom.Out"]
+				for ignore, severity in ["Heavy", "Medium", "Light"] {
+					key := (type . "." . severity)
+
+					for ignore, where in ["Front", "Rear"] {
+						count := ((where = "Front") ? frontCount : rearCount)
+
+						if (count > 0)
+							setMultiMapValue(issues, key, where
+										   , Round(100 * getMultiMapValue(issues, key, where, 0) / count))
+					}
+				}
+			*/
+
+			return issues
+		}
+
+		if !thresholds
+			thresholds := {LightBottomOut: 5, MediumBottomOut: 10, HeavyBottomOut: 15, Release: 0.2}
+
+		if isInstance(telemetries, Telemetry)
+			telemetries := [telemetries]
+
+		for ignore, theTelemetry in telemetries
+			loop theTelemetry.Data.Length {
+				time := theTelemetry.getValue(A_Index, "Time")
+				deflectionFL := theTelemetry.getValue(A_Index, "SuspDefl FL")
+
+				if ((deflectionFL != kUndefined) && (time != kUndefined))
+					deflections.Push({Time: time
+									, FrontLeft: flAverage.Add(deflectionFL) * 1000
+									, FrontRight: frAverage.Add(theTelemetry.getValue(A_Index, "SuspDefl FR")) * 1000
+									, RearLeft: rlAverage.Add(theTelemetry.getValue(A_Index, "SuspDefl RL")) * 1000
+									, RearRight: rrAverage.Add(theTelemetry.getValue(A_Index, "SuspDefl RR")) * 1000})
+			}
+
+		flAccelerations := computeAccelerations("FrontLeft", deflections)
+		frAccelerations := computeAccelerations("FrontRight", deflections)
+		rlAccelerations := computeAccelerations("RearLeft", deflections)
+		rrAccelerations := computeAccelerations("RearRight", deflections)
+
+		bottomOuts := concatenate(computeBottomOuts("Front", flAccelerations, frAccelerations)
+								, computeBottomOuts("Rear", rlAccelerations, rrAccelerations))
+
+		do(bottomOuts, (bottomOut) {
+			if (bottomOut.Acceleration >= thresholds.HeavyBottomOut)
+				bottomOut.Severity := "Heavy"
+			else if (bottomOut.Acceleration >= thresholds.MediumBottomOut)
+				bottomOut.Severity := "Medium"
+			else
+				bottomOut.Severity := "Light"
+		})
+
+		return createIssues(bottomOuts)
+	}
+
+	static computeSuspensionDeflections(telemetry, wheel, startIndex?, endIndex?) {
+		local deflections := []
+		local deflAverage := MovingAverage(5)
+		local deflection
+
+		if telemetry {
+			wheel := TelemetryAnalyzer.WheelTypes[wheel]
+
+			if !isSet(startIndex) {
+				startIndex := 1
+				endIndex := telemetry.Data.Length
+			}
+
+			loop telemetry.Data.Length
+				if ((A_Index >= startIndex) && (A_Index <= endIndex)) {
+					deflection := telemetry.getValue(A_Index, "SuspDefl " . wheel)
+
+					if (deflection != kUndefined)
+						deflections.Push(deflAverage.Add(deflection * 1000))
+					else {
+						deflections := []
+
+						break
+					}
+				}
+		}
+
+		return deflections
+	}
+
+	static computeSuspensionSpeeds(telemetry, wheel, startIndex?, endIndex?) {
+		local deflections := []
+		local deflAverage := MovingAverage(5)
+		local time, deflection
+
+		computeSpeeds(deflections) {
+			local speeds := []
+			local speedAverage := MovingAverage(2)
+
+			calculateSpeed(lastTime, lastDeflection, time, deflection) {
+				local dt
+
+				try {
+					dt := (time - lastTime)
+
+					return ((dt > 0) ? speedAverage.Add((deflection - lastDeflection) * 1000 / dt) : 0)
+				}
+				catch Any as exception {
+					logError(exception)
+
+					return 0
+				}
+			}
+
+			loop deflections.Length
+				if (A_Index > 1)
+					speeds.Push(calculateSpeed(deflections[A_Index - 1].Time, deflections[A_Index - 1].Deflection
+											 , deflections[A_Index].Time, deflections[A_Index].Deflection))
+
+			if (speeds.Length > 1)
+				speeds.InsertAt(1, speeds[1])
+
+			return speeds
+		}
+
+		if telemetry {
+			wheel := TelemetryAnalyzer.WheelTypes[wheel]
+
+			if !isSet(startIndex) {
+				startIndex := 1
+				endIndex := telemetry.Data.Length
+			}
+
+			loop telemetry.Data.Length
+				if ((A_Index >= startIndex) && (A_Index <= endIndex)) {
+					time := telemetry.getValue(A_Index, "Time")
+					deflection := telemetry.getValue(A_Index, "SuspDefl " . wheel)
+
+					if ((deflection != kUndefined) && (time != kUndefined))
+						deflections.Push({Time: time, Deflection: deflAverage.Add(deflection) * 1000})
+					else {
+						deflections := []
+
+						break
+					}
+				}
+		}
+
+		return computeSpeeds(deflections)
+	}
+
+	static computeSuspensionAccelerations(telemetry, wheel, startIndex?, endIndex?) {
+		local deflections := []
+		local deflAverage := MovingAverage(5)
+		local time, deflection
+
+		computeAccelerations(deflections) {
+			local accelerations := []
+			local accAverage := MovingAverage(5)
+			local length := deflections.Length
+			local ignore, deflection
+
+			calculateAcceleration(lastTime, lastDeflection, time, deflection, nextTime, nextDeflection) {
+				local dt1 := (time - lastTime)
+				local dt2 := (nextTime - time)
+				local term1, term2
+
+				if ((dt1 <= 0) || (dt2 <= 0))
+					return 0
+
+				term1 := ((nextDeflection - deflection) / dt2)
+				term2 := ((deflection - lastDeflection) / dt1)
+
+				return (2 * (term1 - term2) / ((dt1 + dt2) / 1000))
+			}
+
+			loop length
+				if ((A_Index > 1) && (A_Index < length))
+					accelerations.Push(accAverage.Add(calculateAcceleration(deflections[A_Index - 1].Time
+																		  , deflections[A_Index - 1].Deflection
+																		  , deflections[A_Index].Time
+																		  , deflections[A_Index].Deflection
+																		  , deflections[A_Index + 1].Time
+																		  , deflections[A_Index + 1].Deflection)))
+
+			if (accelerations.Length > 0) {
+				accelerations.Push(accelerations[accelerations.Length])
+				accelerations.InsertAt(1, accelerations[1])
+			}
+
+			return accelerations
+		}
+
+		if telemetry {
+			wheel := TelemetryAnalyzer.WheelTypes[wheel]
+
+			if !isSet(startIndex) {
+				startIndex := 1
+				endIndex := telemetry.Data.Length
+			}
+
+			loop telemetry.Data.Length
+				if ((A_Index >= startIndex) && (A_Index <= endIndex)) {
+					time := telemetry.getValue(A_Index, "Time")
+					deflection := telemetry.getValue(A_Index, "SuspDefl " . wheel)
+
+					if ((deflection != kUndefined) && (time != kUndefined))
+						deflections.Push({Time: time, Deflection: deflAverage.Add(deflection) * 1000})
+					else {
+						deflections := []
+
+						break
+					}
+				}
+		}
+
+		return computeAccelerations(deflections)
+	}
+
+	static computeSuspensionSpeedDeltas(telemetry, wheel, startIndex?, endIndex?) {
+		local deflections := []
+		local deflAverage := MovingAverage(5)
+		local time, deflection
+
+		computeSpeeds(deflections) {
+			local speeds := []
+			local speedAverage := MovingAverage(2)
+
+			calculateSpeed(lastTime, lastDeflection, time, deflection) {
+				local dt
+
+				try {
+					dt := (time - lastTime)
+
+					return {Speed: ((dt > 0) ? speedAverage.Add((deflection - lastDeflection) * 1000 / dt) : 0), Delta: dt}
+				}
+				catch Any as exception {
+					logError(exception)
+
+					return {Speed: 0, Delta: 0}
+				}
+			}
+
+			loop deflections.Length
+				if (A_Index > 1)
+					speeds.Push(calculateSpeed(deflections[A_Index - 1].Time, deflections[A_Index - 1].Deflection
+											 , deflections[A_Index].Time, deflections[A_Index].Deflection))
+
+			if (speeds.Length > 1)
+				speeds.InsertAt(1, speeds[1])
+
+			return speeds
+		}
+
+		if telemetry {
+			wheel := TelemetryAnalyzer.WheelTypes[wheel]
+
+			if !isSet(startIndex) {
+				startIndex := 1
+				endIndex := telemetry.Data.Length
+			}
+
+			loop telemetry.Data.Length
+				if ((A_Index >= startIndex) && (A_Index <= endIndex)) {
+					time := telemetry.getValue(A_Index, "Time")
+					deflection := telemetry.getValue(A_Index, "SuspDefl " . wheel)
+
+					if ((deflection != kUndefined) && (time != kUndefined))
+						deflections.Push({Time: time, Deflection: deflAverage.Add(deflection) * 1000})
+					else {
+						deflections := []
+
+						break
+					}
+				}
+		}
+
+		return computeSpeeds(deflections)
+	}
+
+	static computeMovementDistribution(speeds, binCount, &maxTime?, &maxSpeed?, &maxCount?, &sumCount?) {
+		local counts := []
+
+		binCount := ((2 * binCount) + 1)
+
+		maxTime := 0
+		maxSpeed := 0
+		maxCount := 0
+		sumCount := 0
+
+		loop binCount
+			counts.Push(0)
+
+		do(speeds, (s) {
+			maxTime := Max(maxTime, s.Delta)
+			maxSpeed := Max(maxSpeed, Abs(s.Speed))
+		})
+
+		if (maxSpeed != 0) {
+			do(speeds, (s) {
+				local speed := (s.Speed / maxSpeed)
+
+				counts[Min(binCount, Max(1, Round((speed + 1) * Round(binCount / 2, 1))))] += 1
+			})
+		}
+
+		do(counts, (c) {
+			maxCount := Max(maxCount, c)
+			sumCount += c
+		})
+
+		return counts
+	}
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Private Function Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+computeSectionLength(trackMap, sections, index, section) {
+	local next := ((index = sections.Length) ? 1 : (index + 1))
+	local distance := 0
+	local count := getMultiMapValue(trackMap, "Map", "Points", 0)
+	local lastX, lastY, nextX, nextY
+
+	index := TelemetryAnalyzer.getTrackCoordinateIndex(trackMap, sections[index].X, sections[index].Y)
+	next := TelemetryAnalyzer.getTrackCoordinateIndex(trackMap, sections[next].X, sections[next].Y)
+
+	if (index && next) {
+		lastX := getMultiMapValue(trackMap, "Points", index . ".X", 0)
+		lastY := getMultiMapValue(trackMap, "Points", index . ".Y", 0)
+
+		index += 1
+
+		loop
+			if (index = next)
+				break
+			else if (index > count)
+				index := 1
+			else {
+				nextX := getMultiMapValue(trackMap, "Points", index . ".X", 0)
+				nextY := getMultiMapValue(trackMap, "Points", index . ".Y", 0)
+
+				distance += Sqrt(((nextX - lastX) ** 2) + ((nextY - lastY) ** 2))
+
+				lastX := nextX
+				lastY := nextY
+
+				index += 1
+			}
+		}
+
+	return Round(convertUnit("Length", distance))
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Public Function Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+nullZero(value) {
+	return ((isNull(value) || (value = "n/a")) ? 0 : value)
+}
+
+nullRound(value, precision := 0) {
+	if isNumber(value)
+		return Round(value, precision)
+	else
+		return value
+}

@@ -1,0 +1,77 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Settings Editor                 ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Global Declaration Section                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;@SC-IF %configuration% == Development
+#Include "..\Framework\Development.ahk"
+;@SC-EndIF
+
+;@SC-If %configuration% == Production
+;@SC #Include "..\Framework\Production.ahk"
+;@SC-EndIf
+
+;@Ahk2Exe-SetMainIcon ..\..\Resources\Icons\Settings.ico
+;@Ahk2Exe-ExeName Simulator Settings.exe
+;@Ahk2Exe-SetCompanyName Oliver Juwig (TheBigO)
+;@Ahk2Exe-SetCopyright TheBigO - Creative Commons - BY-NC-SA
+;@Ahk2Exe-SetProductName Simulator Controller
+;@Ahk2Exe-SetVersion 0.0.0.0
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework\Application.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Libraries Include Secion                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Configuration\Libraries\SettingsEditor.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Private Function Declaration Section                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+startupSimulatorSettings() {
+	local icon := kIconsDirectory . "Settings.ico"
+	local settings
+
+	TraySetIcon(icon, "1")
+	A_IconTip := "Simulator Settings"
+
+	try {
+		settings := readMultiMap(kSimulatorSettingsFile)
+
+		startupApplication()
+
+		if (editSettings(&settings) == kSave)
+			writeMultiMap(kSimulatorSettingsFile, settings)
+	}
+	catch Any as exception {
+		logError(exception, true)
+
+		withBlockedWindows(MsgDlg, substituteVariables(translate("Cannot start %application% due to an internal error..."), {application: "Simulator Settings"}), translate("Error"), 262160)
+		
+		ExitApp(1)
+	}
+
+	ExitApp(0)
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Initialization Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+startupSimulatorSettings()

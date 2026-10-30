@@ -1,0 +1,3182 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - AI Driving Coach                ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Global Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Framework.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Extensions\Task.ahk"
+#Include "..\..\Framework\Extensions\JSON.ahk"
+#Include "..\..\Framework\Extensions\HTTP.ahk"
+#Include "..\..\Framework\Extensions\LLMConnector.ahk"
+#Include "..\..\Database\Libraries\SessionDatabase.ahk"
+#Include "..\..\Database\Libraries\TelemetryCollector.ahk"
+#Include "..\..\Database\Libraries\TelemetryAnalyzer.ahk"
+#Include "..\..\Garage\Libraries\IssueCollector.ahk"
+#Include "..\..\Garage\Libraries\IRCIssueCollector.ahk"
+#Include "..\..\Garage\Libraries\R3EIssueCollector.ahk"
+#Include "..\..\Garage\Libraries\PMRIssueCollector.ahk"
+#Include "..\..\Garage\Libraries\F125IssueCollector.ahk"
+#Include "..\..\Plugins\Libraries\SimulatorProvider.ahk"
+#Include "RaceAssistant.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class DrivingCoach extends GridRaceAssistant {
+	iConnector := false
+	iConnectionState := "Active"
+
+	iTemplates := false
+
+	iInstructions := CaseInsenseWeakMap()
+
+	iLaps := Map()
+	iLapsHistory := 0
+
+	iStandings := []
+
+	iIssueCollector := false
+
+	iTranscript := false
+
+	iMode := "Conversation"
+
+	iCoachingActive := false
+
+	iReferenceMode := "None"
+	iReferenceModeAuto := true
+	iLoadReference := "None"
+
+	iSaveReference := false
+
+	iOnTrackCoaching := false
+	iFocusedCorners := []
+	iTelemetryFuture := false
+
+	iBrakeCoaching := false
+
+	iRaceMotivation := false
+
+	iStarted := false
+	iAvailableTelemetry := CaseInsenseMap()
+	iInstructionHints := CaseInsenseMap()
+
+	iTelemetryAnalyzer := false
+	iTelemetryCollector := false
+	iCollectorTask := false
+
+	iTrackTriggerPID := false
+
+	iBrakeTriggerPID := false
+	iBrakeTriggerFile := false
+
+	iBrakeCommand := false
+	iReleaseCommand := false
+	iCountdownOne := false
+	iCountdownTwo := false
+	iBrakeHints := CaseInsenseMap()
+
+	class CoachVoiceManager extends RaceAssistant.RaceVoiceManager {
+	}
+
+	class DrivingCoachRemoteHandler extends RaceAssistant.RaceAssistantRemoteHandler {
+		__New(remotePID) {
+			super.__New("Driving Coach", remotePID)
+		}
+
+		serviceState(arguments*) {
+			this.callRemote("serviceState", arguments*)
+		}
+	}
+
+	Knowledge {
+		Get {
+			static knowledge := choose(super.Knowledge, (t) => !inList(["Standings", "Positions"], t))
+
+			return knowledge
+		}
+	}
+
+	CollectorClass {
+		Get {
+			switch SessionDatabase.getSimulatorCode(this.Simulator), false {
+				case "IRC":
+					return "IRCIssueCollector"
+				case "R3E":
+					return "R3EIssueCollector"
+				case "PMR":
+					return "PMRIssueCollector"
+				case "F125":
+					return "F125IssueCollector"
+				default:
+					return "IssueCollector"
+			}
+		}
+	}
+
+	Providers {
+		Get {
+			return LLMConnector.Providers
+		}
+	}
+
+	Templates[language?] {
+		Get {
+			local templates, fileName, code, ignore
+
+			if !this.iTemplates {
+				templates := CaseInsenseMap()
+
+				for code, ignore in availableLanguages("Grammars") {
+					fileName := getFileName("Driving Coach.instructions." . code, kResourcesDirectory . "Instructions\")
+
+					if FileExist(fileName) {
+						templates[code] := readMultiMap(fileName)
+
+						fileName := getFileName("Driving Coach.instructions." . code, kUserHomeDirectory . "Instructions\")
+
+						if FileExist(fileName)
+							addMultiMapValues(templates[code], readMultiMap(fileName))
+					}
+					else {
+						fileName := getFileName("Driving Coach.instructions." . code, kUserHomeDirectory . "Instructions\")
+
+						if FileExist(fileName)
+							templates[code] := readMultiMap(fileName)
+					}
+				}
+
+				this.iTemplates := templates
+			}
+
+			if (isSet(language) && !this.iTemplates.Has(language))
+				language := "en"
+
+			return (isSet(language) ? this.iTemplates[language] : this.iTemplates)
+		}
+	}
+
+	Instructions[type?] {
+		Get {
+			if isSet(type) {
+				if (type == true)
+					return ["Character", "Simulation", "Session", "Stint", "Knowledge", "Handling", "Suspension", "Coaching", "Coaching.Lap", "Coaching.Corner", "Coaching.Corner.Approaching", "Coaching.Corner.Problems", "Coaching.Corner.Review", "Coaching.Reference", "Motivation.TimeLoss"]
+				else
+					return (this.iInstructions.Has(type) ? this.iInstructions[type] : false)
+			}
+			else
+				return this.iInstructions
+		}
+
+		Set {
+			return (isSet(type) ? (this.iInstructions[type] := value) : (this.iInstructions := value))
+		}
+	}
+
+	Connector {
+		Get {
+			return this.iConnector
+		}
+	}
+
+	ConnectionState {
+		Get {
+			return this.iConnectionState
+		}
+
+		Set {
+			return (this.iConnectionState := value)
+		}
+	}
+
+	Transcript {
+		Get {
+			return this.iTranscript
+		}
+	}
+
+	Mode {
+		Get {
+			return this.iMode
+		}
+
+		Set {
+			if this.Connector
+				this.Connector.History := ((value = "Conversation") || (value = "Review"))
+
+			return (this.iMode := value)
+		}
+	}
+
+	AudioSettings {
+		Get {
+			return getAudioSettings("Driving Coach")
+		}
+	}
+
+	Laps[lapNumber?] {
+		Get {
+			if isSet(lapNumber) {
+				lapNumber := (lapNumber + 0)
+
+				return (this.iLaps.Has(lapNumber) ? this.iLaps[lapNumber] : false)
+			}
+			else
+				return this.iLaps
+		}
+
+		Set {
+			if isSet(lapNumber) {
+				lapNumber := (lapNumber + 0)
+
+				return (this.iLaps[lapNumber] := value)
+			}
+			else
+				return this.iLaps := value
+		}
+	}
+
+	LapsHistory {
+		Get {
+			return this.iLapsHistory
+		}
+	}
+
+	Standings[position?] {
+		Get {
+			return (isSet(position) ? this.iStandings[position] : this.iStandings)
+		}
+
+		Set {
+			return (isSet(position) ? (this.iStandings[position] := value) : (this.iStandings := value))
+		}
+	}
+
+	OnTrackCoaching {
+		Get {
+			return this.iOnTrackCoaching
+		}
+	}
+
+	BrakeCoaching {
+		Get {
+			return this.iBrakeCoaching
+		}
+	}
+
+	RaceMotivation {
+		Get {
+			return this.iRaceMotivation
+		}
+	}
+
+	FocusedCorners {
+		Get {
+			return this.iFocusedCorners
+		}
+	}
+
+	CoachingActive {
+		Get {
+			return this.iCoachingActive
+		}
+	}
+
+	ReferenceMode {
+		Get {
+			if (this.Mode = "Motivation")
+				return "Fastest"
+			else
+				return this.iReferenceMode
+		}
+	}
+
+	LoadReference {
+		Get {
+			return this.iLoadReference
+		}
+	}
+
+	SaveReference {
+		Get {
+			return this.iSaveReference
+		}
+	}
+
+	Started {
+		Get {
+			return this.iStarted
+		}
+	}
+
+	AvailableTelemetry {
+		Get {
+			return this.iAvailableTelemetry
+		}
+	}
+
+	TelemetryAnalyzer {
+		Get {
+			return this.iTelemetryAnalyzer
+		}
+	}
+
+	TelemetryCollector {
+		Get {
+			return this.iTelemetryCollector
+		}
+	}
+
+	CollectorTask {
+		Get {
+			return this.iCollectorTask
+		}
+	}
+
+	__New(configuration, remoteHandler, name := false, language := kUndefined, translator := kUndefined
+		, synthesizer := false, speaker := false, vocalics := false, speakerBooster := false
+		, recognizer := false, listener := false, listenerBooster := false, conversationBooster := false, agentBooster := false
+		, muted := false, voiceServer := false) {
+		super.__New(configuration, "Driving Coach", remoteHandler, name, language, translator
+												  , synthesizer, speaker, vocalics, speakerBooster
+												  , recognizer, listener, listenerBooster, conversationBooster, agentBooster
+												  , muted, voiceServer)
+
+		this.loadInstructions(configuration)
+
+		this.updateConfigurationValues({Announcements: {SessionInformation: true, StintInformation: false, HandlingInformation: false}
+									  , OnTrackCoaching: false, BrakeCoaching: false, RaceMotivation: false})
+
+		try {
+			DirCreate(this.Options["Driving Coach.Archive"])
+		}
+		catch Any as exception {
+			logError(exception)
+		}
+
+		OnExit(ObjBindMethod(this, "stopIssueCollector"))
+		OnExit((*) {
+			if this.TelemetryCollector
+				this.TelemetryCollector.shutdown()
+
+			return false
+		})
+		OnExit(ObjBindMethod(this, "shutdownTrackTrigger", true))
+		OnExit(ObjBindMethod(this, "shutdownBrakeTrigger", true))
+
+		Task.startTask(() {
+			local speaker := this.VoiceManager.getLocalSpeaker()
+			local ignore, phrase, count
+
+			if speaker {
+				this.iBrakeCommand := this.VoiceManager.getLocalSpeaker().speakPhrase("Brake", false, false, true, {File: true, Rephrase: false})
+				this.iReleaseCommand := this.VoiceManager.getLocalSpeaker().speakPhrase("Release", false, false, true, {File: true, Rephrase: false})
+				this.iCountdownOne := this.VoiceManager.getLocalSpeaker().speakPhrase("CountdownOne", false, false, true, {File: true, Rephrase: false})
+				this.iCountdownTwo := this.VoiceManager.getLocalSpeaker().speakPhrase("CountdownTwo", false, false, true, {File: true, Rephrase: false})
+			}
+		}, 10000, kLowPriority)
+	}
+
+	loadFromConfiguration(configuration) {
+		local options
+
+		super.loadFromConfiguration(configuration)
+
+		options := this.Options
+
+		options["Driving Coach.Archive"] := getMultiMapValue(configuration, "Driving Coach Conversations", "Archive", kTempDirectory . "Driving Coach\Conversations")
+
+		if (!options["Driving Coach.Archive"] || (Trim(options["Driving Coach.Archive"]) = ""))
+			options["Driving Coach.Archive"] := (kTempDirectory . "Driving Coach\Conversations")
+
+		options["Driving Coach.Service"] := getMultiMapValue(configuration, "Driving Coach Service", "Service", getMultiMapValue(configuration, "Driving Coach", "Service", false))
+		options["Driving Coach.Model"] := getMultiMapValue(configuration, "Driving Coach Service", "Model", false)
+		options["Driving Coach.MaxTokens"] := getMultiMapValue(configuration, "Driving Coach Service", "MaxTokens", 2048)
+		options["Driving Coach.Temperature"] := getMultiMapValue(configuration, "Driving Coach Personality", "Temperature", 0.5)
+
+		if (string2Values("|", options["Driving Coach.Service"], 2)[1] = "LLM Runtime")
+			options["Driving Coach.GPULayers"] := getMultiMapValue(configuration, "Driving Coach Service", "GPULayers", 0)
+
+		options["Driving Coach.MaxHistory"] := getMultiMapValue(configuration, "Driving Coach Personality", "MaxHistory", 3)
+		options["Driving Coach.Confirmation"] := getMultiMapValue(configuration, "Driving Coach Personality", "Confirmation", true)
+	}
+
+	loadInstructions(configuration) {
+		local options, laps, ignore, instruction
+
+		options := this.Options
+
+		for ignore, instruction in this.Instructions[true]
+			if hasMultiMapValue(configuration, "Driving Coach Personality", "Instructions." . instruction)
+				options["Driving Coach.Instructions." . instruction] := getMultiMapValue(configuration, "Driving Coach Personality", "Instructions." . instruction, false)
+			else
+				options["Driving Coach.Instructions." . instruction] := getMultiMapValue(this.Templates[this.VoiceManager.Language["Original"]], "Instructions", instruction)
+
+		laps := InStr(options["Driving Coach.Instructions.Stint"], "%laps:")
+
+		if laps {
+			laps := SubStr(options["Driving Coach.Instructions.Stint"], laps + 1, InStr(options["Driving Coach.Instructions.Stint"], "%", false, laps + 1) - laps - 1)
+
+			options["Driving Coach.Instructions.Stint"] := StrReplace(options["Driving Coach.Instructions.Stint"], laps, "laps")
+
+			this.iLapsHistory := string2Values(":", laps)[2]
+		}
+	}
+
+	createVoiceManager(name, options) {
+		return DrivingCoach.CoachVoiceManager(this, name, options)
+	}
+
+	updateConfigurationValues(values) {
+		local lapName
+
+		super.updateConfigurationValues(values)
+
+		if (values.HasProp("Settings") && this.iReferenceModeAuto) {
+			this.iReferenceMode := getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Reference", "Fastest")
+			this.iLoadReference := getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Reference.Database", kUndefined)
+			this.iSaveReference := getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Reference.Save", "Off")
+
+			if (this.LoadReference == kUndefined)
+				this.iLoadReference := (this.SettingsDatabase.UseCommunity ? "Fastest (incl. Community)" : "Fastest")
+
+			if !this.LoadReference
+				this.iLoadReference := "None"
+			else if (this.LoadReference == true)
+				this.iLoadReference := (this.SettingsDatabase.UseCommunity ? "Fastest (incl. Community)" : "Fastest")
+
+			if (this.LoadReference = "Named") {
+				lapName := getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Reference.Database.Name", "")
+
+				if (Trim(lapName) != "")
+					this.iLoadReference := lapName
+				else
+					this.iLoadReference := "Fastest"
+			}
+
+			TelemetryAnalyzer.TCActivationsThreshold
+				:= getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.TCActivations", 20)
+			TelemetryAnalyzer.ABSActivationsThreshold
+				:= getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.ABSActivations", 30)
+			TelemetryAnalyzer.SteeringSmoothnessThreshold
+				:= getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.SteeringSmoothnessThreshold", 90)
+			TelemetryAnalyzer.ThrottleSmoothnessThreshold
+				:= getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.ThrottleSmoothnessThreshold", 90)
+			TelemetryAnalyzer.BrakeSmoothnessThreshold
+				:= getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.BrakeSmoothnessThreshold", 90)
+		}
+
+		if values.HasProp("OnTrackCoaching") {
+			this.iOnTrackCoaching := values.OnTrackCoaching
+
+			this.iFocusedCorners := []
+			this.iTelemetryFuture := false
+		}
+
+		if values.HasProp("BrakeCoaching")
+			this.iBrakeCoaching := values.BrakeCoaching
+
+		if values.HasProp("RaceMotivation")
+			this.iRaceMotivation := values.RaceMotivation
+	}
+
+	updateSessionValues(values) {
+		super.updateSessionValues(values)
+
+		if values.HasProp("Laps")
+			this.iLaps := values.Laps
+		else if values.HasProp("Standings")
+			this.iStandings := values.Standings
+
+		if (values.HasProp("Session") && (values.Session == kSessionFinished) && (this.Session != kSessionFinished))
+			if this.CoachingActive
+				this.shutdownTelemetryCoaching(false)
+	}
+
+	connectorState(state, reason := false, arguments*) {
+		local oldState := this.ConnectionState
+
+		if (state = "Active")
+			this.ConnectionState := state
+		else if (state = "Error")
+			this.ConnectionState := (state . (reason ? (":" . reason) : ""))
+		else
+			this.ConnectionState := "Unknown"
+
+		if ((oldState != this.ConnectionState) && this.RemoteHandler)
+			this.RemoteHandler.serviceState((this.ConnectionState = "Active") ? "Available" : this.ConnectionState)
+	}
+
+	getInstruction(category) {
+		local knowledgeBase := this.KnowledgeBase
+		local settingsDB := this.SettingsDatabase
+		local simulator, car, track, position, hasSectorTimes, laps, lapData, ignore, carData, standingsData
+		local collector, issues, handling, suspension, ignore, type, speed, where, issue, index, language
+		local key, value, text, filter, telemetry, reference, command, data
+
+		static sessions := false
+
+		if !sessions {
+			sessions := ["Other", "Practice", "Qualifying", "Race", "Time Trial"]
+
+			sessions.Default := "Other"
+		}
+
+		switch category, false {
+			case "Character":
+				return substituteVariables(this.Instructions["Character"], {name: this.VoiceManager.Name})
+			case "Simulation":
+				if knowledgeBase {
+					simulator := knowledgeBase.getValue("Session.Simulator")
+					car := knowledgeBase.getValue("Session.Car")
+					track := knowledgeBase.getValue("Session.Track")
+
+					if (simulator && car && track)
+						return substituteVariables(this.Instructions["Simulation"]
+												 , {name: this.VoiceManager.Name
+												  , driver: this.VoiceManager.User
+												  , simulator: settingsDB.getSimulatorName(simulator)
+												  , car: settingsDB.getCarName(simulator, car)
+												  , track: settingsDB.getTrackName(simulator, track)})
+				}
+			case "Session":
+				if (knowledgeBase && ((this.Mode = "Conversation") || (this.Mode = "Motivation"))
+								  && this.Announcements["SessionInformation"]) {
+					position := this.GridPosition
+
+					if (position != 0)
+						return substituteVariables(this.Instructions["Session"]
+												 , {session: translate(sessions[this.Session])
+												  , carNumber: this.getNr()
+												  , classPosition: this.GridPosition["Class"], overallPosition: position})
+				}
+			case "Stint":
+				if (knowledgeBase && ((this.Mode = "Conversation") || (this.Mode = "Motivation"))
+								  && this.Announcements["StintInformation"]) {
+					language := this.VoiceManager.Language["Original"]
+					position := this.getPosition(false, "Class")
+
+					if ((position != 0) && (this.Laps.Count > 0)) {
+						lapData := ""
+
+						laps := bubbleSort(&laps := getKeys(this.Laps))
+
+						hasSectorTimes := false
+
+						for ignore, lap in laps
+							if this.Laps[lap].SectorTimes {
+								hasSectorTimes := true
+
+								break
+							}
+
+						if hasSectorTimes
+							lapData .= (values2String(";", collect(["Lap", "Position (Overall)", "Position (Class)", "Sector Times", "Lap Time"], (h) => translate(h, language))*) . "`n")
+						else
+							lapData .= (values2String(";", collect(["Lap", "Position (Overall)", "Position (Class)", "Lap Time"], (h) => translate(h, language))*) . "`n")
+
+						for ignore, lap in laps {
+							carData := this.Laps[lap]
+
+							if (A_Index > 1)
+								lapData .= "`n"
+
+							if hasSectorTimes
+								lapData .= values2String(";", lap, carData.OverallPosition, carData.ClassPosition
+																 , carData.SectorTimes ? values2String(",", carData.SectorTimes*) : "", carData.LapTime)
+							else
+								lapData .= values2String(";", lap, carData.OverallPosition, carData.ClassPosition, carData.LapTime)
+						}
+
+						standingsData := ""
+
+						hasSectorTimes := false
+
+						for position, carData in this.Standings
+							if carData.SectorTimes {
+								hasSectorTimes := true
+
+								break
+							}
+
+						if hasSectorTimes
+							standingsData .= (values2String(";", collect(["Position (Overall)", "Position (Class)", "Race Number", "Class", "Sector Times", "Lap Time"], (h) => translate(h, language))*) . "`n")
+						else
+							standingsData .= (values2String(";", collect(["Position (Overall)", "Position (Class)", "Race Number", "Class", "Lap Time"], (h) => translate(h, language))*) . "`n")
+
+						for ignore, carData in this.Standings {
+							if (A_Index > 1)
+								standingsData .= "`n"
+
+							if hasSectorTimes
+								standingsData .= values2String(";", carData.OverallPosition, carData.ClassPosition, carData.Nr, carData.Class
+																  , carData.SectorTimes ? values2String(",", carData.SectorTimes*) : "", carData.LapTime)
+							else
+								standingsData .= values2String(";", carData.OverallPosition, carData.ClassPosition, carData.Nr, carData.Class, carData.LapTime)
+						}
+
+						return substituteVariables(this.Instructions["Stint"], {lap: knowledgeBase.getValue("Lap"), position: position, carNumber: this.getNr()
+																			  , laps: lapData, standings: standingsData})
+					}
+				}
+			case "Knowledge":
+				if (knowledgeBase && (this.Mode = "Conversation")) {
+					data := this.getKnowledge("Conversation")
+
+					if (data.Count > 0)
+						return substituteVariables(this.Instructions["Knowledge"], {knowledge: StrReplace(JSON.print(data, isDebug() ? "  " : ""), "%", "\%")})
+				}
+			case "Handling":
+				if (knowledgeBase && ((this.Mode = "Conversation") || (this.Mode = "Motivation"))
+								  && this.Announcements["HandlingInformation"]) {
+					collector := this.iIssueCollector
+
+					if collector {
+						issues := collector.Handling
+
+						handling := ""
+						index := 0
+
+						for ignore, type in ["Oversteer", "Understeer"]
+							for ignore, speed in ["Slow", "Fast"]
+								for ignore, where in ["Entry", "Apex", "Exit"]
+									if issues.Has(type . ".Corner." . where . "." . speed)
+										for ignore, issue in issues[type . ".Corner." . where . "." . speed] {
+											if (++index > 1)
+												handling .= "`n"
+
+											handling .= ("- " . substituteVariables(translate("%severity% %type% %speed% corner %where%")
+																				  , {severity: translate(issue.Severity . A_Space)
+																				   , type: translate(type . A_Space)
+																				   , speed: translate(speed . A_Space)
+																				   , where: translate(where . A_Space)}))
+										}
+
+						if index
+							return substituteVariables(this.Instructions["Handling"], {handling: handling})
+					}
+				}
+			case "Suspension":
+				if (knowledgeBase && ((this.Mode = "Conversation") || (this.Mode = "Motivation"))
+								  && this.Announcements["HandlingInformation"]) {
+					collector := this.iIssueCollector
+
+					if collector {
+						issues := collector.Suspension
+
+						suspension := ""
+						index := 0
+
+						for ignore, type in ["Suspension.Bottom.Out"]
+							for ignore, where in ["Front", "Rear"]
+								if issues.Has(type . "." . where)
+									for ignore, issue in issues[type . "." . where] {
+										if (++index > 1)
+											suspension .= "`n"
+
+										suspension .= ("- " . substituteVariables(translate("%severity% %type% %where%")
+																				, {severity: translate(issue.Severity . A_Space)
+																				 , type: translate(type)
+																				 , where: translate(where)}))
+									}
+
+						if issues.Has("Suspension.Sway")
+							for ignore, issue in issues["Suspension.Sway"] {
+								if (++index > 1)
+									suspension .= "`n"
+
+								suspension .= ("- " . substituteVariables(translate("%severity% %type%")
+																		, {severity: translate(issue.Severity . A_Space)
+																		 , type: translate("Suspension.Sway")}))
+							}
+
+						if index
+							return substituteVariables(this.Instructions["Suspension"], {suspension: suspension})
+					}
+				}
+			case "Coaching":
+				if ((knowledgeBase || isDebug()) && this.CoachingActive && this.TelemetryAnalyzer
+												 && (Trim(this.Instructions["Coaching"]) != ""))
+					if (this.Mode = "Conversation") {
+						telemetry := this.getTelemetry(&reference := true)
+
+						if telemetry {
+							command := substituteVariables(this.Instructions["Coaching"] . "`n`n%telemetry%"
+														 , {telemetry: telemetry.JSON})
+
+							if reference
+								command .= ("`n`n" . substituteVariables(this.Instructions["Coaching.Reference"]
+																	   , {telemetry: reference.JSON}))
+
+							return command
+						}
+					}
+					else if (this.Mode != "Motivation")
+						return this.Instructions["Coaching"]
+			case "Coaching.Reference":
+				if ((knowledgeBase || isDebug()) && (this.Mode = "Motivation")) {
+					telemetry := this.getTelemetry(&reference := true)
+
+					if (telemetry && reference)
+						return substituteVariables(this.Instructions["Coaching.Reference"]
+												 , {telemetry: reference.JSON})
+				}
+		}
+
+		return false
+	}
+
+	getInstructions() {
+		return choose(collect(this.Instructions[true], ObjBindMethod(this, "getInstruction"))
+					, (instruction) => (instruction && (Trim(instruction) != "")))
+	}
+
+	startConversation() {
+		local service := this.Options["Driving Coach.Service"]
+		local ignore, instruction
+
+		this.iTranscript := (normalizeDirectoryPath(this.Options["Driving Coach.Archive"]) . "\" . translate("Conversation ") . A_Now . ".txt")
+
+		if service {
+			service := string2Values("|", service, 3)
+
+			if !inList(this.Providers, service[1])
+				throw "Unsupported service detected in DrivingCoach.startConversation..."
+
+			try {
+				if (!this.Options["Driving Coach.Model"] || (Trim(this.Options["Driving Coach.Model"]) = ""))
+					throw "Empty model detected in DrivingCoach.startConversation..."
+				else if (service[1] = "LLM Runtime")
+					this.iConnector := LLMConnector.LLMRuntimeConnector(this, this.Options["Driving Coach.Model"]
+																			, this.Options["Driving Coach.GPULayers"])
+				else {
+					try {
+						this.iConnector := LLMConnector.%StrReplace(service[1], A_Space, "")%Connector(this, this.Options["Driving Coach.Model"])
+					}
+					catch Any {
+						this.iConnector := %StrReplace(service[1], A_Space, "")%Connector(this, this.Options["Driving Coach.Model"])
+					}
+
+					this.Connector.Connect(service[2], service[3])
+
+					this.connectorState("Active")
+				}
+			}
+			catch Any as exception {
+				logError(exception)
+
+				this.iConnector := false
+
+				this.connectorState("Error", "Configuration")
+
+				return false
+			}
+
+			this.Connector.MaxTokens := this.Options["Driving Coach.MaxTokens"]
+			this.Connector.Temperature := this.Options["Driving Coach.Temperature"]
+			this.Connector.MaxHistory := this.Options["Driving Coach.MaxHistory"]
+
+			for ignore, instruction in this.Instructions[true] {
+				this.Instructions[instruction] := this.Options["Driving Coach.Instructions." . instruction]
+
+				if !this.Instructions[instruction]
+					this.Instructions[instruction] := ""
+			}
+
+			return true
+		}
+		else {
+			this.connectorState("Error", "Configuration")
+
+			return false
+		}
+	}
+
+	restartConversation() {
+		if this.Connector
+			this.Connector.Restart()
+	}
+
+	handleVoiceCommand(grammar, words) {
+		switch grammar, false {
+			case "CoachingStart":
+				this.clearContinuation()
+
+				this.telemetryCoachingStartRecognized(words)
+			case "CoachingFinish":
+				this.clearContinuation()
+
+				this.telemetryCoachingFinishRecognized(words)
+			case "ReviewCorner":
+				this.clearContinuation()
+
+				if this.CoachingActive
+					this.reviewCornerRecognized(words)
+				else
+					this.handleVoiceText("TEXT", values2String(A_Space, words*))
+			case "ReviewLap":
+				this.clearContinuation()
+
+				if this.CoachingActive
+					this.reviewLapRecognized(words)
+				else
+					this.handleVoiceText("TEXT", values2String(A_Space, words*))
+			case "TrackCoachingStart":
+				this.clearContinuation()
+
+				if !this.CoachingActive
+					this.telemetryCoachingStartRecognized(words, true, "Track")
+				else
+					this.trackCoachingStartRecognized(words)
+
+				/*
+				else
+					this.handleVoiceText("TEXT", values2String(A_Space, words*))
+				*/
+			case "BrakeCoachingStart":
+				this.clearContinuation()
+
+				if !this.CoachingActive
+					this.telemetryCoachingStartRecognized(words, true, "Brake")
+				else
+					this.brakeCoachingStartRecognized(words)
+
+				/*
+				else
+					this.handleVoiceText("TEXT", values2String(A_Space, words*))
+				*/
+			case "RaceMotivationStart":
+				this.clearContinuation()
+
+				if !this.CoachingActive
+					this.telemetryCoachingStartRecognized(words, true, "Motivation", true)
+				else
+					this.raceMotivationStartRecognized(words)
+
+				/*
+				else
+					this.handleVoiceText("TEXT", values2String(A_Space, words*))
+				*/
+			case "FinishCoaching":
+				this.clearContinuation()
+
+				if this.CoachingActive
+					this.finishCoachingRecognized(words)
+				else
+					this.handleVoiceText("TEXT", values2String(A_Space, words*))
+			case "ReferenceLap":
+				this.clearContinuation()
+
+				this.referenceLapRecognized(words)
+			case "NoReferenceLap":
+				this.clearContinuation()
+
+				this.noReferenceLapRecognized(words)
+			case "FocusCorner":
+				this.clearContinuation()
+
+				this.focusCornerRecognized(words)
+			case "NoFocusCorner":
+				this.clearContinuation()
+
+				this.noFocusCornerRecognized(words)
+			default:
+				super.handleVoiceCommand(grammar, words)
+		}
+	}
+
+	telemetryCoachingStartRecognized(words, confirm := true, auto := false, acknowledge := false) {
+		local state
+
+		if !this.Connector
+			this.startConversation()
+
+		if (auto = "Motivation") {
+			if (confirm && this.Speaker)
+				this.getSpeaker().speakPhrase(acknowledge ? "Roger" : "StartCoaching", false, false, false, {Noise: false})
+		}
+		else if (confirm && this.Speaker)
+			this.getSpeaker().speakPhrase(auto ? "StartCoaching" : "ConfirmCoaching", false, false, false, {Noise: false})
+
+		this.iCoachingActive := true
+
+		if (auto != "Motivation")
+			this.startupTelemetryCoaching()
+
+		if auto {
+			state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+			setMultiMapValue(state, "Coaching", "Active", true)
+
+			if (auto = "Brake") {
+				this.updateConfigurationValues({BrakeCoaching: true, OnTrackCoaching: false, RaceMotivation: false})
+
+				setMultiMapValue(state, "Coaching", "Brake", "Starting")
+				setMultiMapValue(state, "Coaching", "Track", false)
+				setMultiMapValue(state, "Coaching", "Motivation", false)
+			}
+			else if (auto = "Track") {
+				this.updateConfigurationValues({OnTrackCoaching: true, BrakeCoaching: false, RaceMotivation: false})
+
+				setMultiMapValue(state, "Coaching", "Track", "Starting")
+				setMultiMapValue(state, "Coaching", "Brake", false)
+				setMultiMapValue(state, "Coaching", "Motivation", false)
+			}
+			else {
+				this.updateConfigurationValues({RaceMotivation: true, OnTrackCoaching: false, BrakeCoaching: false})
+
+				setMultiMapValue(state, "Coaching", "Motivation", "Starting")
+				setMultiMapValue(state, "Coaching", "Brake", false)
+				setMultiMapValue(state, "Coaching", "Track", false)
+			}
+
+			writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+		}
+	}
+
+	telemetryCoachingFinishRecognized(words, confirm := true) {
+		if (confirm && this.Speaker)
+			this.getSpeaker().speakPhrase("Roger", false, false, false, {Noise: false})
+
+		this.shutdownTelemetryCoaching()
+	}
+
+	reviewCornerRecognized(words) {
+		local cornerNr := this.getNumber(words)
+		local oldMode := this.Mode
+		local telemetry, reference, command
+
+		this.Mode := "Review"
+
+		try {
+			if ((cornerNr = kUndefined) || !isNumber(cornerNr)) {
+				if this.Speaker
+					this.getSpeaker().speakPhrase("Repeat", false, false, false, {Noise: false})
+			}
+			else {
+				telemetry := this.getTelemetry(&reference := true, cornerNr)
+
+				if this.TelemetryAnalyzer {
+					if (telemetry && (telemetry.Sections.Length > 0)) {
+						command := substituteVariables(this.Instructions["Coaching.Corner"]
+													 , {telemetry: telemetry.JSON, corner: cornerNr})
+
+						if reference
+							command .= ("`n`n" . substituteVariables(this.Instructions["Coaching.Reference"]
+																   , {telemetry: reference.JSON}))
+
+						this.handleVoiceText("TEXT", command, true, values2String(A_Space, words*))
+					}
+					else if this.Speaker
+						this.getSpeaker().speakPhrase("Repeat", false, false, false, {Noise: false})
+				}
+				else if this.Speaker
+					this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+			}
+		}
+		finally {
+			this.Mode := oldMode
+		}
+	}
+
+	reviewLapRecognized(words) {
+		local oldMode := this.Mode
+		local telemetry, reference, command
+
+		telemetry := this.getTelemetry(&reference := true)
+
+		this.Mode := "Review"
+
+		try {
+			if (this.TelemetryAnalyzer && telemetry && (telemetry.Sections.Length > 0)) {
+				command := substituteVariables(this.Instructions["Coaching.Lap"], {telemetry: telemetry.JSON})
+
+				if reference
+					command .= ("`n`n" . substituteVariables(this.Instructions["Coaching.Reference"]
+														   , {telemetry: reference.JSON}))
+
+				this.handleVoiceText("TEXT", command, true, values2String(A_Space, words*))
+			}
+			else if this.Speaker
+				this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+		}
+		finally {
+			this.Mode := oldMode
+		}
+	}
+
+	trackCoachingStartRecognized(words, confirm := true) {
+		if this.startupTrackCoaching() {
+			if (confirm && this.Speaker)
+				this.getSpeaker().speakPhrase("Roger", false, false, false, {Noise: false})
+		}
+		else if (confirm && this.Speaker)
+			this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+	}
+
+	brakeCoachingStartRecognized(words, confirm := true) {
+		if this.startupBrakeCoaching() {
+			if (confirm && this.Speaker)
+				this.getSpeaker().speakPhrase("Roger")
+		}
+		else if (confirm && this.Speaker)
+			this.getSpeaker().speakPhrase("Later")
+	}
+
+	raceMotivationStartRecognized(words, confirm := true) {
+		if this.startupRaceMotivation() {
+			if (confirm && this.Speaker)
+				this.getSpeaker().speakPhrase("Roger")
+		}
+		else if (confirm && this.Speaker)
+			this.getSpeaker().speakPhrase("Later")
+	}
+
+	finishCoachingRecognized(words, confirm := true) {
+		if (confirm && this.Speaker)
+			this.getSpeaker().speakPhrase("Okay", false, false, false, {Noise: false})
+
+		this.shutdownTrackCoaching()
+		this.shutdownBrakeCoaching()
+		this.shutdownRaceMotivation()
+	}
+
+	referenceLapRecognized(words) {
+		local speaker
+
+		if this.Speaker {
+			speaker := this.getSpeaker()
+
+			if inList(words, speaker.Fragments["Fastest"])
+				this.iReferenceMode := "Fastest"
+			else if inList(words, speaker.Fragments["Last"])
+				this.iReferenceMode := "Last"
+			else {
+				speaker.speakPhrase("Repeat", false, false, false, {Noise: false})
+
+				return
+			}
+
+			this.iReferenceModeAuto := false
+
+			speaker.speakPhrase("Roger", false, false, false, {Noise: false})
+		}
+	}
+
+	noReferenceLapRecognized(words) {
+		if this.Speaker
+			this.getSpeaker().speakPhrase("Roger", false, false, false, {Noise: false})
+
+		this.iReferenceMode := "None"
+		this.iReferenceModeAuto := false
+	}
+
+	focusCornerRecognized(words, confirm := true) {
+		local corner := this.getNumber(words)
+
+		if (corner != kUndefined) {
+			if this.startupTrackCoaching() {
+				if (confirm && this.Speaker)
+					this.getSpeaker().speakPhrase("Roger", false, false, false, {Noise: false})
+
+				corner := String(corner)
+
+				if !inList(this.FocusedCorners, corner)
+					this.FocusedCorners.Push(corner)
+			}
+			else if (confirm && this.Speaker)
+				this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+		}
+		else
+			this.getSpeaker().speakPhrase("Repeat", false, false, false, {Noise: false})
+	}
+
+	noFocusCornerRecognized(words, confirm := true) {
+		if (confirm && this.Speaker)
+			this.getSpeaker().speakPhrase("Roger", false, false, false, {Noise: false})
+
+		this.iFocusedCorners := []
+		this.iTelemetryFuture := false
+	}
+
+	handleVoiceText(grammar, text, reportError := true, originalText := false) {
+		local answer := false
+		local ignore, part, telemetry, reference, folder
+
+		static report := true
+		static conversationNr := 1
+
+		normalizeAnswer(answer) {
+			answer := Trim(StrReplace(StrReplace(answer, "*", ""), "|||", ""), "`t`r`n")
+
+			while InStr(answer, "\n", , -2)
+				answer := SubStr(answer, 1, StrLen(answer) - 2)
+
+			return answer
+		}
+
+		try {
+			if (this.Speaker && this.Options["Driving Coach.Confirmation"]
+							 && (this.ConnectionState = "Active") && (this.Mode != "Coaching"))
+				this.getSpeaker().speakPhrase("Confirm", false, false, false, {Noise: false})
+
+			if (this.Connector || this.startConversation()) {
+				answer := this.Connector.Ask(text)
+
+				if answer {
+					answer := normalizeAnswer(answer)
+
+					report := true
+
+					if (this.CoachingActive && !InStr(kVersion, "-release")) {
+						if !FileExist(kTempDirectory . "Driving Coach\Conversations")
+							conversationNr := 1
+
+						DirCreate(kTempDirectory . "Driving Coach\Conversations")
+
+						folder := (kTempDirectory . "Driving Coach\Conversations\" . Format("{:03}", conversationNr) . "\")
+
+						DirCreate(folder)
+
+						telemetry := telemetry := this.getTelemetry(&reference := true)
+
+						if telemetry {
+							FileAppend(telemetry.JSON, folder . "Telemetry.JSON")
+
+							if reference
+								FileAppend(reference.JSON, folder . "Reference.JSON")
+						}
+
+						FileAppend(translate("-- Driver --------") . "`n`n" . text . "`n`n" . translate("-- Coach ---------") . "`n`n" . answer . "`n`n", folder . "Conversation.txt", "UTF-16")
+
+						conversationNr += 1
+					}
+				}
+				else if (this.Speaker && report) {
+					if reportError
+						this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+
+					report := false
+				}
+			}
+			else if (this.Speaker && report) {
+				if reportError
+					this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+
+				report := false
+			}
+		}
+		catch Any as exception {
+			if report {
+				if (this.Speaker && reportError)
+					this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+
+				report := false
+
+				logError(exception, true)
+
+				logMessage(kLogCritical, substituteVariables(translate("Cannot connect to GPT service (%service%) - please check the configuration")
+														   , {service: this.Options["Driving Coach.Service"]}))
+
+				if !kSilentMode
+					showMessage(substituteVariables(translate("Cannot connect to GPT service (%service%) - please check the configuration...")
+												  , {service: this.Options["Driving Coach.Service"]})
+							  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+			}
+		}
+
+		if answer {
+			answer := StrReplace(answer, "*", "")
+
+			if this.Speaker
+				if this.VoiceManager.UseTalking
+					this.getSpeaker().speak(answer, false, false, {Noise: false, Rephrase: false})
+				else if InStr(answer, "。") {
+					for ignore, part in string2Values("。", answer)
+						if (Trim(part) != "")
+							this.getSpeaker().speak(part . "。", false, false, {Noise: false, Rephrase: false, Click: (A_Index = 1)})
+				}
+				else if InStr(answer, translate(". ")) {
+					for ignore, part in string2Values(translate(". "), answer)
+						if (Trim(part) != "")
+							this.getSpeaker().speak(part . translate("."), false, false, {Noise: false, Rephrase: false, Click: (A_Index = 1)})
+				}
+				else
+					this.getSpeaker().speak(answer, false, false, {Noise: false, Rephrase: false})
+
+			if (this.Transcript && (this.Mode != "Coaching"))
+				try {
+					FileAppend(translate("-- Driver --------") . "`n`n" . (originalText ? originalText : text) . "`n`n" . translate("-- Coach ---------") . "`n`n" . answer . "`n`n", this.Transcript, "UTF-16")
+				}
+				catch Any as exception {
+					logError(exception)
+				}
+		}
+	}
+
+	stopIssueCollector(arguments*) {
+		if ((arguments.Length > 0) && inList(["Logoff", "Shutdown"], arguments[1]))
+			return false
+
+		this.stopIssueAnalyzer()
+
+		if this.iIssueCollector {
+			this.iIssueCollector.deleteSamples()
+
+			this.iIssueCollector := false
+		}
+
+		return false
+	}
+
+	startIssueAnalyzer() {
+		local knowledgeBase := this.KnowledgeBase
+
+		this.stopIssueCollector()
+
+		if knowledgeBase {
+			this.iIssueCollector := %this.CollectorClass%(this.Simulator, knowledgeBase.getValue("Session.Car"), knowledgeBase.getValue("Session.Track")
+														, {Handling: true, Suspension: true, Frequency: 5000})
+
+			this.iIssueCollector.loadFromSettings()
+
+			this.iIssueCollector.startIssueCollector()
+		}
+
+		return this.iIssueCollector
+	}
+
+	stopIssueAnalyzer() {
+		if this.iIssueCollector
+			this.iIssueCollector.stopIssueCollector()
+	}
+
+	startTelemetryCoaching(confirm := true, auto := false, acknowledge := true) {
+		local state
+
+		if auto {
+			state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+			setMultiMapValue(state, "Coaching", "Active", true)
+
+			if (auto = "Brake") {
+				this.updateConfigurationValues({BrakeCoaching: true, OnTrackCoaching: false, RaceMotivation: false})
+
+				setMultiMapValue(state, "Coaching", "Brake", "Starting")
+				setMultiMapValue(state, "Coaching", "Track", false)
+				setMultiMapValue(state, "Coaching", "Motivation", false)
+			}
+			else if (auto = "Track") {
+				this.updateConfigurationValues({OnTrackCoaching: true, BrakeCoaching: false, RaceMotivation: false})
+
+				setMultiMapValue(state, "Coaching", "Track", "Starting")
+				setMultiMapValue(state, "Coaching", "Brake", false)
+				setMultiMapValue(state, "Coaching", "Motivation", false)
+			}
+			else {
+				this.updateConfigurationValues({RaceMotivation: true, OnTrackCoaching: false, BrakeCoaching: false})
+
+				setMultiMapValue(state, "Coaching", "Motivation", "Starting")
+				setMultiMapValue(state, "Coaching", "Brake", false)
+				setMultiMapValue(state, "Coaching", "Track", false)
+			}
+
+			writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+		}
+
+		this.telemetryCoachingStartRecognized([], confirm, auto, acknowledge)
+	}
+
+	finishTelemetryCoaching(confirm := true) {
+		this.telemetryCoachingFinishRecognized([], confirm)
+	}
+
+	startTrackCoaching(confirm := true) {
+		local state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		if !this.CoachingActive {
+			this.telemetryCoachingStartRecognized([], confirm, "Track")
+
+			this.trackCoachingStartRecognized([], false)
+		}
+		else
+			this.trackCoachingStartRecognized([], confirm)
+
+		this.updateConfigurationValues({OnTrackCoaching: true, BrakeCoaching: false, RaceMotivation: false})
+
+		setMultiMapValue(state, "Coaching", "Track", "Starting")
+		setMultiMapValue(state, "Coaching", "Brake", false)
+		setMultiMapValue(state, "Coaching", "Motivation", false)
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+	}
+
+	startBrakeCoaching(confirm := true) {
+		local state
+
+		if !this.CoachingActive {
+			this.telemetryCoachingStartRecognized([], confirm, "Brake")
+
+			this.brakeCoachingStartRecognized([], false)
+		}
+		else
+			this.brakeCoachingStartRecognized([], confirm)
+
+		this.updateConfigurationValues({BrakeCoaching: true, TrackCoaching: false, RaceMotivation: false})
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Brake", "Starting")
+		setMultiMapValue(state, "Coaching", "Track", false)
+		setMultiMapValue(state, "Coaching", "Motivation", false)
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+	}
+
+	startRaceMotivation(confirm := true) {
+		local state
+
+		if !this.CoachingActive {
+			this.telemetryCoachingStartRecognized([], confirm, "Motivation", true)
+
+			this.raceMotivationStartRecognized([], false)
+		}
+		else
+			this.raceMotivationStartRecognized([], confirm)
+
+		this.updateConfigurationValues({RaceMotivation: true, TrackCoaching: false, BrakeCoaching: false})
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Motivation", "Starting")
+		setMultiMapValue(state, "Coaching", "Track", false)
+		setMultiMapValue(state, "Coaching", "Brake", false)
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+	}
+
+	finishCoaching(confirm := true) {
+		this.finishCoachingRecognized([], confirm)
+	}
+
+	startupTelemetryCoaching() {
+		local state
+
+		if (!this.TelemetryCollector && this.startupTelemetryCollector()) {
+			state := newMultiMap()
+
+			setMultiMapValue(state, "Coaching", "Active", true)
+
+			if this.OnTrackCoaching
+				setMultiMapValue(state, "Coaching", "Track", "Starting")
+			else if this.BrakeCoaching
+				setMultiMapValue(state, "Coaching", "Brake", "Starting")
+			else if this.RaceMotivation
+				setMultiMapValue(state, "Coaching", "Motivation", "Starting")
+
+			writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+			if isDebug()
+				logMessage(kLogDebug, "Telemetry collection started...")
+		}
+		else if !this.TelemetryCollector
+			if isDebug()
+				logMessage(kLogDebug, "Telemetry collection NOT started...")
+	}
+
+	shutdownTelemetryCoaching(deactivate := true) {
+		local state := newMultiMap()
+
+		this.shutdownTrackTrigger()
+		this.shutdownBrakeTrigger()
+
+		if this.TelemetryCollector
+			this.shutdownTelemetryCollector()
+
+		if isDebug()
+			logMessage(kLogDebug, "Telemetry collection stopped...")
+
+		this.iAvailableTelemetry := CaseInsenseMap()
+		this.iStarted := false
+
+		setMultiMapValue(state, "Coaching", "Active", false)
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+		if deactivate {
+			this.iCoachingActive := false
+
+			this.updateConfigurationValues({OnTrackCoaching: false, BrakeCoaching: false, RaceMotivation: false})
+		}
+	}
+
+	startupTrackCoaching() {
+		local state, started
+
+		this.shutdownBrakeTrigger()
+
+		started := this.startupTrackTrigger()
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Track", started)
+		setMultiMapValue(state, "Coaching", "Brake", false)
+		setMultiMapValue(state, "Coaching", "Motivation", false)
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+		this.iTelemetryFuture := false
+
+		if started
+			this.updateConfigurationValues({OnTrackCoaching: true, BrakeCoaching: false, RaceMotivation: false})
+
+		if isDebug()
+			if started
+				logMessage(kLogDebug, "Track coaching started...")
+			else
+				logMessage(kLogDebug, "Track coaching NOT started...")
+
+		return started
+	}
+
+	shutdownTrackCoaching() {
+		local state
+
+		if isDebug()
+			logMessage(kLogDebug, "Track coaching stopped...")
+
+		this.shutdownTrackTrigger()
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Track", false)
+
+		removeMultiMapValues(state, "Instructions")
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+		this.updateConfigurationValues({OnTrackCoaching: false})
+	}
+
+	startupBrakeCoaching() {
+		local state, started
+
+		this.shutdownTrackTrigger()
+
+		started := this.startupBrakeTrigger()
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Brake", started)
+		setMultiMapValue(state, "Coaching", "Track", false)
+		setMultiMapValue(state, "Coaching", "Motivation", false)
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+		if started
+			this.updateConfigurationValues({BrakeCoaching: true, OnTrackCoaching: false, RaceMotivation: false})
+
+		if isDebug()
+			if started
+				logMessage(kLogDebug, "Brake coaching started...")
+			else
+				logMessage(kLogDebug, "Brake coaching NOT started...")
+
+		return started
+	}
+
+	shutdownBrakeCoaching() {
+		local state
+
+		if isDebug()
+			logMessage(kLogDebug, "Brake coaching stopped...")
+
+		this.shutdownBrakeTrigger()
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Brake", false)
+
+		removeMultiMapValues(state, "Instructions")
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+		this.updateConfigurationValues({BrakeCoaching: false})
+	}
+
+	startupRaceMotivation() {
+		local state
+
+		this.shutdownTrackTrigger()
+		this.shutdownBrakeTrigger()
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Motivation", true)
+		setMultiMapValue(state, "Coaching", "Track", false)
+		setMultiMapValue(state, "Coaching", "Brake", false)
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+		this.updateConfigurationValues({RaceMotivation: true, BrakeCoaching: false, OnTrackCoaching: false})
+
+		if isDebug()
+			logMessage(kLogDebug, "Race motivation started...")
+
+		return true
+	}
+
+	shutdownRaceMotivation() {
+		local state
+
+		if isDebug()
+			logMessage(kLogDebug, "Race motivation stopped...")
+
+		state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+		setMultiMapValue(state, "Coaching", "Motivation", false)
+
+		removeMultiMapValues(state, "Instructions")
+
+		writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+		this.updateConfigurationValues({RaceMotivation: false})
+	}
+
+	telemetryAvailable(laps) {
+		local bestLap, bestLaptime, bestInfo, telemetries, data
+		local ignore, lap, candidate, sessionDB, info, lapTime, sectorTimes, size, telemetry, reference
+
+		if (!this.Started && this.TelemetryAnalyzer.TrackMap) {
+			if (this.Speaker[false] && !this.RaceMotivation)
+				this.getSpeaker().speakPhrase((this.OnTrackCoaching || this.BrakeCoaching) ? "CoachingStart"
+																						   : "CoachingReady"
+											, false, true, false, {Noise: false, Important: true})
+
+			this.iStarted := true
+
+			if (this.TelemetryAnalyzer.TrackSections.Length = 0) {
+				if isDebug()
+					logMessage(kLogDebug, "No track sections available - using automatic approach...")
+
+				telemetry := this.TelemetryAnalyzer.createTelemetry(laps[1], kTempDirectory . "Driving Coach\Telemetry\Lap " . laps[1] . ".telemetry")
+
+				this.TelemetryAnalyzer.requireTrackSections(telemetry)
+			}
+
+			if (this.LoadReference != "None") {
+				sessionDB := SessionDatabase()
+				bestLap := kUndefined
+
+				if (InStr(this.LoadReference, "Fastest") == 1) {
+					sessionDB.getTelemetryNames(this.Simulator, this.Car, this.Track, &telemetries := true, &ignore := false)
+
+					for ignore, candidate in telemetries {
+						info := sessionDB.readTelemetryInfo(this.Simulator, this.Car, this.Track, candidate)
+
+						lapTime := getMultiMapValue(info, "Lap", "LapTime", false)
+
+						if (lapTime && ((bestLap == kUndefined) || (lapTime < bestLapTime))) {
+							bestLap := candidate
+							bestLapTime := lapTime
+							bestInfo := info
+						}
+					}
+
+					if (this.LoadReference = "Fastest (incl. Community)") {
+						sessionDB.getTelemetryNames(this.Simulator, this.Car, this.Track, &ignore := false, &telemetries := true)
+
+						for ignore, candidate in telemetries {
+							info := sessionDB.readTelemetryInfo(this.Simulator, this.Car, this.Track, candidate)
+
+							lapTime := getMultiMapValue(info, "Lap", "LapTime", false)
+
+							if (lapTime && ((bestLap == kUndefined) || (lapTime < bestLapTime))) {
+								bestLap := candidate
+								bestLapTime := lapTime
+								bestInfo := info
+							}
+						}
+					}
+				}
+				else {
+					info := sessionDB.readTelemetryInfo(this.Simulator, this.Car, this.Track, this.LoadReference)
+
+					if info {
+						lapTime := getMultiMapValue(info, "Lap", "LapTime", false)
+
+						if lapTime {
+							bestLap := this.LoadReference
+							bestLapTime := lapTime
+							bestInfo := info
+						}
+					}
+				}
+
+				if (bestLap != kUndefined) {
+					data := sessionDB.readTelemetry(this.Simulator, this.Car, this.Track, bestLap, &size)
+
+					if data {
+						deleteFile(kTempDirectory . "Driving Coach\Telemetry\Reference.telemetry")
+
+						file := FileOpen(kTempDirectory . "Driving Coach\Telemetry\Reference.telemetry", "w", "")
+
+						if file {
+							file.RawWrite(data, size)
+
+							file.Close()
+
+							info := newMultiMap()
+
+							setMultiMapValue(info, "Info", "Driver", getMultiMapValue(bestInfo, "Lap", "Driver", SessionDatabase.getName("Creator")))
+							setMultiMapValue(info, "Info", "LapTime", bestLapTime)
+
+							sectorTimes := getMultiMapValue(bestInfo, "Lap", "SectorTimes", false)
+
+							if sectorTimes {
+								sectorTimes := string2Values(",", sectorTimes)
+
+								if !first(sectorTimes, (s) => (isNumber(s) && (s != 0)))
+									sectorTimes := false
+							}
+
+							if sectorTimes
+								setMultiMapValue(info, "Info", "SectorTimes", getMultiMapValue(bestInfo, "Lap", "SectorTimes"))
+
+							writeMultiMap(kTempDirectory . "Driving Coach\Telemetry\Reference.telemetry.info", info)
+
+							this.AvailableTelemetry[0] := true
+						}
+					}
+				}
+			}
+		}
+
+		for ignore, lap in laps
+			this.AvailableTelemetry[lap] := true
+
+		if isDebug()
+			logMessage(kLogDebug, this.AvailableTelemetry.Count . " lap telemetries available for coaching...")
+
+		if this.Started {
+			if this.BrakeCoaching
+				this.startupBrakeCoaching()
+			else if this.OnTrackCoaching
+				this.startupTrackCoaching()
+			else if this.RaceMotivation
+				this.startupRaceMotivation()
+
+			if this.iBrakeTriggerPID {
+				telemetry := this.getTelemetry(&reference := true)
+
+				if !reference
+					reference := telemetry
+
+				if reference
+					this.updateBrakeTrigger(reference)
+			}
+		}
+	}
+
+	reviewCornerPerformance(cornerNr, fileName) {
+		local oldMode := this.Mode
+		local found := false
+		local previousLap, currentLap, command, ignore
+
+		if this.Speaker[false] {
+			this.Mode := "Review"
+
+			try {
+				previousLap := this.getTelemetry(&ignore := false, cornerNr)
+				currentLap := this.TelemetryAnalyzer.createTelemetry("Current", fileName)
+
+				currentLap.Sections := choose(currentLap.Sections, (section) {
+										   if found {
+											   found := false
+
+											   return true
+										   }
+										   else if ((section.Type = "Corner") && (section.Nr = cornerNr)) {
+											   found := true
+
+											   return true
+										   }
+										   else
+											   return false
+									   })
+
+				if (this.TelemetryAnalyzer && previousLap && (previousLap.Sections.Length > 0)
+										   && currentLap && (currentLap.Sections.Length > 0)) {
+					command := substituteVariables(this.Instructions["Coaching.Corner.Review"]
+												 , {previousLap: previousLap.JSON, currentLap: currentLap.JSON
+												  , corner: cornerNr})
+
+					this.handleVoiceText("TEXT", command, false)
+				}
+				else if this.Speaker
+					this.getSpeaker().speakPhrase("Later", false, false, false, {Noise: false})
+			}
+			finally {
+				this.Mode := oldMode
+			}
+		}
+	}
+
+	saveReferenceTelemetry(scope) {
+		local bestSessionLapTime := 999999
+		local bestSessionLap := kUndefined
+		local bestInfo := false
+		local bestDBLapTime := 999999
+		local bestDBLap := kUndefined
+		local sessionDB, info, telemetries, ignore, candidate, lapTime
+		local file, size, telemetry, driver, fileName, nickname
+
+		loop Files, kTempDirectory . "Driving Coach\Telemetry\*.info", "F"
+			if !InStr(A_LoopFileName, "Reference") {
+				info := readMultiMap(A_LoopFileFullPath)
+				lapTime := getMultiMapValue(info, "Info", "LapTime", false)
+
+				if (lapTime && ((bestSessionLap == kUndefined) || (lapTime < bestSessionLapTime))) {
+					bestSessionLap := A_LoopFileFullPath
+					bestSessionLapTime := lapTime
+					bestInfo := info
+				}
+			}
+
+		if (bestSessionLap != kUndefined) {
+			sessionDB := SessionDatabase()
+
+			sessionDB.getTelemetryNames(this.Simulator, this.Car, this.Track, &telemetries := true, &ignore := false)
+
+			for ignore, candidate in telemetries {
+				info := sessionDB.readTelemetryInfo(this.Simulator, this.Car, this.Track, candidate)
+
+				lapTime := getMultiMapValue(info, "Lap", "LapTime", false)
+
+				if (lapTime && ((bestDBLap == kUndefined) || (lapTime < bestDBLapTime))) {
+					bestDBLap := candidate
+					bestDBLapTime := lapTime
+				}
+			}
+
+			if ((bestDBLap == kUndefined) || (bestSessionLapTime < bestDBLapTime)) {
+				parseDriverName(getMultiMapValue(bestInfo, "Info", "Driver"), , , &nickname)
+
+				SplitPath(bestSessionLap, , &directory, , &fileName)
+
+				file := FileOpen(directory . "\" . fileName, "r-wd")
+
+				fileName := (nickname . A_Space . Round(getMultiMapValue(bestInfo, "Info", "AirTemperature", 23))
+									  . A_Space . Round(getMultiMapValue(bestInfo, "Info", "TrackTemperature", 27))
+									  . A_Space . getMultiMapValue(bestInfo, "Info", "Weather", "Dry")
+									  . A_Space . Round(getMultiMapValue(bestInfo, "Info", "Fuel", 0)) . "L"
+									  . " - " . Round(bestSessionLapTime, 2))
+
+				if file {
+					size := file.Length
+
+					telemetry := Buffer(size)
+
+					file.RawRead(telemetry, size)
+
+					file.Close()
+
+					sessionDB.writeTelemetry(this.Simulator, this.Car, this.Track, fileName, telemetry, size
+										   , (scope = "Community") || sessionDB.getShareDefault("Lap Telemetries")
+										   , sessionDB.getSynchronizeDefault("Lap Telemetries")
+										   , SessionDatabase.ID)
+
+					info := sessionDB.readTelemetryInfo(this.Simulator, this.Car, this.Track, fileName)
+
+					addMultiMapValues(info, bestInfo)
+
+					setMultiMapValue(info, "Lap", "Driver", getMultiMapValue(bestInfo, "Info", "Driver"))
+					setMultiMapValue(info, "Lap", "LapTime", bestSessionLapTime)
+
+					if hasMultiMapValue(bestInfo, "Info", "SectorTimes")
+						setMultiMapValue(info, "Lap", "SectorTimes", getMultiMapValue(bestInfo, "Info", "SectorTimes"))
+
+					sessionDB.writeTelemetryInfo(this.Simulator, this.Car, this.Track, fileName, info)
+				}
+			}
+		}
+	}
+
+	getTelemetry(&reference?, corner?) {
+		local mode := this.ReferenceMode
+		local laps := getKeys(this.AvailableTelemetry)
+		local theLap := false
+		local bestLap := false
+		local lastLap := false
+		local ignore, lap, found, fileName, info, driver, lapTime, sectorTimes, lapNr, telemetry
+
+		for ignore, lap in bubbleSort(&laps, (a, b) => (a < b)) {
+			if (theLap && (mode = "None"))
+				break
+			else if ((mode = "Last") && theLap && lastLap)
+				break
+
+			lapNr := lap
+
+			if (this.AvailableTelemetry[lapNr] == true) {
+				if (lapNr = 0)
+					fileName := (kTempDirectory . "Driving Coach\Telemetry\Reference.telemetry")
+				else
+					fileName := (kTempDirectory . "Driving Coach\Telemetry\Lap " . lapNr . ".telemetry")
+
+				info := readMultiMap(fileName . ".info")
+
+				driver := getMultiMapValue(info, "Info", "Driver", SessionDatabase.getName("Creator"))
+				lapTime := getMultiMapValue(info, "Info", "LapTime", false)
+				sectorTimes := getMultiMapValue(info, "Info", "SectorTimes", false)
+
+				if lapTime {
+					if (sectorTimes && (Trim(sectorTimes) != "")) {
+						sectorTimes := string2Values(",", sectorTimes)
+
+						if !first(sectorTimes, (s) => (isNumber(s) && (s != 0)))
+							sectorTimes := false
+					}
+					else
+						sectorTimes := false
+
+					this.AvailableTelemetry[lapNr] := this.TelemetryAnalyzer.createTelemetry(lapNr ? lapNr : "Reference"
+																						   , fileName, driver, lapTime, sectorTimes)
+				}
+				else {
+					this.AvailableTelemetry[lapNr] := false
+
+					continue
+				}
+			}
+
+			lap := this.AvailableTelemetry[lapNr]
+
+			if (lap && isSet(corner) && corner) {
+				lap := lap.Clone()
+
+				found := false
+
+				lap.Sections := choose(lap.Sections, (section) {
+									if found {
+										found := false
+
+										return true
+									}
+									else if ((section.Type = "Corner") && (section.Nr = corner)) {
+										found := true
+
+										return true
+									}
+									else
+										return false
+								})
+			}
+
+			if theLap {
+				if (!lastLap && (lapNr != 0))
+					lastLap := lap
+
+				if ((lap.LapTime > 0) && (!bestLap || (lap.LapTime < bestLap.LapTime)))
+					bestLap := lap
+			}
+			else if (lapNr != 0)
+				theLap := lap
+		}
+
+		if isSet(reference) {
+			reference := false
+
+			if theLap
+				if ((mode = "Fastest") && bestLap)
+					reference := bestLap
+				else if ((mode = "Last") && lastLap && (lastLap.LapTime > 0))
+					reference := lastLap
+		}
+
+		return theLap
+	}
+
+	addInstructionHint(instruction) {
+		this.iInstructionHints[instruction] := true
+	}
+
+	getInstructionHints(cornerNr, reference, telemetry) {
+		local knowledgeBase := this.KnowledgeBase
+
+		nullZero(value) {
+			return (isNull(value) ? 0 : value)
+		}
+
+		nullRound(value, precision := 0, default := 0) {
+			if isNumber(value)
+				return Round(value, precision)
+			else
+				return default
+		}
+
+		writeCorner(type, corner) {
+			if (corner.Type != "Corner")
+				throw "Inconsistent section type detected in DrivingCoach.getInstructionHints..."
+
+			knowledgeBase.addFact(type . ".Corner.Nr", corner.Nr)
+			knowledgeBase.addFact(type . ".Corner.Time", corner.Time)
+			knowledgeBase.addFact(type . ".Corner.Length", corner.Length)
+
+			knowledgeBase.addFact(type . ".Corner.Steering.Corrections", corner.SteeringCorrections)
+			knowledgeBase.addFact(type . ".Corner.Steering.Smoothness", nullRound(corner.SteeringSmoothness))
+
+			if (corner.Start["Entry"] && (corner.Start["Entry"] != kNull)) {
+				knowledgeBase.addFact(type . ".Corner.Entry.Time", nullRound(corner.Time["Entry"], 0, 0))
+				knowledgeBase.addFact(type . ".Corner.Entry.Braking.Start", Round(corner.Start["Entry"], 1))
+				knowledgeBase.addFact(type . ".Corner.Entry.Braking.Length", nullRound(corner.Length["Entry"], 1, 0))
+				knowledgeBase.addFact(type . ".Corner.Entry.Brake.Pressure", Round(corner.MaxBrakePressure))
+				knowledgeBase.addFact(type . ".Corner.Entry.Brake.Rampup", Round(corner.BrakePressureRampUp, 1))
+				knowledgeBase.addFact(type . ".Corner.Entry.Brake.Corrections", corner.BrakeCorrections)
+				knowledgeBase.addFact(type . ".Corner.Entry.Brake.Smoothness", nullRound(corner.BrakeSmoothness, 0, 100))
+				knowledgeBase.addFact(type . ".Corner.Entry.ABSActivations", corner.ABSActivations)
+			}
+
+			if (corner.Start["Apex"] && (corner.Start["Apex"] != kNull)) {
+				knowledgeBase.addFact(type . ".Corner.Apex.Time", nullRound(corner.Time["Apex"], 0, 0))
+				knowledgeBase.addFact(type . ".Corner.Apex.Rolling.Start", Round(corner.Start["Apex"], 1))
+				knowledgeBase.addFact(type . ".Corner.Apex.Rolling.Length", nullRound(corner.Length["Apex"], 1, 0))
+				knowledgeBase.addFact(type . ".Corner.Apex.Acceleration.Lateral", nullRound(corner.AvgLateralGForce, 2))
+				knowledgeBase.addFact(type . ".Corner.Apex.Gear", corner.RollingGear)
+				knowledgeBase.addFact(type . ".Corner.Apex.RPM", corner.RollingRPM)
+				knowledgeBase.addFact(type . ".Corner.Apex.Speed", nullRound(corner.MinSpeed))
+			}
+			else {
+				knowledgeBase.addFact(type . ".Corner.Apex.Acceleration.Lateral", nullRound(corner.AvgLateralGForce, 2))
+				knowledgeBase.addFact(type . ".Corner.Apex.Speed", nullRound(corner.MinSpeed))
+			}
+
+			if (corner.Start["Exit"] && (corner.Start["Exit"] != kNull)) {
+				knowledgeBase.addFact(type . ".Corner.Exit.Time", nullRound(corner.Time["Exit"], 0, 0))
+				knowledgeBase.addFact(type . ".Corner.Exit.Accelerating.Start", Round(corner.Start["Exit"], 1))
+				knowledgeBase.addFact(type . ".Corner.Exit.Accelerating.Length", nullRound(corner.Length["Exit"], 1, 0))
+				knowledgeBase.addFact(type . ".Corner.Exit.Gear", corner.AcceleratingGear)
+				knowledgeBase.addFact(type . ".Corner.Exit.RPM", corner.AcceleratingRPM)
+				knowledgeBase.addFact(type . ".Corner.Exit.Speed", nullRound(corner.AcceleratingSpeed))
+				knowledgeBase.addFact(type . ".Corner.Exit.Throttle.Corrections", corner.ThrottleCorrections)
+				knowledgeBase.addFact(type . ".Corner.Exit.Throttle.Smoothness", nullRound(corner.ThrottleSmoothness, 0, 100))
+				knowledgeBase.addFact(type . ".Corner.Exit.TCActivations", corner.TCActivations)
+			}
+		}
+
+		writeFollowUp(type, followUp) {
+			knowledgeBase.addFact(type . ".FollowUp.Nr", followUp.Nr)
+			knowledgeBase.addFact(type . ".FollowUp.Type", followUp.Type)
+			knowledgeBase.addFact(type . ".FollowUp.Time", followUp.Time)
+			knowledgeBase.addFact(type . ".FollowUp.Length", followUp.Length)
+		}
+
+		if (knowledgeBase && telemetry && reference) {
+			for index, section in telemetry.Sections
+				if (index = 1)
+					writeCorner("Lap", section)
+				else if (index = 2)
+					writeFollowUp("Lap", section)
+
+			for index, section in reference.Sections
+				if (index = 1)
+					writeCorner("Reference", section)
+				else if (index = 2)
+					writeFollowUp("Reference", section)
+
+			this.iInstructionHints := CaseInsenseMap()
+
+			knowledgeBase.addFact("Performance.Analyze", true)
+
+			knowledgeBase.produce()
+
+			Task.startTask(() {
+				knowledgeBase.addFact("Performance.Clear", true)
+
+				knowledgeBase.produce()
+			})
+
+			return getKeys(this.iInstructionHints)
+		}
+		else
+			return []
+	}
+
+	startupTelemetryCollector() {
+		local loadedLaps, provider
+
+		updateTelemetry() {
+			local knowledgeBase := this.KnowledgeBase
+			local newLaps := []
+			local lap, car, driver, lapTime, sectorTimes, info
+
+			if knowledgeBase
+				loop Files, kTempDirectory . "Driving Coach\Telemetry\*.telemetry" {
+					lap := StrReplace(StrReplace(A_LoopFileName, "Lap ", ""), ".telemetry", "")
+
+					if (!loadedLaps.Has(lap) && knowledgeBase.hasFact("Lap." . lap . ".Driver.Forname")) {
+						if isDebug()
+							logMessage(kLogDebug, "Telemetry for lap " . lap . " available...")
+
+						car := knowledgeBase.getValue("Driver.Car", kUndefined)
+
+						lapTime := (this.getLapTime(car) / 1000)
+
+						if (lapTime > 0) {
+							info := newMultiMap()
+
+							setMultiMapValue(info, "Info", "LapTime", lapTime)
+
+							driver := driverName(knowledgeBase.getValue("Lap." . lap . ".Driver.Forname")
+										   , knowledgeBase.getValue("Lap." . lap . ".Driver.Surname")
+										   , knowledgeBase.getValue("Lap." . lap . ".Driver.Nickname"))
+
+							setMultiMapValue(info, "Info", "Driver", driver)
+
+							sectorTimes := this.getSectorTimes(car)
+
+							if (sectorTimes && (sectorTimes.Length > 0))
+								setMultiMapValue(info, "Info", "SectorTimes", values2String(",", collect(sectorTimes, (t) => Round(t / 1000, 2))*))
+
+							setMultiMapValue(info, "Info", "Fuel", this.LastFuelAmount)
+							setMultiMapValue(info, "Info", "Weather", knowledgeBase.getValue("Weather", "Dry"))
+							setMultiMapValue(info, "Info", "AirTemperature", knowledgeBase.getValue("Weather.Temperature", 23))
+							setMultiMapValue(info, "Info", "TrackTemperature", knowledgeBase.getValue("Track.Temperature", 27))
+
+							writeMultiMap(A_LoopFileFullPath . ".info", info)
+
+							newLaps.Push(lap)
+						}
+
+						loadedLaps[lap] := true
+					}
+				}
+
+			if (newLaps.Length > 0) {
+				bubbleSort(&newLaps)
+
+				this.telemetryAvailable(newLaps)
+			}
+		}
+
+		if (this.TelemetryCollector && ((this.TelemetryCollector.Simulator != this.Simulator)
+									 || (this.TelemetryCollector.Track != this.Track)
+									 || (this.iTelemetryCollector.TrackLength != this.TrackLength)))
+			this.shutdownTelemetryCollector()
+
+		if (isDebug() && !this.TelemetryCollector)
+			logMessage(kLogDebug, "Telemetry coaching: " . this.Simulator . " " . this.Track . " (" . this.TrackLength . ")")
+
+		if (!this.TelemetryCollector && this.Simulator && this.Track && ((this.TrackLength > 0) || isDebug())) {
+			DirCreate(kTempDirectory . "Driving Coach")
+
+			deleteDirectory(kTempDirectory . "Driving Coach\Conversations")
+
+			if !isDebug()
+				deleteDirectory(kTempDirectory . "Driving Coach\Telemetry")
+
+			DirCreate(kTempDirectory . "Driving Coach\Telemetry")
+			DirCreate(kTempDirectory . "Driving Coach\Conversations")
+
+			provider := getMultiMapValue(this.Settings, "Assistant.Coach", "Telemetry.Provider", "Internal")
+
+			if (provider != "Internal")
+				provider .= ("|" . getMultiMapValue(this.Settings, "Assistant.Coach", "Telemetry.Provider.URL", ""))
+
+			if isDebug()
+				logMessage(kLogDebug, "Using telemetry provider " . provider . "...")
+
+			this.iTelemetryAnalyzer := TelemetryAnalyzer(this.Simulator, this.Track)
+			this.iTelemetryCollector := TelemetryCollector(provider, kTempDirectory . "Driving Coach\Telemetry", this.Simulator, this.Track, this.TrackLength)
+
+			this.iTelemetryCollector.startup()
+
+			loadedLaps := CaseInsenseMap()
+
+			this.iCollectorTask := PeriodicTask(updateTelemetry, 10000, kLowPriority)
+
+			this.iCollectorTask.start()
+
+			return true
+		}
+		else
+			return false
+	}
+
+	shutdownTelemetryCollector() {
+		if this.TelemetryCollector {
+			this.TelemetryCollector.shutdown()
+
+			this.iTelemetryCollector := false
+		}
+
+		if this.iCollectorTask {
+			this.iCollectorTask.stop()
+
+			this.iCollectorTask := false
+		}
+
+		this.iTelemetryAnalyzer := false
+	}
+
+	startupTrackTrigger() {
+		local distance := - Abs(getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Corner.Distance", 400))
+		local simulator := this.Simulator
+		local analyzer := this.TelemetryAnalyzer
+		local sections, positions, sessionDB, code, data, exePath, protocol, pid, arguments
+		local ignore, section, x, y, index
+
+		if (!this.iTrackTriggerPID && simulator && analyzer) {
+			sections := analyzer.TrackSections
+
+			if (sections && (sections.Length > 0)) {
+				positions := ""
+
+				for ignore, section in sections
+					if section.Active
+						if (section.Type = "Corner") {
+							if analyzer.getSectionCoordinateIndex(section, &x, &y, &index, distance) {
+								if isDebug()
+									logMessage(kLogDebug, "Corner #" . section.Nr . A_Space . x . A_Space . y . A_Space . index)
+
+								positions .= (A_Space . A_Index . A_Space . x . A_Space . y)
+							}
+							else
+								positions .= (A_Space . A_Index . A_Space . -32767 . A_Space . -32767)
+						}
+						else
+							positions .= (A_Space . A_Index . A_Space . -32767 . A_Space . -32767)
+
+				for ignore, section in sections
+					if section.Active
+						if analyzer.getSectionCoordinateIndex(section, &x, &y, &ignore)
+							positions .= (A_Space . (sections.Length + A_Index) . A_Space . x . A_Space . y)
+						else
+							positions .= (A_Space . (sections.Length + A_Index) . A_Space . -32767 . A_Space . -32767)
+
+				sessionDB := SessionDatabase()
+
+				code := sessionDB.getSimulatorCode(simulator)
+				data := sessionDB.getTrackData(simulator, this.Track)
+
+				protocol := "SHM"
+				exePath := "..."
+				pid := false
+
+				try {
+					protocol := SimulatorProvider.getProtocol(code, "Coach")
+
+					if protocol {
+						if protocol.HasProp("Arguments")
+							arguments := values2String(A_Space, collect(protocol.Arguments, (a) => ("`"" . a . "`""))*)
+						else
+							arguments := ""
+
+						exePath := protocol.File
+						protocol := protocol.Protocol
+
+						if !FileExist(exePath)
+							throw "File not found..."
+
+						if data
+							Run("`"" . exePath . "`" " . arguments . " -Trigger `"" . data . "`" " . positions, kBinariesDirectory, "Hide", &pid)
+						else
+							Run("`"" . exePath . "`" " . arguments . " -Trigger " . positions, kBinariesDirectory, "Hide", &pid)
+					}
+				}
+				catch Any as exception {
+					logError(exception, true)
+
+					logMessage(kLogCritical, substituteVariables(translate("Cannot start %simulator% %protocol% Coach (")
+															   , {simulator: code, protocol: protocol})
+										   . exePath . translate(") - please rebuild the applications in the binaries folder (")
+										   . kBinariesDirectory . translate(")"))
+
+					if !kSilentMode
+						showMessage(substituteVariables(translate("Cannot start %simulator% %protocol% Coach (%exePath%) - please check the configuration...")
+													  , {exePath: exePath, simulator: code, protocol: protocol})
+								  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+				}
+
+				if pid
+					this.iTrackTriggerPID := pid
+			}
+		}
+
+		return (this.iTrackTriggerPID != false)
+	}
+
+	shutdownTrackTrigger(force := false, arguments*) {
+		local pid := this.iTrackTriggerPID
+		local tries
+
+		if ((arguments.Length > 0) && inList(["Logoff", "Shutdown"], arguments[1]))
+			return false
+
+		if pid {
+			ProcessClose(pid)
+
+			if (force && ProcessExist(pid)) {
+				Sleep(500)
+
+				tries := 5
+
+				while (tries-- > 0) {
+					pid := ProcessExist(pid)
+
+					if pid {
+						ProcessClose(pid)
+
+						Sleep(500)
+					}
+					else
+						break
+				}
+			}
+
+			this.iTrackTriggerPID := false
+		}
+
+		return false
+	}
+
+	startupBrakeTrigger() {
+		local simulator := this.Simulator
+		local analyzer := this.TelemetryAnalyzer
+		local player := requireSoundPlayer("DCTriggerPlayer.exe")
+		local options := ""
+		local sessionDB, code, data, options, telemetry, reference, workingDirectory
+		local exePath, protocol, pid, arguments
+
+		if (!this.iBrakeTriggerPID && simulator && analyzer) {
+			this.iBrakeTriggerFile := temporaryFileName("Brake", "trigger")
+
+			if (analyzer.TrackSections.Length > 0) {
+				sessionDB := SessionDatabase()
+
+				code := sessionDB.getSimulatorCode(simulator)
+				data := sessionDB.getTrackData(simulator, this.Track)
+
+				protocol := "SHM"
+				exePath := "..."
+				pid := false
+
+				try {
+					protocol := SimulatorProvider.getProtocol(code, "Coach")
+
+					if protocol {
+						if protocol.HasProp("Arguments")
+							arguments := values2String(A_Space, collect(protocol.Arguments, (a) => ("`"" . a . "`""))*)
+						else
+							arguments := ""
+
+						exePath := protocol.File
+						protocol := protocol.Protocol
+
+						if !FileExist(exePath)
+							throw "File not found..."
+
+						if this.AudioSettings {
+							if kSox
+								SplitPath(kSox, , &workingDirectory)
+							else
+								workingDirectory := A_WorkingDir
+
+							options := (" `"" . this.AudioSettings.AudioDevice . "`" " . this.AudioSettings.Volume . (player ? (" `"" . player . "`" `"" . workingDirectory . "`"") : ""))
+						}
+
+						if data
+							Run("`"" . exePath . "`" " . arguments . " -TrackHints `"" . data . "`" `"" . this.iBrakeTriggerFile . "`"" . options, kBinariesDirectory, "Hide", &pid)
+						else
+							Run("`"" . exePath . "`" " . arguments . " -TrackHints `"" . this.iBrakeTriggerFile . "`"" . options, kBinariesDirectory, "Hide", &pid)
+					}
+				}
+				catch Any as exception {
+					logError(exception, true)
+
+					logMessage(kLogCritical, substituteVariables(translate("Cannot start %simulator% %protocol% Coach (")
+															   , {simulator: code, protocol: protocol})
+										   . exePath . translate(") - please rebuild the applications in the binaries folder (")
+										   . kBinariesDirectory . translate(")"))
+
+					if !kSilentMode
+						showMessage(substituteVariables(translate("Cannot start %simulator% %protocol% Coach (%exePath%) - please check the configuration...")
+													  , {exePath: exePath, simulator: code, protocol: protocol})
+								  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+				}
+
+				if pid {
+					this.iBrakeTriggerPID := pid
+
+					telemetry := this.getTelemetry(&reference := true)
+
+					if !reference
+						reference := telemetry
+
+					if reference
+						this.updateBrakeTrigger(reference)
+				}
+			}
+		}
+
+		return (this.iBrakeTriggerPID != false)
+	}
+
+	updateBrakeTrigger(telemetry, lap?) {
+		local knowledgeBase := this.KnowledgeBase
+		local lapTime := telemetry.getValue(telemetry.Data.Length, "Time", 0)
+		local collector := this.TelemetryCollector
+		local triggerFile := temporaryFileName("Brake", "trigger.tmp")
+		local countdownOne := this.iCountdownOne
+		local countdownTwo := this.iCountdownTwo
+		local brakeCommand := this.iBrakeCommand
+		local releaseCommand := this.iReleaseCommand
+		local speaker := this.VoiceManager.getLocalSpeaker()
+		local triggers := ""
+		local tries := 3
+		local brakeSections := []
+		local delta := Abs(getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Braking.Time", 300))
+		local brakeThreshold := (getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.HardBraking", 90) / 100)
+		local releaseThreshold := (getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.BrakeRelease", 80) / 100)
+		local trailBrakingThreshold := ((100 - getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.TrailBraking", 50)) / 100)
+		local trailSteeringThreshold := (getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Threshold.TrailSteering", 70) / 100)
+		local trailBrakeSteeringRatio := getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Ratio.TrailBrakeSteering", 1.0)
+		local ignore, index, braking, brake, maxBrake, maxBrakeIndex, metersPerSec, trackLength, hasRelease
+		local brakeTime, startDistance, endDistance, x, y
+		local section, numSections, instructions, clean
+
+		static lastTelemetry := false
+		static nextLap := 0
+		static distance := 25
+
+		normalizeTime(time) {
+			if (time < 0)
+				return (lapTime + time)
+			else if (time > lapTime)
+				return (time - lapTime)
+			else
+				return time
+		}
+
+		getIntro(braking) {
+			local brakeCurve := braking.Curve
+			local maxSteering := Abs(braking.MaxSteering)
+			local maxBrake := 0
+			local releaseStart := false
+			local trailBrake := false
+			local introPhrase, brakePhrase, releasePhrase, introNr, brakeNr, releaseNr
+			local ignore, key, hardBrake, index, brake, steering
+
+			for index, brake in brakeCurve {
+				maxBrake := Max(brake.Brake, maxBrake)
+
+				if (!releaseStart && (brake.Brake <= (maxBrake * releaseThreshold)))
+					releaseStart := index
+			}
+
+			hardBrake := (maxBrake >= brakeThreshold)
+
+			maxSteering *= trailSteeringThreshold
+			maxBrake *= ((1 - trailSteeringThreshold) * trailBrakeSteeringRatio)
+
+			for index, brake in brakeCurve
+				if ((Abs(brake.Steering) > maxSteering) && (brake.Brake > maxBrake)) {
+					trailBrake := true
+
+					break
+				}
+
+			trailBrake := (trailBrake || (releaseStart ? (releaseStart <= (brakeCurve.Length * trailBrakingThreshold)) : false))
+
+			introPhrase := speaker.getPhrase("BrakeIntro", false, &ignore := false, &introNr)
+
+			if hardBrake
+				brakePhrase := speaker.getPhrase("BrakeHard", false, &ignore := false, &brakeNr)
+			else
+				brakePhrase := speaker.getPhrase("BrakeSoft", false, &ignore := false, &brakeNr)
+
+			if trailBrake
+				releasePhrase := speaker.getPhrase("TrailBrake", false, &ignore := false, &releaseNr)
+			else
+				releasePhrase := speaker.getPhrase("NoTrailBrake", false, &ignore := false, &releaseNr)
+
+			key := (introNr . (hardBrake ? "H" : "S") . brakeNr . (trailBrake ? "T" : "N") . releaseNr)
+
+			if !this.iBrakeHints.Has(key)
+				this.iBrakeHints[key] := speaker.speak(introPhrase . A_Space . brakePhrase . A_Space . releasePhrase
+													 , false, key, {File: true, Rephrase: false})
+
+			return this.iBrakeHints[key]
+		}
+
+		overlap(section1, section2) {
+			if (section1.Start < section1.End)
+				return (((section2.Start >= section1.Start) && (section2.Start <= section1.End))
+					 || ((section2.End >= section1.Start) && (section2.End <= section1.End)))
+			else
+				return (((section2.Start >= section1.Start) || (section2.Start <= section1.End))
+					 || ((section2.End >= section1.Start) || (section2.End <= section1.End)))
+		}
+
+		if !isSet(lap)
+			lap := knowledgeBase.getValue("Lap")
+
+		if ((telemetry == lastTelemetry) && (lap < nextLap))
+			return
+		else {
+			lastTelemetry := telemetry
+			nextLap := (lap + 2)
+		}
+
+		if (this.Speaker[true] && (this.iBrakeTriggerPID || isDebug()) && collector && brakeCommand)
+			try {
+				trackLength := collector.TrackLength
+
+				for index, braking in telemetry.Braking {
+					metersPerSec := (braking.Speed * 1000 / 3600)
+					brakeTime := braking.Time
+					section := A_Index
+
+					if telemetry.findCoordinates("Time", normalizeTime(brakeTime - 8000), &x, &y, &startDistance := "Distance")
+						instructions := (section . A_Space . "Intro" . A_Space . x . A_Space . y . A_Space . distance . A_Space . getIntro(braking) . "`n")
+
+					if telemetry.findCoordinates("Time", normalizeTime(brakeTime - 3000), &x, &y)
+						instructions .= (section . A_Space . "Ready" . A_Space . x . A_Space . y . A_Space . distance . A_Space . countdownOne . "`n")
+
+					if telemetry.findCoordinates("Time", normalizeTime(brakeTime - 1500), &x, &y)
+						instructions .= (section . A_Space . "Set" . A_Space . x . A_Space . y . A_Space . distance . A_Space . countdownTwo . "`n")
+
+					if telemetry.findCoordinates("Time", normalizeTime(brakeTime - delta), &x, &y)
+						instructions .= (section . A_Space . "Brake" . A_Space . x . A_Space . y . A_Space . distance . A_Space . brakeCommand)
+
+					endDistance := (braking.Start + metersPerSec)
+
+					maxBrake := 0
+					maxBrakeIndex := 1
+					hasRelease := false
+
+					for index, brake in braking.Curve
+						if (brake.Brake < (maxBrake * releaseThreshold)) {
+							endDistance := (brake.Distance + (metersPerSec / 2))
+
+							threshold := (maxBrake - ((maxBrake - (maxBrake * releaseThreshold)) / 2))
+
+							while (--index > maxBrakeIndex) {
+								brake := braking.Curve[index]
+
+								if (brake.Brake > threshold) {
+									brake := braking.Curve[index + 1]
+
+									if (((brake.Distance - braking.Start) > distance)
+									 && telemetry.findCoordinates("Time", normalizeTime(brake.Time - delta), &x, &y)) {
+										instructions .= ("`n" . section . A_Space . "Release" . A_Space . x . A_Space . y . A_Space . distance . A_Space . releaseCommand)
+
+										hasRelease := true
+									}
+
+									break
+								}
+							}
+
+							break
+						}
+						else if (brake.Brake > maxBrake) {
+							maxBrakeIndex := index
+
+							maxBrake := brake.Brake
+						}
+
+					if !hasRelease
+						for index, brake in braking.Curve
+							if ((brake.Brake < (maxBrake * releaseThreshold)) && ((brake.Distance - braking.Start) > distance)) {
+								endDistance := (brake.Distance + (metersPerSec / 2))
+
+								if telemetry.findCoordinates("Time", normalizeTime(brake.Time - delta), &x, &y)
+									instructions .= ("`n" . section . A_Space . "Release" . A_Space . x . A_Space . y . A_Space . distance . A_Space . releaseCommand)
+
+								break
+							}
+							else
+								maxBrake := Max(brake.Brake, maxBrake)
+
+					if (endDistance > trackLength)
+						endDistance := (startDistance - trackLength)
+
+					brakeSections.Push({Corner: section, Speed: metersPerSec
+									  , Start: startDistance, End: endDistance, Instructions: instructions})
+				}
+
+				if isDebug()
+					logMessage(kLogDebug, "All brake sections: " . values2String(", ", collect(brakeSections, (b) => b.Corner . ": [" . b.Start . ", " . b.End . "]")*))
+
+				brakeSections := choose(brakeSections, (*) => (Random(1.0, 10.0) <= 7))
+
+				if isDebug()
+					logMessage(kLogDebug, "Brake section candidates: " . values2String(", ", collect(brakeSections, (b) => b.Corner . ": [" . b.Start . ", " . b.End . "]")*))
+
+				loop {
+					numSections := brakeSections.Length
+					clean := true
+					triggers := ""
+
+					for index, section in brakeSections {
+						if (numSections > 1)
+							if (index = 1) {
+								if (overlap(section, brakeSections[2]) || overlap(brakeSections[numSections], section)) {
+									brakeSections.RemoveAt(index)
+
+									clean := false
+
+									break
+								}
+							}
+							else if (index = numSections) {
+								if (overlap(section, brakeSections[1]) || overlap(brakeSections[numSections - 1], section)) {
+									brakeSections.RemoveAt(index)
+
+									clean := false
+
+									break
+								}
+							}
+							else if (overlap(brakeSections[Max(1, index - 1)], section)
+								  || overlap(section, brakeSections[Min(numSections, index + 1)])) {
+								brakeSections.RemoveAt(index)
+
+								clean := false
+
+								break
+							}
+
+						if (triggers != "")
+							triggers .= ("`n" . section.Instructions)
+						else
+							triggers := section.Instructions
+					}
+				}
+				until clean
+
+				if isDebug() {
+					do(brakeSections, (section) {
+						logMessage(kLogDebug, "Corner: " . section.Corner . "; Start: " . section.Start
+																		  . "; End: " . section.End . "; Speed (m/s): " . section.Speed)
+					})
+				}
+
+				FileAppend(triggers, triggerFile)
+
+				while (tries-- > 0)
+					try {
+						FileMove(triggerFile, this.iBrakeTriggerFile, 1)
+
+						break
+					}
+					catch Any {
+						Sleep(100)
+					}
+			}
+			catch Any as exception {
+				logError(exception, true)
+			}
+	}
+
+	shutdownBrakeTrigger(force := false, arguments*) {
+		local pid := this.iBrakeTriggerPID
+		local tries
+
+		if ((arguments.Length > 0) && inList(["Logoff", "Shutdown"], arguments[1]))
+			return false
+
+		if pid {
+			ProcessClose(pid)
+
+			if (force && ProcessExist(pid)) {
+				Sleep(500)
+
+				tries := 5
+
+				while (tries-- > 0) {
+					pid := ProcessExist(pid)
+
+					if pid {
+						ProcessClose(pid)
+
+						Sleep(500)
+					}
+					else
+						break
+				}
+			}
+
+			loop 5 {
+				if deleteFile(this.iBrakeTriggerFile)
+					break
+
+				Sleep(100)
+			}
+
+			this.iBrakeTriggerPID := false
+		}
+
+		return false
+	}
+
+	prepareSession(&settings, &data, formationLap := true) {
+		local prepared := this.Prepared
+		local announcements := false
+		local onTrackCoaching := false
+		local brakeCoaching := false
+		local raceMotivation := false
+		local facts
+
+		if !prepared {
+			if formationLap {
+				this.updateDynamicValues({KnowledgeBase: false
+										, OverallTime: 0, BestLapTime: 0
+										, LastFuelAmount: 0, InitialFuelAmount: 0, LastEnergyAmount: 0, InitialEnergyAmount: 0
+										, EnoughData: false})
+				this.updateSessionValues({Simulator: "", Car: "", Track: "", Session: kSessionFinished, SessionTime: false, Laps: Map(), Standings: []})
+			}
+
+			this.restartConversation()
+		}
+
+		facts := super.prepareSession(&settings, &data, formationLap)
+
+		if (!prepared && settings) {
+			this.updateConfigurationValues({UseTalking: getMultiMapValue(settings, "Assistant.Coach", "Voice.UseTalking", false)})
+
+			if (this.Session = kSessionPractice) {
+				announcements := {SessionInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Practice.Session", true)
+								, StintInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Practice.Stint", true)
+								, HandlingInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Practice.Handling", true)}
+
+				onTrackCoaching := getMultiMapValue(settings, "Assistant.Coach", "Practice.OnTrackCoaching", false)
+				brakeCoaching := getMultiMapValue(settings, "Assistant.Coach", "Practice.BrakeCoaching", false)
+				raceMotivation := getMultiMapValue(settings, "Assistant.Coach", "Practice.RaceMotivation", false)
+			}
+			else if (this.Session = kSessionQualification) {
+				announcements := {SessionInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Qualification.Session", true)
+								, StintInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Qualification.Stint", true)
+								, HandlingInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Qualification.Handling", false)}
+
+				onTrackCoaching := getMultiMapValue(settings, "Assistant.Coach", "Qualification.OnTrackCoaching", false)
+				brakeCoaching := getMultiMapValue(settings, "Assistant.Coach", "Qualification.BrakeCoaching", false)
+				raceMotivation := getMultiMapValue(settings, "Assistant.Coach", "Qualification.RaceMotivation", false)
+			}
+			else if (this.Session = kSessionRace) {
+				announcements := {SessionInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Race.Session", true)
+								, StintInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Race.Stint", true)
+								, HandlingInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Race.Handling", false)}
+
+				onTrackCoaching := getMultiMapValue(settings, "Assistant.Coach", "Race.OnTrackCoaching", false)
+				brakeCoaching := getMultiMapValue(settings, "Assistant.Coach", "Race.BrakeCoaching", false)
+				raceMotivation := getMultiMapValue(settings, "Assistant.Coach", "Race.RaceMotivation", false)
+			}
+			else if (this.Session = kSessionTimeTrial) {
+				announcements := {SessionInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Time Trial.Session", true)
+								, StintInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Time Trial.Stint", true)
+								, HandlingInformation: getMultiMapValue(settings, "Assistant.Coach", "Data.Time Trial.Handling", false)}
+
+				onTrackCoaching := getMultiMapValue(settings, "Assistant.Coach", "Time Trial.OnTrackCoaching", false)
+				brakeCoaching := getMultiMapValue(settings, "Assistant.Coach", "Time Trial.BrakeCoaching", false)
+				raceMotivation := getMultiMapValue(settings, "Assistant.Coach", "Time Trial.RaceMotivation", false)
+			}
+
+			if announcements
+				this.updateConfigurationValues({Announcements: announcements, OnTrackCoaching: onTrackCoaching || this.OnTrackCoaching
+																			, BrakeCoaching: brakeCoaching || this.BrakeCoaching
+																			, RaceMotivation: raceMotivation || this.RaceMotivation})
+			else
+				this.updateConfigurationValues({OnTrackCoaching: onTrackCoaching || this.OnTrackCoaching, BrakeCoaching: brakeCoaching || this.BrakeCoaching, RaceMotivation: raceMotivation || this.RaceMotivation})
+		}
+
+		if this.CoachingActive
+			this.startupTelemetryCoaching()
+		else if this.RaceMotivation
+			this.startTelemetryCoaching(true, "Motivation", false)
+		else if this.OnTrackCoaching
+			this.startTelemetryCoaching(true, "Track", false)
+		else if this.BrakeCoaching
+			this.startTelemetryCoaching(true, "Brake", false)
+
+		return facts
+	}
+
+	startSession(settings, data) {
+		local facts := this.prepareSession(&settings, &data, false)
+
+		this.updateConfigurationValues({LearningLaps: 1, AdjustLapTime: true, SaveSettings: false})
+
+		if !this.KnowledgeBase
+			this.updateDynamicValues({KnowledgeBase: this.createKnowledgeBase(facts)})
+
+		this.updateDynamicValues({BestLapTime: 0, OverallTime: 0
+								, LastFuelAmount: 0, InitialFuelAmount: 0, LastEnergyAmount: 0, InitialEnergyAmount: 0
+								, EnoughData: false})
+
+		this.updateSessionValues({Standings: [], Laps: Map()})
+
+		if this.Debug[kDebugKnowledgeBase]
+			this.dumpKnowledgeBase(this.KnowledgeBase)
+
+		if this.Announcements["HandlingInformation"]
+			this.startIssueAnalyzer()
+	}
+
+	finishSession(shutdown := true) {
+		if (this.Session != kSessionFinished) {
+			if (this.Prepared && (this.SaveReference != "Off"))
+				this.saveReferenceTelemetry(this.SaveReference)
+
+			this.shutdownTelemetryCoaching(false)
+
+			; deleteDirectory(kTempDirectory . "Driving Coach\Telemetry")
+		}
+
+		this.stopIssueAnalyzer()
+
+		this.updateDynamicValues({Prepared: false, Greeted: false})
+	}
+
+	updateLaps(lapNumber, data) {
+		local knowledgeBase := this.KnowledgeBase
+		local driver := knowledgeBase.getValue("Driver.Car", false)
+		local standingsData := CaseInsenseWeakMap()
+		local standings := []
+		local keys, ignore, car, carData, sectorTimes
+
+		if driver {
+			sectorTimes := this.getSectorTimes(driver)
+
+			if sectorTimes {
+				sectorTimes := sectorTimes.Clone()
+
+				loop sectorTimes.Length
+					sectorTimes[A_Index] := Round(sectorTimes[A_Index] / 1000, 1)
+			}
+			else
+				sectorTimes := false
+
+			this.Laps[lapNumber] := {Class: this.getClass(driver), OverallPosition: this.getPosition(driver), ClassPosition: this.getPosition(driver, "Class")
+								   , SectorTimes: sectorTimes, LapTime: Round(this.getLapTime(driver) / 1000, 1)}
+
+			for ignore, car in this.getCars() {
+				sectorTimes := this.getSectorTimes(car)
+
+				if sectorTimes {
+					sectorTimes := sectorTimes.Clone()
+
+					loop sectorTimes.Length
+						sectorTimes[A_Index] := Round(sectorTimes[A_Index] / 1000, 1)
+				}
+				else
+					sectorTimes := false
+
+				carData := {Nr: this.getNr(car), Class: this.getClass(car)
+						  , OverallPosition: this.getPosition(car), ClassPosition: this.getPosition(car, "Class")
+						  , SectorTimes: sectorTimes, LapTime: Round(this.getLapTime(car) / 1000, 1)}
+
+				standingsData[carData.OverallPosition] := carData
+			}
+
+			loop standingsData.Count
+				if standingsData.Has(A_Index)
+					standings.Push(standingsData[A_Index])
+
+			this.Standings := standings
+		}
+	}
+
+	addLap(lapNumber, &data) {
+		local result := super.addLap(lapNumber, &data)
+
+		if (lapNumber > 0) {
+			this.updateLaps(lapNumber, data)
+
+			if this.CoachingActive
+				this.startupTelemetryCoaching()
+
+			if this.RaceMotivation
+				if (Random(1, 20) > 18)
+					this.updateDriver()
+		}
+
+		return result
+	}
+
+	updateLap(lapNumber, &data, arguments*) {
+		local result := super.updateLap(lapNumber, &data, arguments*)
+
+		if (lapNumber > 0) {
+			if this.CoachingActive
+				this.startupTelemetryCoaching()
+
+			if this.RaceMotivation
+				if (Random(1, 20) > 18)
+					this.updateDriver()
+		}
+
+		return result
+	}
+
+	acousticFeedback(soundFile) {
+		playSound("DCSoundPlayer", soundFile, this.AudioSettings, "echos 1 1 1 1")
+	}
+
+	updateDriver() {
+		local knowledgeBase := this.KnowledgeBase
+		local telemetry, command, reference
+		local lapNumber, lapTime, oldMode, valid, delta, lastDelta, bestDelta
+
+		static analyzedLaps := 0
+		static lastLapTime := 2147483647
+		static bestLapTime := 2147483647
+
+		if knowledgeBase {
+			lapNumber := knowledgeBase.getValue("Lap", 0)
+
+			if ((lapNumber > analyzedLaps) && (lapNumber >= (this.BaseLap + (2 * this.LearningLaps)))) {
+				lapTime := knowledgeBase.getValue("Lap." . lapNumber . ".Time", 0)
+				valid := knowledgeBase.getValue("Lap." . lapNumber . ".Valid", true)
+
+				if ((lapTime = lastLapTime) || (Random(1, 10) > 3))
+					return
+
+				lastDelta := (lapTime - lastLapTime)
+				bestDelta := (lapTime - bestLapTime)
+
+				if this.Speaker[false] {
+					if ((lastDelta > 800) || (bestDelta > 800)) {
+						this.getSpeaker().speakPhrase("CallToFocus", false, false, false, {Noise: false})
+
+						if ((lastDelta > 1000) || (bestDelta > 1000)) {
+							oldMode := this.Mode
+
+							this.Mode := "Motivation"
+
+							try {
+								telemetry := this.getTelemetry(&reference := true)
+
+								if (telemetry && (telemetry.Sections.Length > 0) && reference) {
+									command := substituteVariables(this.Instructions["Motivation.TimeLoss"]
+																 , {telemetry: telemetry.JSON})
+
+									this.handleVoiceText("TEXT", command, false)
+								}
+							}
+							finally {
+								this.Mode := oldMode
+							}
+						}
+					}
+					else if ((lastDelta > 500) && (Random(1, 10) > 7))
+						this.getSpeaker().speakPhrase("CallToFocus", false, false, false, {Noise: false})
+					else if valid
+						if ((bestDelta < 300) || (lastDelta < -1000))
+							this.getSpeaker().speakPhrase("PraiseFocus", false, false, false, {Noise: false})
+						else if (((bestDelta < 500) || (lastDelta < -500)) && (Random(1, 10) > 5))
+							this.getSpeaker().speakPhrase("PraiseFocus", false, false, false, {Noise: false})
+				}
+
+				analyzedLaps := lapNumber
+
+				if valid {
+					lastLapTime := lapTime
+					bestLapTime := Min(bestLapTime, lapTime)
+				}
+			}
+			else if ((lapNumber < analyzedLaps) || (lapNumber < (this.BaseLap + (2 * this.LearningLaps)))) {
+				analyzedLaps := 0
+				lastLapTime := 2147483647
+				bestLapTime := 2147483647
+			}
+		}
+	}
+
+	positionTrigger(sectionNr, positionX, positionY, diagnostics*) {
+		local analyzer := this.TelemetryAnalyzer
+		local oldMode := this.Mode
+		local wait := (getMultiMapValue(this.Settings, "Assistant.Coach", "Coaching.Corner.Wait", 10) * 1000)
+		local section, cornerNr, instruct, telemetry, telemetryJSON, reference, command, instructionHints, problemsInstruction
+		local speaker, index, hint, lastHint, conjunction, conclusion
+
+		static nextRecommendation := false
+		static hintProblems := false
+		static hints := false
+		static instructionCount := 0
+
+		filterInstructionHints(instructionHints) {
+			local result := []
+			local ignore, hint
+
+			for ignore, hint in instructionHints {
+				if ((hint = "BrakeEarlier") && inList(result, "BrakeLater"))
+					continue
+				else if ((hint = "BrakeLater") && inList(result, "BrakeEarlier"))
+					continue
+				else if ((hint = "BrakeHarder") && inList(result, "BrakeSofter"))
+					continue
+				else if ((hint = "BrakeSofter") && inList(result, "BrakeHarder"))
+					continue
+				else if ((hint = "BrakeFaster") && inList(result, "BrakeSlower"))
+					continue
+				else if ((hint = "BrakeSlower") && inList(result, "BrakeFaster"))
+					continue
+				else if ((hint = "AccelerateEarlier") && inList(result, "AccelerateLater"))
+					continue
+				else if ((hint = "AccelerateLater") && inList(result, "AccelerateEarlier"))
+					continue
+				else if ((hint = "AccelerateHarder") && inList(result, "AccelerateSofter"))
+					continue
+				else if ((hint = "AccelerateLater") && inList(result, "AccelerateHarder"))
+					continue
+				else if ((hint = "PushMore") && inList(result, "PushLess"))
+					continue
+				else if ((hint = "PushLess") && inList(result, "PushMore"))
+					continue
+
+				result.Push(hint)
+			}
+
+			return result
+		}
+
+		instructionConjunction(h1, h2) {
+			if ((h1 = "BrakeEarlier") && (h2 = "BrakeSofter"))
+				return "And"
+			else if ((h1 = "BrakeLater") && (h2 = "BrakeHarder"))
+				return "But"
+			else if ((h1 = "BrakeEarlier") && (h2 = "BrakeHarder"))
+				return "And"
+			else if ((h1 = "BrakeLater") && (h2 = "BrakeSofter"))
+				return "But"
+			else if ((h1 = "BrakeHarder") && (h2 = "BrakeSlower"))
+				return "But"
+			else if ((h1 = "BrakeSofter") && (h2 = "BrakeFaster"))
+				return "But"
+			else if ((h1 = "BrakeHarder") && (h2 = "BrakeFaster"))
+				return "And"
+			else if ((h1 = "BrakeSofter") && (h2 = "BrakeSlower"))
+				return "And"
+			else if ((h1 = "AccelerateEarlier") && (h2 = "AccelerateHarder"))
+				return "And"
+			else if ((h1 = "AccelerateLater") && (h2 = "AccelerateSofter"))
+				return "And"
+			else if ((h1 = "AccelerateEarlier") && (h2 = "AccelerateSofter"))
+				return "But"
+			else if ((h1 = "AccelerateLater") && (h2 = "AccelerateHarder"))
+				return "But"
+
+			return false
+		}
+
+		if !analyzer
+			return
+
+		instruct := (sectionNr <= analyzer.TrackSections.Length)
+
+		if (this.iTelemetryFuture && !instruct) {
+			sectionNr -= analyzer.TrackSections.Length
+
+			if ((sectionNr >= (this.iTelemetryFuture.Section + 2)) || (sectionNr < this.iTelemetryFuture.Section)) {
+				if this.iTelemetryFuture.FileName
+					try {
+						this.reviewCornerPerformance(Integer(analyzer.TrackSections[this.iTelemetryFuture.Section].Nr)
+												   , this.iTelemetryFuture.FileName)
+					}
+					catch Any as exception {
+						logError(exception, true)
+					}
+
+				this.iTelemetryFuture := false
+			}
+
+			return
+		}
+
+		if ((Round(positionX) = -32767) && (Round(positionY) = -32767))
+			return
+
+		if !hints {
+			hints := ["BrakeEarlier", "BrakeLater", "BrakeHarder", "BrakeSofter"
+					, "BrakeFaster", "BrakeSlower", "AccelerateEarlier", "AccelerateLater"
+					, "AccelerateHarder", "AccelerateSofter", "PushLess", "PushMore"]
+
+			hintProblems := Map("BrakeEarlier", "Too late braking"
+							  , "BrakeLater", "Too early braking"
+							  , "BrakeHarder", "Not enough brake pressure"
+							  , "BrakeSofter", "Too much brake pressure"
+							  , "BrakeFaster", "Building brake pressure too slow"
+							  , "BrakeSlower", "Building brake pressure too fast"
+							  , "PushLess", "Too much pushing"
+							  , "PushMore", "Not enough pushing"
+							  , "AccelerateEarlier", "Accelerating too late"
+							  , "AccelerateLater", "Accelerating too early"
+							  , "AccelerateHarder", "Not hard enough on the throttle"
+							  , "AccelerateSofter", "Too hard on the throttle")
+			hintProblems.Default := ""
+		}
+
+		if (analyzer && instruct) {
+			section := analyzer.TrackSections[sectionNr]
+
+			if (section.Type != "Corner")
+				return
+
+			cornerNr := Integer(section.Nr)
+
+			if ((this.FocusedCorners.Length > 0) && !inList(this.FocusedCorners, String(cornerNr)))
+				return
+
+			if isDebug()
+				logMessage(kLogDebug, "Approaching " . section.Type . " #" . cornerNr . " / " . sectionNr . " (" . positionX . ", " . positionY . ")"
+																	. ((diagnostics.Length > 0) ? (" - " . values2String("; ", diagnostics*)) : ""))
+
+			telemetry := this.getTelemetry(&reference := true, cornerNr)
+
+			if telemetry {
+				if (A_TickCount < nextRecommendation)
+					return
+				else {
+					instructionHints := this.getInstructionHints(cornerNr, reference, telemetry)
+
+					if (instructionHints.Length > 0)
+						instructionHints := filterInstructionHints(instructionHints)
+
+					if this.Speaker[false]
+						if ((telemetry.Sections.Length > 0) && !this.getSpeaker().Speaking) {
+							nextRecommendation := (A_TickCount + wait)
+
+							if (this.ConnectionState = "Active") {
+								if inList(this.FocusedCorners, String(cornerNr)) {
+									this.iTelemetryFuture := this.TelemetryCollector.collectTelemetry()
+
+									if this.iTelemetryFuture
+										this.iTelemetryFuture.Section := sectionNr
+								}
+
+								this.Mode := "Coaching"
+
+								telemetryJSON := telemetry.JSON
+
+								problemsInstruction := this.Instructions["Coaching.Corner.Problems"]
+
+								if ((Trim(problemsInstruction) != "") && (instructionHints.Length > 0))
+									telemetryJSON := (substituteVariables(problemsInstruction
+																		, {problems: values2String(", ", choose(collect(instructionHints, (h) => translate(hintProblems[h]))
+																											  , (p) => (p != ""))*)
+																		 , corner: cornerNr})
+													. "\n\n" . telemetryJSON)
+
+								try {
+									command := substituteVariables(this.Instructions["Coaching.Corner.Approaching"]
+																 , {telemetry: telemetryJSON, corner: cornerNr})
+
+									if reference
+										command .= ("`n`n" . substituteVariables(this.Instructions["Coaching.Reference"]
+																			   , {telemetry: reference.JSON}))
+
+									if isDebug() {
+										logMessage(kLogDebug, "Corner #" . cornerNr . " analyzed")
+
+										try
+											logMessage(kLogDebug, "   - Name of the corner: " . telemetry.Sections[1].Name)
+
+										logMessage(kLogDebug, "   - Lap time of analyzed lap #" . telemetry.Lap . ": " . Round(telemetry.LapTime, 1))
+
+										if (reference && (reference != telemetry))
+											logMessage(kLogDebug, "   - Lap time of reference lap: " . reference.LapTime)
+
+										logMessage(kLogDebug, "   - Starting LLM processing")
+									}
+
+									this.handleVoiceText("TEXT", command, false)
+								}
+								finally {
+									this.Mode := oldMode
+								}
+							}
+							else if (instructionHints.Length > 0) {
+								speaker := this.getSpeaker()
+
+								speaker.beginTalk({Talking: true})
+
+								try {
+									lastHint := false
+
+									for index, hint in bubbleSort(&instructionHints, (h1, h2) => inList(hints, h1) > inList(hints, h2)) {
+										conjunction := (lastHint ? instructionConjunction(lastHint, hint) : false)
+
+										if conjunction
+											conjunction := speaker.Fragments[conjunction]
+										else if !lastHint
+											conjunction := A_Space
+										else
+											conjunction := translate(". ")
+
+										conclusion := ((index = instructionHints.Length) ? translate(".") : "")
+
+										speaker.speakPhrase(hint, {conjunction: conjunction, conclusion: conclusion})
+
+										lastHint := hint
+									}
+								}
+								finally {
+									speaker.endTalk({Rephrase: false, Noise: false})
+								}
+							}
+						}
+
+					instructionCount += 1
+
+					if (instructionHints.Length > 0) {
+						Task.startTask(() {
+							local state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+							local speaker := (this.Speaker[false] && this.getSpeaker())
+							local lastInstruction := instructionCount
+							local ignore, hint
+
+							setMultiMapValue(state, "Instructions", "Corner", cornerNr)
+
+							if ((telemetry.Sections.Length > 0) && telemetry.Sections[1].Name)
+								setMultiMapValue(state, "Instructions", "Name", telemetry.Sections[1].Name)
+
+							setMultiMapValue(state, "Instructions", "Instructions", values2String(", ", instructionHints*))
+
+							if speaker
+								for ignore, hint in instructionHints
+									setMultiMapValue(state, "Instructions", hint, Trim(speaker.getPhrase(hint, {conjunction: "", conclusion: ""})))
+
+							writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+
+							Task.startTask(() {
+								if (lastInstruction = instructionCount) {
+									local state := readMultiMap(kTempDirectory . "Driving Coach\Coaching.state")
+
+									removeMultiMapValues(state, "Instructions")
+
+									writeMultiMap(kTempDirectory . "Driving Coach\Coaching.state", state)
+								}
+							}, wait * 2, kLowPriority)
+						})
+					}
+				}
+			}
+		}
+	}
+}

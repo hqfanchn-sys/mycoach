@@ -1,0 +1,17 @@
+![](https://github.com/SeriousOldMan/Simulator-Controller/blob/main/Docs/Images/Logo.JPG)
+
+Thanks for your interest in Simulator Controller, a set of tools for a better user experience in Sim Racing. At the core of Simulator Controller is an extendable controller framework, which can use any hardware controller (typically a Button Box in simulation rigs) to control almost all applications and simulation games used in your specific configuration and that simultaneously. Furthermore, Simulator Controller features a virtual, AI-driven pit crew that provides you with comprehensive support during your training sessions and races.
+
+Before diving into this very extensive documentation, I recommend a first reading of the [README](https://github.com/SeriousOldMan/Simulator-Controller/blob/main/README.md) document in the GitHub repository for a general introduction.
+
+A little background: Simulator Controller started in late 2020 as a tiny collection of keyboard macros to automate some repetitive tasks in Assetto Corsa Competizione. But as usual, the code base grew very fast and several weeks later, I decided to go for a complete rewrite in a plugin capable, object oriented architecture. The current distribution consists of over 20 specialized applications and more than 300.000 lines of code written in 9 different programming languages (one of which has been conceived and developed exclusively for Simulator Controller), incl. a very sophisticated AI kernel for voice chat capable AI Race Assistants, as well as a runtime for large language models. A [Setup Wizard](https://github.com/SeriousOldMan/Simulator-Controller/wiki/Installation-&-Configuration#running-the-setup-tool) guides you through the initial installation and setup process and a graphical, user friendly [configuration tool](https://github.com/SeriousOldMan/Simulator-Controller/wiki/Installation-&-Configuration#running-the-configuration-tool) allows you to customize every aspect of the package exactly to your needs. Last, but not least, a [plugin interface and class library](https://github.com/SeriousOldMan/Simulator-Controller/wiki/Development-Overview-&-Concepts) allow even further customization and addition of new functionality for skilled developers. All this is accompanied by more than 900 pages of documentation and more than 25 hours of tutorial videos. A lot to explore...
+
+If you want to join our Discord Community for Simulator Controller, please use [this invitation](https://discord.gg/5N8JrNr48H)...
+
+And now it's time to start with the [Overview](https://github.com/SeriousOldMan/Simulator-Controller/wiki/Overview)...
+
+Technical notes:
+
+1. All parts of this documentation as well as the source code of Simulator Controller use a tab width of 4. The default tab width of GitHub is unfortunately 8 characters, so to get the best possible reading quality, take a second and set the tab width to 4 in your GitHub settings.
+
+2. When jumping to a link, it can happen, that you do not end up at the target location, especially when pictures are present in the documentation page above the part you are navigating to. Simply reloading the page will fix this issue.

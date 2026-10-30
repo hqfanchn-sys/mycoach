@@ -1,0 +1,15 @@
+{
+  "DBPath": ":local:",
+
+  "TokenLifeTime": 10080,
+
+  "ConnectionLifeTime": 300,
+
+  "Accounts": [
+    {
+      "Name": "admin",
+      "Password": "admin",
+      "Administrator": true
+    }
+  ]
+}

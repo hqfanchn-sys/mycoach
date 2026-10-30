@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Second Monitor Reader": {
+      "commandName": "Project",
+      "commandLineArgs": "\"C:\\Users\\Developer\\Downloads\\Oliver Juwig-2--54b3014b-2d61-43e4-970a-3c3355f4ae85.json\" \"C:\\Users\\Developer\\Desktop\\Import.telemetry\""
+    }
+  }
+}

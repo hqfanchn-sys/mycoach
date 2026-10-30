@@ -1,0 +1,1731 @@
+/*
+Based on sample code by iRacing Motorsport Simulations, LLC.
+
+The following apply:
+
+Copyright (c) 2013, iRacing.com Motorsport Simulations, LLC.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of iRacing.com Motorsport Simulations nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+//------
+#define MIN_WIN_VER 0x0501
+
+#ifndef WINVER
+#	define WINVER			MIN_WIN_VER
+#endif
+
+#ifndef _WIN32_WINNT
+#	define _WIN32_WINNT		MIN_WIN_VER 
+#endif
+
+#pragma warning(disable:4996) //_CRT_SECURE_NO_WARNINGS
+
+#include <windows.h>
+#include <stdio.h>
+#include <conio.h>
+#include <signal.h>
+#include <time.h>
+
+#include "irsdk_defines.h"
+#include "yaml_parser.h"
+#include <cmath>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <functional>
+#include <algorithm>
+#include <numeric>
+#include <chrono>
+#include <stdexcept>
+#include <future>
+
+// for timeBeginPeriod
+#pragma comment(lib, "Winmm")
+
+// 32 ms timeout
+#define TIMEOUT 32
+
+char *g_data = NULL;
+int g_nData = 0;
+
+void initData(const irsdk_header* header, char*& data, int& nData)
+{
+	if (data) delete[] data;
+	nData = header->bufLen;
+	data = new char[nData];
+}
+
+void substring(const char s[], char sub[], int p, int l) {
+	int c = 0;
+
+	while (c < l) {
+		sub[c] = s[p + c];
+
+		c++;
+	}
+	sub[c] = '\0';
+}
+
+inline void extractString(char* string, const char* value, int valueLength) {
+	substring(value, string, 0, valueLength);
+}
+
+bool getYamlValue(char* result, const char* sessionInfo, char* path) {
+	int length = -1;
+	const char* string;
+
+	if (parseYaml(sessionInfo, path, &string, &length)) {
+		extractString(result, string, length);
+
+		return true;
+	}
+	else
+		return false;
+}
+
+bool getYamlValue(char* result, const char* sessionInfo, char* path, char* value) {
+	char buffer[256];
+	int pos = 0;
+
+	sprintf(buffer, path, value);
+
+	return getYamlValue(result, sessionInfo, buffer);
+}
+
+bool getYamlValue(char* result, const char* sessionInfo, char* path, char* value1, char* value2) {
+	char buffer[256];
+	int pos = 0;
+
+	sprintf(buffer, path, value1, value2);
+
+	return getYamlValue(result, sessionInfo, buffer);
+}
+
+int getCurrentSessionID(const char* sessionInfo) {
+	char id[10];
+	char result[100];
+	int sID = 0;
+
+	while (getYamlValue(result, sessionInfo, "SessionInfo:Sessions:SessionNum:{%s}ResultsOfficial:", itoa(sID, id, 10))) {
+		if (strcmp(result, "0") == 0)
+			return sID;
+
+		sID += 1;
+	}
+
+	return -1;
+}
+
+bool getRawDataValue(char* &value, const irsdk_header* header, const char* data, const char* variable) {
+	if (header && data) {
+		for (int i = 0; i < header->numVars; i++) {
+			const irsdk_varHeader* rec = irsdk_getVarHeaderEntry(i);
+
+			if (strcmp(rec->name, variable) == 0) {
+				value = (char*)(data + rec->offset);
+
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+bool getDataValue(char* value, const irsdk_header* header, const char* data, const char* variable) {
+	if (header && data) {
+		for (int i = 0; i < header->numVars; i++) {
+			const irsdk_varHeader* rec = irsdk_getVarHeaderEntry(i);
+
+			if (strcmp(rec->name, variable) == 0) {
+				switch (rec->type)
+				{
+				case irsdk_char:
+					sprintf(value, "%s", (char*)(data + rec->offset)); break;
+				case irsdk_bool:
+					sprintf(value, "%d", ((bool*)(data + rec->offset))[0]); break;
+				case irsdk_bitField:
+				case irsdk_int:
+					sprintf(value, "%d", ((int*)(data + rec->offset))[0]); break;
+				case irsdk_float:
+					sprintf(value, "%0.6f", ((float*)(data + rec->offset))[0]); break;
+				case irsdk_double:
+					sprintf(value, "%0.8f", ((double*)(data + rec->offset))[0]); break;
+				default:
+					return false;
+				}
+
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+float getDataFloat(const irsdk_header* header, const char* data, const char* variable) {
+	char result[32];
+
+	if (getDataValue(result, header, data, variable))
+		return atof(result);
+	else
+		return 0;
+}
+
+int sendStringMessage(HWND hWnd, int wParam, char* msg) {
+	int result = 0;
+
+	if (hWnd > 0) {
+		COPYDATASTRUCT cds;
+		cds.dwData = (256 * 'D' + 'C');
+		cds.cbData = sizeof(char) * (strlen(msg) + 1);
+		cds.lpData = msg;
+
+		result = SendMessage(hWnd, WM_COPYDATA, wParam, (LPARAM)(LPVOID)&cds);
+	}
+
+	return result;
+}
+
+void sendTriggerMessage(const char* message) {
+	HWND winHandle = FindWindowEx(0, 0, 0, "Driving Coach.exe");
+
+	if (winHandle == 0)
+		winHandle = FindWindowEx(0, 0, 0, "Driving Coach.ahk");
+
+	if (winHandle != 0) {
+		char buffer[512];
+
+		strcpy_s(buffer, 512, "Driving Coach:");
+		strcpy_s(buffer + strlen("Driving Coach:"), 512 - strlen("Driving Coach:"), message);
+
+		sendStringMessage(winHandle, 0, buffer);
+	}
+}
+
+void sendAnalyzerMessage(const char* message) {
+	HWND winHandle = FindWindowEx(0, 0, 0, "Setup Workbench.exe");
+
+	if (winHandle == 0)
+		winHandle = FindWindowEx(0, 0, 0, "Setup Workbench.ahk");
+
+	if (winHandle != 0) {
+		char buffer[512];
+
+		strcpy_s(buffer, 512, "Analyzer:");
+		strcpy_s(buffer + strlen("Analyzer:"), 512 - strlen("Analyzer:"), message);
+
+		sendStringMessage(winHandle, 0, buffer);
+	}
+}
+
+bool fileExists(std::string name) {
+	FILE* file;
+
+	if (!fopen_s(&file, name.c_str(), "r")) {
+		fclose(file);
+
+		return true;
+	}
+	else
+		return false;
+}
+
+std::vector<std::string> splitString(const std::string& s, const std::string& delimiter, int count = 0) {
+	std::vector<std::string> parts;
+	size_t pos = 0;
+	size_t offset = 0;
+	int numParts = 0;
+
+	while ((pos = s.find(delimiter, offset)) != std::string::npos) {
+		if (count != 0 && ++numParts >= count)
+			break;
+		
+		int length = pos - offset;
+
+		parts.push_back(s.substr(offset, length));
+
+		offset += length + delimiter.length();
+	}
+
+	parts.push_back(s.substr(offset));
+
+	return parts;
+}
+
+inline float vectorLength(float x, float y) {
+	return sqrt((x * x) + (y * y));
+}
+
+std::string player = "";
+std::string workingDirectory = "";
+std::string audioDevice = "";
+float volume = 0;
+STARTUPINFOA si = { sizeof(si) };
+
+void playSound(std::string wavFile, bool wait = true) {
+	PROCESS_INFORMATION pi;
+
+	if (CreateProcessA(
+		NULL,               // Application name
+		(char*)("\"" + player + "\" \"" + wavFile + "\" -t waveaudio " +
+								((audioDevice != "") ? ("\"" + audioDevice + "\" ") : "") +
+								"vol " + std::to_string(volume)).c_str(),         // Command line
+		NULL,               // Process handle not inheritable
+		NULL,               // Thread handle not inheritable
+		FALSE,              // Set handle inheritance to FALSE
+		0,                  // No creation flags
+		NULL,               // Use parent's environment block
+		workingDirectory.c_str(),
+		&si,                // Pointer to STARTUPINFO structure
+		&pi)                // Pointer to PROCESS_INFORMATION structure
+		)
+	{
+		if (wait)
+			// Wait until process exits
+			WaitForSingleObject(pi.hProcess, INFINITE);
+
+		// Close process and thread handles
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
+	}
+}
+
+int lightBottomOutThreshold = 5;
+int mediumBottomOutThreshold = 10;
+int heavyBottomOutThreshold = 15;
+float releaseThreshold = 0.2f;
+int bottomOutDuration = 30;
+int bottomOutGap = 100;
+int samplerMinSamples = 2;
+int deflectionMovingAverage = 5;
+int accelerationMovingAverage = 2;
+
+class MovingAverage
+{
+private:
+	std::vector<double> Window;
+	int Head;
+	int Count;
+	double Sum;
+
+public:
+	MovingAverage(int period)
+		: Head(0), Count(0), Sum(0.0)
+	{
+		if (period <= 0)
+			throw std::invalid_argument("Period must be greater than zero.");
+
+		Window.resize(period, 0.0);
+	}
+
+	double Add(double newValue)
+	{
+		if (Count == static_cast<int>(Window.size()))
+			Sum -= Window[Head];
+
+		Window[Head] = newValue;
+		Sum += newValue;
+		Head = (Head + 1) % Window.size();
+
+		if (Count < static_cast<int>(Window.size()))
+			Count++;
+
+		return Sum / Count;
+	}
+};
+
+struct SuspensionDeflections
+{
+	int CompletedLaps;
+	long TimeMS;
+
+	double FrontLeft;
+	double FrontRight;
+	double RearLeft;
+	double RearRight;
+
+	SuspensionDeflections(int completedLaps, double suspensionDeflectionFL,
+		double suspensionDeflectionFR,
+		double suspensionDeflectionRL, double suspensionDeflectionRR)
+		: CompletedLaps(completedLaps),
+		  FrontLeft(suspensionDeflectionFL * 1000.0),
+		  FrontRight(suspensionDeflectionFR * 1000.0),
+		  RearLeft(suspensionDeflectionRL * 1000.0),
+		  RearRight(suspensionDeflectionRR * 1000.0)
+	{
+		// Get current time in milliseconds since epoch
+		auto now = std::chrono::high_resolution_clock::now();
+		auto duration = now.time_since_epoch();
+		TimeMS = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+	}
+};
+
+struct SuspensionBottomOuts
+{
+	int CompletedLaps;
+	std::string Axle;
+
+	long StartTimeMs;
+	long EndTimeMs;
+	double PeakAcceleration;
+	double AvgAcceleration;
+	double Impulse;
+
+	long GetDurationMs() const
+	{
+		return EndTimeMs - StartTimeMs;
+	}
+
+	SuspensionBottomOuts(int completedLaps, const double acceleration, const std::string& axle)
+		: CompletedLaps(completedLaps),
+		Axle(axle),
+		PeakAcceleration(acceleration),
+		StartTimeMs(0),
+		EndTimeMs(0),
+		AvgAcceleration(0.0),
+		Impulse(0.0)
+	{
+	}
+
+public:
+	const std::string GetSeverity()
+	{
+		double gForce = std::abs(PeakAcceleration);
+
+		if (gForce > heavyBottomOutThreshold)
+			return "Heavy";
+		else if (gForce > mediumBottomOutThreshold)
+			return "Medium";
+		else
+			return "Light";
+	}
+};
+
+class CornerDynamics {
+public:
+	float speed;
+	float usos;
+	int completedLaps;
+	int phase;
+public:
+	CornerDynamics(float speed, float usos, int completedLaps, int phase) :
+		speed(speed),
+		usos(usos),
+		completedLaps(completedLaps),
+		phase(phase) {
+	}
+};
+
+const int MAXVALUES = 6;
+#define PI 3.14159265
+
+std::vector<float> recentSteerAngles;
+std::vector<float> recentGLongs;
+std::vector<float> recentIdealAngVels;
+std::vector<float> recentRealAngVels;
+
+std::vector<float> recentLatAccels;
+
+void pushValue(std::vector<float>& values, float value) {
+	values.push_back(value);
+
+	if ((int)values.size() > MAXVALUES)
+		values.erase(values.begin());
+}
+
+float averageValue(std::vector<float>& values, int& num) {
+	std::vector <float>::iterator iter;
+	float sum = 0.0;
+
+	num = 0;
+
+	for (iter = values.begin(); iter != values.end(); iter++) {
+		sum += *iter;
+		num++;
+	}
+
+	return (num > 0) ? sum / num : 0.0;
+}
+
+float smoothValue(std::vector<float>& values, float value) {
+	int ignore;
+
+	if (false) {
+		pushValue(values, value);
+
+		return averageValue(values, ignore);
+	}
+	else
+		return value;
+}
+
+std::vector<CornerDynamics> cornerDynamicsList;
+std::vector<SuspensionDeflections> suspensionDeflectionsList;
+
+std::string dataFile = "";
+int understeerLightThreshold = 12;
+int understeerMediumThreshold = 20;
+int understeerHeavyThreshold = 35;
+int oversteerLightThreshold = 2;
+int oversteerMediumThreshold = -6;
+int oversteerHeavyThreshold = -10;
+int lowspeedThreshold = 100;
+int steerLock = 900;
+int steerRatio = 14;
+int wheelbase = 270;
+int trackWidth = 150;
+
+int lastCompletedLaps = 0;
+float lastSpeed = 0.0;
+long lastSound = 0;
+
+bool triggerUSOSBeep(std::string soundsDirectory, std::string audioDevice, float usos) {
+	std::string wavFile = "";
+
+	if (usos < oversteerHeavyThreshold)
+		wavFile = soundsDirectory + "\\Oversteer Heavy.wav";
+	else if (usos < oversteerMediumThreshold)
+		wavFile = soundsDirectory + "\\Oversteer Medium.wav";
+	else if (usos < oversteerLightThreshold)
+		wavFile = soundsDirectory + "\\Oversteer Light.wav";
+	else if (usos > understeerHeavyThreshold)
+		wavFile = soundsDirectory + "\\Understeer Heavy.wav";
+	else if (usos > understeerMediumThreshold)
+		wavFile = soundsDirectory + "\\Understeer Medium.wav";
+	else if (usos > understeerLightThreshold)
+		wavFile = soundsDirectory + "\\Understeer Light.wav";
+
+	if (wavFile != "") {
+		if (audioDevice != "") {
+			if (player != "")
+				playSound(wavFile, false);
+			else
+				sendAnalyzerMessage(("acousticFeedback:" + wavFile).c_str());
+		}
+		else
+			PlaySoundA(wavFile.c_str(), NULL, SND_FILENAME | SND_ASYNC);
+
+		return true;
+	}
+	else
+		return false;
+}
+
+using DeflectionGetter = std::function<double(const SuspensionDeflections&)>;
+
+std::vector<std::pair<double, double>> CalculateAccelerations(
+	const std::vector<std::pair<long, double>>& deflections)
+{
+	std::vector<std::pair<double, double>> accelerations;
+
+	auto CalculateAcceleration = [](long lastTime, double lastDeflection,
+		long time, double deflection,
+		long nextTime, double nextDeflection) -> double
+		{
+			long dt1 = (time - lastTime);
+			long dt2 = (nextTime - time);
+
+			if (dt1 <= 0 || dt2 <= 0)
+				return 0.0;
+
+			double term1 = (nextDeflection - deflection) / dt2;
+			double term2 = (deflection - lastDeflection) / dt1;
+
+			return 2.0 * (term1 - term2) / ((dt1 + dt2) / 1000.0);
+		};
+
+	int size = deflections.size();
+	MovingAverage accelerationMA(accelerationMovingAverage);
+
+	if (size > 3)
+		for (size_t i = 1; i < (size - 1); i++)
+		{
+			accelerations.push_back(std::make_pair(
+				accelerationMA.Add(CalculateAcceleration(
+					deflections[i - 1].first, deflections[i - 1].second,
+					deflections[i].first, deflections[i].second,
+					deflections[i + 1].first, deflections[i + 1].second)),
+				deflections[i].second));
+		}
+
+	if (!accelerations.empty())
+	{
+		accelerations.push_back(accelerations.back());
+		accelerations.insert(accelerations.begin(), accelerations[0]);
+	}
+
+	return accelerations;
+}
+
+std::vector<std::pair<long, double>> ExtractDeflections(
+	const DeflectionGetter& getter)
+{
+	std::vector<std::pair<long, double>> smoothedDeflections;
+	MovingAverage deflectionMA(deflectionMovingAverage);
+
+	for (const auto& deflection : suspensionDeflectionsList)
+		smoothedDeflections.emplace_back(
+			deflection.TimeMS,
+			deflectionMA.Add(getter(deflection)));
+
+	return smoothedDeflections;
+}
+
+std::vector<SuspensionBottomOuts> CreateBottomOuts(
+	const std::string& axle,
+	const std::vector<std::pair<double, double>>& leftAccelerations,
+	const std::vector<std::pair<double, double>>& rightAccelerations)
+{
+	std::vector<SuspensionBottomOuts> events;
+
+	auto CalculateImpulse = [](long duration, const std::vector<double>& accelerationValues) -> double
+		{
+			if (accelerationValues.empty())
+				return 0.0;
+
+			double impulse = 0.0;
+
+			for (size_t i = 0; i < accelerationValues.size() - 1; ++i)
+				impulse += (accelerationValues[i] + accelerationValues[i + 1]) / 2.0 *
+				(static_cast<double>(duration) / 1000.0);
+
+			return impulse;
+		};
+
+	auto MergeCloseEvents = [](std::vector<SuspensionBottomOuts>& allEvents)
+		-> std::vector<SuspensionBottomOuts>
+		{
+			if (allEvents.size() <= 1)
+				return allEvents;
+
+			std::vector<SuspensionBottomOuts> merged;
+			SuspensionBottomOuts currentEvent(allEvents[0].CompletedLaps,
+				allEvents[0].PeakAcceleration,
+				allEvents[0].Axle);
+			currentEvent.StartTimeMs = allEvents[0].StartTimeMs;
+			currentEvent.EndTimeMs = allEvents[0].EndTimeMs;
+			currentEvent.AvgAcceleration = allEvents[0].AvgAcceleration;
+			currentEvent.Impulse = allEvents[0].Impulse;
+
+			for (size_t i = 1; i < allEvents.size(); ++i)
+			{
+				long gap = allEvents[i].StartTimeMs - currentEvent.EndTimeMs;
+
+				if (gap < bottomOutGap)
+				{
+					currentEvent.EndTimeMs = allEvents[i].EndTimeMs;
+					currentEvent.PeakAcceleration = max(currentEvent.PeakAcceleration,
+						allEvents[i].PeakAcceleration);
+					currentEvent.Impulse += allEvents[i].Impulse;
+					currentEvent.AvgAcceleration =
+						(currentEvent.AvgAcceleration + allEvents[i].AvgAcceleration) / 2.0;
+				}
+				else
+				{
+					merged.push_back(currentEvent);
+
+					currentEvent = SuspensionBottomOuts(allEvents[i].CompletedLaps,
+						allEvents[i].PeakAcceleration,
+						allEvents[i].Axle);
+					currentEvent.StartTimeMs = allEvents[i].StartTimeMs;
+					currentEvent.EndTimeMs = allEvents[i].EndTimeMs;
+					currentEvent.AvgAcceleration = allEvents[i].AvgAcceleration;
+					currentEvent.Impulse = allEvents[i].Impulse;
+				}
+			}
+
+			merged.push_back(currentEvent);
+
+			return merged;
+		};
+
+	// Process acceleration data
+	std::vector<double> combinedAccel(leftAccelerations.size(), 0.0);
+	std::vector<bool> leftDeflection(leftAccelerations.size(), false);
+	std::vector<bool> rightDeflection(rightAccelerations.size(), false);
+	std::vector<bool> leftAboveThreshold(leftAccelerations.size(), false);
+	std::vector<bool> rightAboveThreshold(rightAccelerations.size(), false);
+
+	if (leftAccelerations.size() > 0) {
+		for (size_t i = 0; i < leftAccelerations.size(); ++i)
+		{
+			double leftMagnitude = leftAccelerations[i].first;
+			double rightMagnitude = rightAccelerations[i].first;
+
+			leftDeflection[i] = leftAccelerations[i].second;
+			rightDeflection[i] = rightAccelerations[i].second;
+
+			if (leftMagnitude < 0 && rightMagnitude < 0)
+			{
+				leftMagnitude = std::abs(leftMagnitude);
+				rightMagnitude = std::abs(rightMagnitude);
+
+				combinedAccel[i] = max(leftMagnitude, rightMagnitude);
+
+				leftAboveThreshold[i] = leftMagnitude >= lightBottomOutThreshold;
+				rightAboveThreshold[i] = rightMagnitude >= lightBottomOutThreshold;
+			}
+		}
+
+		bool inEvent = false;
+		size_t eventStartIndex = 0;
+		double leftStartDeflection = 0;
+		double rightStartDeflection = 0;
+		double peakAccelInEvent = 0.0;
+		std::vector<double> accelValuesInEvent;
+
+		for (size_t i = 0; i < combinedAccel.size(); ++i)
+		{
+			if (leftAboveThreshold[i] || rightAboveThreshold[i] ||
+				(inEvent && (abs(leftDeflection[i] - leftStartDeflection) < releaseThreshold ||
+					         abs(rightDeflection[i] - rightStartDeflection) < releaseThreshold)))
+			{
+				if (!inEvent)
+				{
+					inEvent = true;
+					eventStartIndex = i;
+					leftStartDeflection = leftDeflection[i];
+					rightStartDeflection = rightDeflection[i];
+					peakAccelInEvent = 0.0;
+					accelValuesInEvent.clear();
+				}
+
+				peakAccelInEvent = max(peakAccelInEvent, combinedAccel[i]);
+				accelValuesInEvent.push_back(combinedAccel[i]);
+			}
+			else
+			{
+				if (inEvent)
+				{
+					if (static_cast<int>(i - eventStartIndex) >= samplerMinSamples)
+					{
+						long startTime = suspensionDeflectionsList[eventStartIndex].TimeMS;
+						long endTime = suspensionDeflectionsList[i].TimeMS;
+
+						SuspensionBottomOuts bottomOutEvent(
+							suspensionDeflectionsList[eventStartIndex].CompletedLaps,
+							peakAccelInEvent,
+							axle);
+
+						bottomOutEvent.StartTimeMs = startTime;
+						bottomOutEvent.EndTimeMs = endTime;
+						bottomOutEvent.AvgAcceleration =
+							std::accumulate(accelValuesInEvent.begin(), accelValuesInEvent.end(), 0.0) / accelValuesInEvent.size();
+						bottomOutEvent.Impulse = CalculateImpulse(endTime - startTime, accelValuesInEvent);
+
+						events.push_back(bottomOutEvent);
+					}
+
+					inEvent = false;
+				}
+			}
+		}
+
+		// Handle event extending to end of data
+		if (inEvent)
+		{
+			int eventDurationSamples = static_cast<int>(combinedAccel.size() - eventStartIndex);
+			if (eventDurationSamples >= samplerMinSamples)
+			{
+				long startTime = suspensionDeflectionsList[eventStartIndex].TimeMS;
+				long endTime = suspensionDeflectionsList[suspensionDeflectionsList.size() - 1].TimeMS;
+
+				if (endTime - startTime > bottomOutDuration) {
+					SuspensionBottomOuts bottomOutEvent(
+						suspensionDeflectionsList[eventStartIndex].CompletedLaps,
+						peakAccelInEvent,
+						axle);
+
+					bottomOutEvent.StartTimeMs = startTime;
+					bottomOutEvent.EndTimeMs = endTime;
+					bottomOutEvent.AvgAcceleration =
+						std::accumulate(accelValuesInEvent.begin(), accelValuesInEvent.end(), 0.0)
+						/ accelValuesInEvent.size();
+					bottomOutEvent.Impulse = CalculateImpulse(endTime - startTime, accelValuesInEvent);
+
+					events.push_back(bottomOutEvent);
+				}
+			}
+		}
+
+		return MergeCloseEvents(events);
+	}
+	else
+		return std::vector<SuspensionBottomOuts>();
+}
+
+std::vector<SuspensionBottomOuts> CreateSuspensionIssues()
+{
+	std::vector<std::pair<double, double>> frontLeftAccels = CalculateAccelerations(
+		ExtractDeflections([](const SuspensionDeflections& d) { return d.FrontLeft; }));
+	std::vector<std::pair<double, double>> frontRightAccels = CalculateAccelerations(
+		ExtractDeflections([](const SuspensionDeflections& d) { return d.FrontRight; }));
+	std::vector<std::pair<double, double>> rearLeftAccels = CalculateAccelerations(
+		ExtractDeflections([](const SuspensionDeflections& d) { return d.RearLeft; }));
+	std::vector<std::pair<double, double>> rearRightAccels = CalculateAccelerations(
+		ExtractDeflections([](const SuspensionDeflections& d) { return d.RearRight; }));
+
+	if (false) {
+		{
+			std::ofstream output;
+
+			output.open(dataFile + ".suspension", std::ios::out);
+
+			for (int i = 0; i < frontLeftAccels.size(); i++) {
+				output << suspensionDeflectionsList[i].FrontLeft << "," << suspensionDeflectionsList[i].FrontRight << "," <<
+				suspensionDeflectionsList[i].RearLeft << "," << suspensionDeflectionsList[i].RearRight << std::endl;
+
+				output << frontLeftAccels[i].first << "," << frontRightAccels[i].first << "," <<
+					rearLeftAccels[i].first << "," << rearRightAccels[i].first << std::endl;
+			}
+
+			output.close();
+		}
+
+		Sleep(200);
+	}
+
+	std::vector<SuspensionBottomOuts> result;
+
+	auto frontEvents = CreateBottomOuts("Front", frontLeftAccels, frontRightAccels);
+	auto rearEvents = CreateBottomOuts("Rear", rearLeftAccels, rearRightAccels);
+
+	result.insert(result.end(), frontEvents.begin(), frontEvents.end());
+	result.insert(result.end(), rearEvents.begin(), rearEvents.end());
+
+	return result;
+}
+
+bool collectTelemetry(const irsdk_header* header, const char* data, std::string soundsDirectory, std::string audioDevice, bool calibrate) {
+	char result[64];
+	bool onTrack = true;
+
+	getDataValue(result, header, data, "IsInGarage");
+	if (atoi(result))
+		onTrack = false;
+
+	getDataValue(result, header, data, "IsReplayPlaying");
+	if (atoi(result))
+		onTrack = false;
+
+	bool inPit = false;
+
+	char* rawValue;
+	char playerCarIdx[10] = "";
+
+	getYamlValue(playerCarIdx, irsdk_getSessionInfoStr(), "DriverInfo:DriverCarIdx:");
+
+	int playerCarIndex = atoi(playerCarIdx);
+
+	getRawDataValue(rawValue, header, data, "CarIdxOnPitRoad");
+
+	if (((bool*)rawValue)[playerCarIndex])
+		inPit = true;
+
+	if (!onTrack || inPit)
+		return true;
+
+	getRawDataValue(rawValue, header, data, "Lap");
+
+	int completedLaps = *((int*)rawValue);
+
+	getRawDataValue(rawValue, header, data, "SteeringWheelAngleMax");
+
+	float maxSteerAngle = *((float*)rawValue);
+
+	steerLock = maxSteerAngle * 2 * 57.2958;
+
+	getRawDataValue(rawValue, header, data, "SteeringWheelAngle");
+
+	float rawSteerAngle = -*((float*)rawValue);
+	float steerAngle = smoothValue(recentSteerAngles, rawSteerAngle / maxSteerAngle);
+
+	getRawDataValue(rawValue, header, data, "Speed");
+
+	float speed = *((float*)rawValue) * 3.6;
+	float acceleration = speed - lastSpeed;
+
+	float lfDeflection = 0;
+	float rfDeflection = 0;
+	float lrDeflection = 0;
+	float rrDeflection = 0;
+
+	if (getRawDataValue(rawValue, header, data, "LFshockDefl"))
+		lfDeflection = *((float*)rawValue);
+
+	if (getRawDataValue(rawValue, header, data, "RFshockDefl"))
+		rfDeflection = *((float*)rawValue);
+
+	if (getRawDataValue(rawValue, header, data, "LRshockDefl"))
+		lrDeflection = *((float*)rawValue);
+
+	if (getRawDataValue(rawValue, header, data, "RRshockDefl"))
+		rrDeflection = *((float*)rawValue);
+
+	if ((speed > 60) && (lfDeflection > 0 || rfDeflection > 0 || lrDeflection > 0 || rrDeflection > 0))
+		suspensionDeflectionsList.push_back(SuspensionDeflections(completedLaps,
+																  lfDeflection,
+																  rfDeflection,
+																  lrDeflection,
+																  rrDeflection));
+
+	lastSpeed = speed;
+
+	pushValue(recentGLongs, acceleration);
+
+	getRawDataValue(rawValue, header, data, "LatAccel");
+
+	float lateralAcceleration = smoothValue(recentLatAccels, *((float*)rawValue));
+
+	getRawDataValue(rawValue, header, data, "YawRate");
+
+	float angularVelocity = smoothValue(recentRealAngVels, *((float*)rawValue));
+
+	float steeredAngleDegs = steerAngle * steerLock / 2.0f / steerRatio;
+	float steerAngleRadians = -steeredAngleDegs / 57.2958;
+	float wheelBaseMeter = (float)wheelbase / 100;
+	float radius = wheelBaseMeter / steerAngleRadians;
+	float perimeter = radius * PI * 2;
+	float perimeterSpeed = lastSpeed / 3.6;
+
+	if (fabs(steerAngle) > 0.2 && lastSpeed > 60) {
+		// Get the average recent GLong
+		int numGLong = 0;
+		float glongAverage = averageValue(recentGLongs, numGLong);
+
+		int phase = 0;
+		if (numGLong > 0) {
+			if (glongAverage < -0.2) {
+				// Braking
+				phase = -1;
+			}
+			else if (glongAverage > 0.1) {
+				// Accelerating
+				phase = 1;
+			}
+		}
+
+		CornerDynamics cd = CornerDynamics(lastSpeed, 0, completedLaps, phase);
+
+		if (fabs(angularVelocity * 57.2958) > 0.1) {
+			float idealAngularVelocity;
+			float slip;
+
+			if (true) {
+				idealAngularVelocity = smoothValue(recentIdealAngVels, perimeterSpeed / perimeter * 2 * PI);
+				slip = fabs(idealAngularVelocity - angularVelocity);
+
+				if (steerAngle > 0) {
+					if (angularVelocity > 0)
+					{
+						if (calibrate)
+							slip *= -1;
+						else
+							slip = (oversteerHeavyThreshold - 1) / 57.2989;
+					}
+					else if (angularVelocity < idealAngularVelocity)
+						slip *= -1;
+				}
+				else {
+					if (angularVelocity < 0)
+					{
+						if (calibrate)
+							slip *= -1;
+						else
+							slip = (oversteerHeavyThreshold - 1) / 57.2989;
+					}
+					else if (angularVelocity > idealAngularVelocity)
+						slip *= -1;
+				}
+
+				cd.usos = slip * 57.2958 * 1;
+			}
+			else {
+				idealAngularVelocity = smoothValue(recentIdealAngVels, lateralAcceleration / max(0.01f, lastSpeed / 3.6));
+				slip = fabs(idealAngularVelocity) / max(0.01f, fabs(angularVelocity));
+
+				if (slip < 1)
+					slip = -(fabs(idealAngularVelocity) - fabs(angularVelocity));
+				else
+					slip = fabs(angularVelocity) - fabs(idealAngularVelocity);
+
+				cd.usos = slip * 57.2958 * 1;
+			}
+
+			if ((soundsDirectory != "") && GetTickCount() > (lastSound + 300))
+				if (triggerUSOSBeep(soundsDirectory, audioDevice, cd.usos))
+					lastSound = GetTickCount();
+
+			if (false) {
+				std::ofstream output;
+
+				output.open(dataFile + ".trace", std::ios::out | std::ios::app);
+
+				output << rawSteerAngle << "  " << maxSteerAngle << "  " << steerAngle << "  " << steeredAngleDegs << "  " << steerAngleRadians << "  " <<
+					lastSpeed << "  " << idealAngularVelocity << "  " << angularVelocity << "  " << slip << "  " <<
+					cd.usos << std::endl;
+
+				output.close();
+
+				Sleep(200);
+			}
+		}
+
+		cornerDynamicsList.push_back(cd);
+
+		if (lastCompletedLaps != completedLaps) {
+			lastCompletedLaps = completedLaps;
+
+			// Delete all corner data nore than 2 laps old.
+			if (cornerDynamicsList.size() > 0)
+				cornerDynamicsList.erase(
+					std::remove_if(cornerDynamicsList.begin(), cornerDynamicsList.end(),
+						[completedLaps](const CornerDynamics& o) { return o.completedLaps < completedLaps - 1; }),
+					cornerDynamicsList.end());
+
+			if (suspensionDeflectionsList.size() > 0)
+				suspensionDeflectionsList.erase(
+					std::remove_if(suspensionDeflectionsList.begin(), suspensionDeflectionsList.end(),
+						[completedLaps](const SuspensionDeflections& o) { return o.CompletedLaps < completedLaps - 1; }),
+					suspensionDeflectionsList.end());
+		}
+	}
+
+	return true;
+}
+
+void writeBottomOut(
+	std::ostream& output,
+	std::vector<SuspensionBottomOuts>& suspensionIssues,
+	const std::string& severity) {
+	int count = 0;
+	int front = 0;
+	int rear = 0;
+
+	for (auto& bottomOut : suspensionIssues) {
+		if (bottomOut.GetSeverity() == severity) {
+			count += 1;
+
+			if (bottomOut.Axle == "Front")
+				front += 1;
+			else if (bottomOut.Axle == "Rear")
+				rear += 1;
+		}
+	}
+
+	if (count > 0) {
+		output << "[Suspension.Bottom.Out." << severity << "]\n";
+
+		if (front > 0)
+			output << "Front=" << front << '\n';
+
+		if (rear > 0)
+			output << "Rear=" << rear << '\n';
+	}
+}
+
+void writeTelemetry(const irsdk_header* header, const char* data, bool calibrate) {
+	std::ofstream output;
+
+	try {
+		output.open(dataFile + ".tmp", std::ios::out, std::ios::trunc);
+
+		int slowLightUSNum[] = { 0, 0, 0 };
+		int slowMediumUSNum[] = { 0, 0, 0 };
+		int slowHeavyUSNum[] = { 0, 0, 0 };
+		int slowLightOSNum[] = { 0, 0, 0 };
+		int slowMediumOSNum[] = { 0, 0, 0 };
+		int slowHeavyOSNum[] = { 0, 0, 0 };
+		int slowTotalNum = 0;
+		int fastLightUSNum[] = { 0, 0, 0 };
+		int fastMediumUSNum[] = { 0, 0, 0 };
+		int fastHeavyUSNum[] = { 0, 0, 0 };
+		int fastLightOSNum[] = { 0, 0, 0 };
+		int fastMediumOSNum[] = { 0, 0, 0 };
+		int fastHeavyOSNum[] = { 0, 0, 0 };
+		int fastTotalNum = 0;
+
+		int slowOSMin[] = { 0, 0, 0 };
+		int fastOSMin[] = { 0, 0, 0 };
+		int slowUSMax[] = { 0, 0, 0 };
+		int fastUSMax[] = { 0, 0, 0 };
+
+		std::vector<CornerDynamics>::iterator cornerIter;
+		for (cornerIter = cornerDynamicsList.begin(); cornerIter != cornerDynamicsList.end(); cornerIter++) {
+			CornerDynamics corner = *cornerIter;
+			int phase = corner.phase + 1;
+
+			if (calibrate) {
+				if (corner.speed < lowspeedThreshold) {
+					slowOSMin[phase] = min(slowOSMin[phase], (int)corner.usos);
+					slowUSMax[phase] = max(slowUSMax[phase], (int)corner.usos);
+				}
+				else {
+					fastOSMin[phase] = min(fastOSMin[phase], (int)corner.usos);
+					fastUSMax[phase] = max(fastUSMax[phase], (int)corner.usos);
+				}
+			}
+			else {
+				if (corner.speed < lowspeedThreshold) {
+					slowTotalNum++;
+					if (corner.usos < oversteerHeavyThreshold) {
+						slowHeavyOSNum[phase]++;
+					}
+					else if (corner.usos < oversteerMediumThreshold) {
+						slowMediumOSNum[phase]++;
+					}
+					else if (corner.usos < oversteerLightThreshold) {
+						slowLightOSNum[phase]++;
+					}
+					else if (corner.usos > understeerHeavyThreshold) {
+						slowHeavyUSNum[phase]++;
+					}
+					else if (corner.usos > understeerMediumThreshold) {
+						slowMediumUSNum[phase]++;
+					}
+					else if (corner.usos > understeerLightThreshold) {
+						slowLightUSNum[phase]++;
+					}
+				}
+				else {
+					fastTotalNum++;
+					if (corner.usos < oversteerHeavyThreshold) {
+						fastHeavyOSNum[phase]++;
+					}
+					else if (corner.usos < oversteerMediumThreshold) {
+						fastMediumOSNum[phase]++;
+					}
+					else if (corner.usos < oversteerLightThreshold) {
+						fastLightOSNum[phase]++;
+					}
+					else if (corner.usos > understeerHeavyThreshold) {
+						fastHeavyUSNum[phase]++;
+					}
+					else if (corner.usos > understeerMediumThreshold) {
+						fastMediumUSNum[phase]++;
+					}
+					else if (corner.usos > understeerLightThreshold) {
+						fastLightUSNum[phase]++;
+					}
+				}
+			}
+		}
+
+		if (calibrate) {
+			output << "[Understeer.Slow]" << std::endl;
+
+			output << "Entry=" << slowUSMax[0] << std::endl;
+			output << "Apex=" << slowUSMax[1] << std::endl;
+			output << "Exit=" << slowUSMax[2] << std::endl;
+
+			output << "[Understeer.Fast]" << std::endl;
+
+			output << "Entry=" << fastUSMax[0] << std::endl;
+			output << "Apex=" << fastUSMax[1] << std::endl;
+			output << "Exit=" << fastUSMax[2] << std::endl;
+
+			output << "[Oversteer.Slow]" << std::endl;
+
+			output << "Entry=" << slowOSMin[0] << std::endl;
+			output << "Apex=" << slowOSMin[1] << std::endl;
+			output << "Exit=" << slowOSMin[2] << std::endl;
+
+			output << "[Oversteer.Fast]" << std::endl;
+
+			output << "Entry=" << fastOSMin[0] << std::endl;
+			output << "Apex=" << fastOSMin[1] << std::endl;
+			output << "Exit=" << fastOSMin[2] << std::endl;
+		}
+		else {
+			auto suspensionBottomOutsTask = async(CreateSuspensionIssues);
+
+			output << "[Understeer.Slow.Light]" << std::endl;
+
+			if (slowTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * slowLightUSNum[0] / slowTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * slowLightUSNum[1] / slowTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * slowLightUSNum[2] / slowTotalNum) << std::endl;
+			}
+
+			output << "[Understeer.Slow.Medium]" << std::endl;
+
+			if (slowTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * slowMediumUSNum[0] / slowTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * slowMediumUSNum[1] / slowTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * slowMediumUSNum[2] / slowTotalNum) << std::endl;
+			}
+
+			output << "[Understeer.Slow.Heavy]" << std::endl;
+
+			if (slowTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * slowHeavyUSNum[0] / slowTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * slowHeavyUSNum[1] / slowTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * slowHeavyUSNum[2] / slowTotalNum) << std::endl;
+			}
+
+			output << "[Understeer.Fast.Light]" << std::endl;
+
+			if (fastTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * fastLightUSNum[0] / fastTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * fastLightUSNum[1] / fastTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * fastLightUSNum[2] / fastTotalNum) << std::endl;
+			}
+
+			output << "[Understeer.Fast.Medium]" << std::endl;
+
+			if (fastTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * fastMediumUSNum[0] / fastTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * fastMediumUSNum[1] / fastTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * fastMediumUSNum[2] / fastTotalNum) << std::endl;
+			}
+
+			output << "[Understeer.Fast.Heavy]" << std::endl;
+
+			if (fastTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * fastHeavyUSNum[0] / fastTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * fastHeavyUSNum[1] / fastTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * fastHeavyUSNum[2] / fastTotalNum) << std::endl;
+			}
+
+			output << "[Oversteer.Slow.Light]" << std::endl;
+
+			if (slowTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * slowLightOSNum[0] / slowTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * slowLightOSNum[1] / slowTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * slowLightOSNum[2] / slowTotalNum) << std::endl;
+			}
+
+			output << "[Oversteer.Slow.Medium]" << std::endl;
+
+			if (slowTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * slowMediumOSNum[0] / slowTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * slowMediumOSNum[1] / slowTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * slowMediumOSNum[2] / slowTotalNum) << std::endl;
+			}
+
+			output << "[Oversteer.Slow.Heavy]" << std::endl;
+
+			if (slowTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * slowHeavyOSNum[0] / slowTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * slowHeavyOSNum[1] / slowTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * slowHeavyOSNum[2] / slowTotalNum) << std::endl;
+			}
+
+			output << "[Oversteer.Fast.Light]" << std::endl;
+
+			if (fastTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * fastLightOSNum[0] / fastTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * fastLightOSNum[1] / fastTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * fastLightOSNum[2] / fastTotalNum) << std::endl;
+			}
+
+			output << "[Oversteer.Fast.Medium]" << std::endl;
+
+			if (fastTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * fastMediumOSNum[0] / fastTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * fastMediumOSNum[1] / fastTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * fastMediumOSNum[2] / fastTotalNum) << std::endl;
+			}
+
+			output << "[Oversteer.Fast.Heavy]" << std::endl;
+
+			if (fastTotalNum > 0) {
+				output << "Entry=" << (int)(100.0f * fastHeavyOSNum[0] / fastTotalNum) << std::endl;
+				output << "Apex=" << (int)(100.0f * fastHeavyOSNum[1] / fastTotalNum) << std::endl;
+				output << "Exit=" << (int)(100.0f * fastHeavyOSNum[2] / fastTotalNum) << std::endl;
+			}
+
+			std::vector<SuspensionBottomOuts> suspensionBottomOuts = suspensionBottomOutsTask.get();
+
+			writeBottomOut(output, suspensionBottomOuts, "Heavy");
+			writeBottomOut(output, suspensionBottomOuts, "Medium");
+			writeBottomOut(output, suspensionBottomOuts, "Light");
+		}
+
+		output.close();
+
+		remove(dataFile.c_str());
+
+		rename((dataFile + ".tmp").c_str(), dataFile.c_str());
+	}
+	catch (...) {
+		try {
+			output.close();
+		}
+		catch (...) {
+		}
+
+		// retry next round...
+	}
+}
+
+float rXCoordinates[1000];
+float rYCoordinates[1000];
+bool hasTrackCoordinates = false;
+
+bool getCarCoordinates(const irsdk_header* header, const char* data, const int carIdx, float& coordinateX, float& coordinateY) {
+	char* trackPositions;
+
+	if (hasTrackCoordinates) {
+		if (getRawDataValue(trackPositions, header, data, "CarIdxLapDistPct")) {
+			int index = max(0, min((int)round(((float*)trackPositions)[carIdx] * 999), 999));
+
+			coordinateX = rXCoordinates[index];
+			coordinateY = rYCoordinates[index];
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void loadTrackCoordinates(char* fileName) {
+	std::ifstream infile(fileName);
+	int index = 0;
+
+	float x, y;
+
+	while (infile >> x >> y) {
+		rXCoordinates[index] = x;
+		rYCoordinates[index] = y;
+
+		if (++index > 999)
+			break;
+	}
+
+	hasTrackCoordinates = true;
+}
+
+const int Start = 0;
+const int Intro = 1;
+const int Ready = 2;
+const int Set = 3;
+const int Brake = 4;
+const int Release = 5;
+
+int tIndices[256];
+float xCoordinates[256];
+float yCoordinates[256];
+float trackDistances[60];
+int numCoordinates = 0;
+time_t nextUpdate = 0;
+char* triggerType = "Trigger";
+
+std::string hintFile = "";
+
+int hintGroups[256];
+int hintPhases[256];
+float hintDistances[256];
+std::string hintSounds[256];
+time_t lastHintsUpdate = 0;
+int lastLap = 0;
+int lastHint = -1;
+int lastGroup = 0;
+int lastPhase = Start;
+
+void checkCoordinates(const irsdk_header* header, const char* data, float trackLength) {
+	char* rawValue;
+
+	getRawDataValue(rawValue, header, data, "Lap");
+
+	int carLaps = *((int*)rawValue);
+
+	if (time(NULL) > nextUpdate) {
+		char buffer[60];
+
+		const char* sessionInfo = irsdk_getSessionInfoStr();
+		char playerCarIdx[10] = "";
+		char sessionID[10] = "";
+
+		getYamlValue(playerCarIdx, sessionInfo, "DriverInfo:DriverCarIdx:");
+		itoa(getCurrentSessionID(sessionInfo), sessionID, 10);
+
+		int carIdx = atoi(playerCarIdx);
+
+		char* trackPositions;
+		float running = 0.0;
+
+		if (getRawDataValue(trackPositions, header, data, "CarIdxLapDistPct"))
+			running = ((float*)trackPositions)[carIdx];
+
+		getDataValue(buffer, header, data, "Speed");
+
+		if (atof(buffer) > 0) {
+			float distance = 99999;
+			int index = 0;
+
+			if (strcmp(triggerType, "Trigger") == 0) {
+				for (int i = 0; i < numCoordinates; i++) {
+					float cDistance = abs(trackDistances[i] - running);
+
+					if (i == 0)
+						distance = cDistance;
+					else if (cDistance < distance) {
+						distance = cDistance;
+						index = i;
+					}
+				}
+
+				if (distance < (30 / trackLength)) {
+					char buffer[512] = "";
+					char numBuffer[60] = "";
+
+					strcat_s(buffer, "positionTrigger:");
+					_itoa_s(tIndices[index], numBuffer, 10);
+					strcat_s(buffer, numBuffer);
+					strcat_s(buffer, ";");
+					sprintf_s(numBuffer, "%f", xCoordinates[index]);
+					strcat_s(buffer, numBuffer);
+					strcat_s(buffer, ";");
+					sprintf_s(numBuffer, "%f", yCoordinates[index]);
+					strcat_s(buffer, numBuffer);
+
+					sendTriggerMessage(buffer);
+
+					nextUpdate = time(NULL) + 2;
+				}
+			}
+			else {
+				if (lastLap != carLaps) {
+					lastLap = carLaps;
+
+					lastHint = -1;
+				}
+
+				float coordinateX;
+				float coordinateY;
+
+				if (getCarCoordinates(header, data, carIdx, coordinateX, coordinateY)) {
+					for (int i = lastHint + 1; i < numCoordinates; i += 1)
+					{
+						float curDistance = (float)vectorLength(xCoordinates[i] - coordinateX, yCoordinates[i] - coordinateY);
+
+						if ((curDistance < hintDistances[i]) && (curDistance < distance))
+						{
+							index = i;
+							distance = curDistance;
+						}
+					}
+
+					if (index > lastHint && distance < (hintDistances[index] / trackLength)) {
+						int phase = hintPhases[index];
+						int group = hintGroups[index];
+
+						if ((lastPhase != Start) || (phase == Intro)) {
+							if ((lastGroup != group) && (phase != Intro))
+								return;
+							else if ((phase <= lastPhase) && (phase != Intro))
+								return;
+
+							lastHint = index;
+							lastGroup = group;
+							lastPhase = phase;
+
+							if (audioDevice != "")
+							{
+								if (player != "")
+									playSound(hintSounds[index], false);
+								else {
+									char buffer[512] = "";
+
+									strcat_s(buffer, "acousticFeedback:");
+									strcat_s(buffer, hintSounds[index].c_str());
+
+									sendTriggerMessage(buffer);
+								}
+							}
+							else {
+								PlaySoundA(NULL, NULL, SND_FILENAME | SND_ASYNC);
+								PlaySoundA(hintSounds[index].c_str(), NULL, SND_FILENAME | SND_ASYNC);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+#ifdef WIN32
+#define stat _stat
+#endif
+
+void loadTrackHints()
+{
+	if ((hintFile != "") && fileExists(hintFile))
+	{
+		struct stat result;
+		time_t mod_time = 0;
+
+		if (stat(hintFile.c_str(), &result) == 0)
+			mod_time = result.st_mtime;
+
+		if (numCoordinates == 0 || (mod_time > lastHintsUpdate))
+		{
+			numCoordinates = 0;
+			lastHintsUpdate = mod_time;
+
+			std::ifstream infile(hintFile);
+			std::string line;
+
+			while (std::getline(infile, line)) {
+				auto parts = splitString(line, " ", 6);
+
+				hintGroups[numCoordinates] = atoi(parts[0].c_str());
+				if (parts[1] == "Intro" || parts[1] == "intro")
+					hintPhases[numCoordinates] = Intro;
+				else if (parts[1] == "Ready" || parts[1] == "ready")
+					hintPhases[numCoordinates] = Ready;
+				else if (parts[1] == "Set" || parts[1] == "set")
+					hintPhases[numCoordinates] = Set;
+				else if (parts[1] == "Brake" || parts[1] == "brake")
+					hintPhases[numCoordinates] = Brake;
+				else if (parts[1] == "Release" || parts[1] == "release")
+					hintPhases[numCoordinates] = Release;
+				xCoordinates[numCoordinates] = (float)atof(parts[2].c_str());
+				yCoordinates[numCoordinates] = (float)atof(parts[3].c_str());
+				hintDistances[numCoordinates] = (float)atof(parts[4].c_str());
+				hintSounds[numCoordinates] = parts[5];
+
+				if (++numCoordinates > 255)
+					break;
+			}
+
+			lastHint = -1;
+			lastGroup = 0;
+			lastPhase = Start;
+		}
+	}
+}
+
+int main(int argc, char* argv[])
+{
+	// bump priority up so we get time from the sim
+	SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+
+	// ask for 1ms timer so sleeps are more precise
+	timeBeginPeriod(1);
+
+	bool handlingCalibrator = false;
+	bool handlingAnalyzer = false;
+	bool positionTrigger = false;
+	bool trackHints = false;
+	const char* soundsDirectory = "";
+
+	if (argc > 1) {
+		positionTrigger = (strcmp(argv[1], "-Trigger") == 0);
+
+		if (positionTrigger) {
+			loadTrackCoordinates(argv[2]);
+
+			for (int i = 3; i < (argc - 3); i = i + 3) {
+				float x = (float)atof(argv[i + 1]);
+				float y = (float)atof(argv[i + 2]);
+
+				tIndices[numCoordinates] = atoi(argv[i]);
+				xCoordinates[numCoordinates] = x;
+				yCoordinates[numCoordinates] = y;
+
+				int candidate;
+				float cDistance;
+
+				for (int c = 0; c < 1000; c++) {
+					float cX = rXCoordinates[c];
+					float cY = rYCoordinates[c];
+
+					float distance = sqrt((cX - x) * (cX - x) + (cY - y) * (cY - y));
+
+					if (c == 0 || distance < cDistance) {
+						cDistance = distance;
+						candidate = c;
+					}
+				}
+
+				trackDistances[numCoordinates] = ((float)candidate) / 1000.0;
+
+				if (++numCoordinates > 255)
+					break;
+			}
+
+			if (numCoordinates == 0)
+				positionTrigger = false;
+		}
+
+		trackHints = (strcmp(argv[1], "-TrackHints") == 0);
+
+		if (trackHints) {
+			triggerType = "TrackHints";
+
+			loadTrackCoordinates(argv[2]);
+
+			hintFile = argv[3];
+
+			if (argc > 4)
+				audioDevice = argv[4];
+
+			if (argc > 5)
+				volume = atof(argv[5]);
+
+			if (argc > 6)
+				player = argv[6];
+
+			if (argc > 7)
+				workingDirectory = argv[7];
+		}
+
+		handlingCalibrator = (strcmp(argv[1], "-Calibrate") == 0);
+		handlingAnalyzer = handlingCalibrator || (strcmp(argv[1], "-Analyze") == 0);
+
+		if (handlingAnalyzer) {
+			dataFile = argv[2];
+
+			if (handlingCalibrator) {
+				lowspeedThreshold = atoi(argv[3]);
+				steerRatio = atoi(argv[4]);
+				wheelbase = atoi(argv[5]);
+				trackWidth = atoi(argv[6]);
+			}
+			else {
+				understeerLightThreshold = atoi(argv[3]);
+				understeerMediumThreshold = atoi(argv[4]);
+				understeerHeavyThreshold = atoi(argv[5]);
+				oversteerLightThreshold = atoi(argv[6]);
+				oversteerMediumThreshold = atoi(argv[7]);
+				oversteerHeavyThreshold = atoi(argv[8]);
+				lowspeedThreshold = atoi(argv[9]);
+				steerRatio = atoi(argv[10]);
+				wheelbase = atoi(argv[11]);
+				trackWidth = atoi(argv[12]);
+
+				lightBottomOutThreshold = atoi(argv[13]);
+				mediumBottomOutThreshold = atoi(argv[14]);
+				heavyBottomOutThreshold = atoi(argv[15]);
+				releaseThreshold = atof(argv[16]);
+				bottomOutDuration = atoi(argv[17]);
+				bottomOutGap = atoi(argv[18]);
+				samplerMinSamples = atoi(argv[19]);
+				deflectionMovingAverage = atoi(argv[20]);
+				accelerationMovingAverage = atoi(argv[21]);
+
+				if (argc > 22) {
+					soundsDirectory = argv[22];
+
+					if (argc > 23)
+						audioDevice = argv[23];
+
+					if (argc > 24)
+						volume = atof(argv[24]);
+
+					if (argc > 25)
+						player = argv[25];
+
+					if (argc > 26)
+						workingDirectory = argv[26];
+				}
+			}
+		}
+	}
+
+	float trackLength = 0.0;
+	int playerCarIndex = -1;
+	long counter = 0;
+
+	while (true) {
+		g_data = NULL;
+		int tries = 3;
+
+		counter += 1;
+
+		while (tries-- > 0) {
+			// wait for new data and copy it into the g_data buffer, if g_data is not null
+			if (irsdk_waitForDataReady(TIMEOUT, g_data)) {
+				const irsdk_header* pHeader = irsdk_getHeader();
+
+				if (pHeader) {
+					if (!g_data || g_nData != pHeader->bufLen) {
+						// realocate our g_data buffer to fit, and lookup some data offsets
+						initData(pHeader, g_data, g_nData);
+
+						continue;
+					}
+					else
+						tries = 0;
+
+					if (trackLength == 0.0) {
+						char buffer[64];
+
+						getYamlValue(buffer, irsdk_getSessionInfoStr(), "WeekendInfo:TrackLength:");
+
+						trackLength = atof(buffer) * 1000;
+					}
+
+					if (playerCarIndex == -1) {
+						char playerCarIdx[10] = "";
+
+						getYamlValue(playerCarIdx, irsdk_getSessionInfoStr(), "DriverInfo:DriverCarIdx:");
+
+						playerCarIndex = atoi(playerCarIdx);
+					}
+
+					if (handlingAnalyzer) {
+						if (collectTelemetry(pHeader, g_data, soundsDirectory, audioDevice, handlingCalibrator)) {
+							if (remainder(counter, 200) == 0)
+								writeTelemetry(pHeader, g_data, handlingCalibrator);
+
+							Sleep(10);
+						}
+						else
+							break;
+					}
+					else if (positionTrigger) {
+						checkCoordinates(pHeader, g_data, trackLength);
+
+						Sleep(10);
+					}
+					else if (trackHints) {
+						loadTrackHints();
+
+						checkCoordinates(pHeader, g_data, trackLength);
+
+						Sleep(10);
+					}
+				}
+				else
+					Sleep(1000);
+			}
+
+			if (g_data)
+				delete g_data;
+		}
+	}
+
+	irsdk_shutdown();
+	timeEndPeriod(1);
+
+	return 0;
+}
+

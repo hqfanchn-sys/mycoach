@@ -1,0 +1,970 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Collection Functions            ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "Constants.ahk"
+#Include "Variables.ahk"
+#Include "Debug.ahk"
+#Include "Files.ahk"
+#Include "Collections.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework\Extensions\Math.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Public Constants Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kMassUnits := ["Kilogram", "Pound"]
+global kTemperatureUnits := ["Celsius", "Fahrenheit"]
+global kPressureUnits := ["Bar", "PSI", "KPa"]
+global kVolumeUnits := ["Liter", "Gallon (US)", "Gallon (GB)"]
+global kLengthUnits := ["Meter", "Yard"]
+global kSpeedUnits := ["km/h", "mph"]
+
+global kNumberFormats := ["#.##", "#,##"]
+global kTimeFormats := ["[H:]M:S.##", "[H:]M:S,##", "S.##", "S,##"]
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Private Variable Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global gTargetLanguageCode := "en"
+
+global gLocalizationCallbacks := []
+
+global gTargetUnits := translate("Standard")
+
+global gMassUnit := "Kilogram"
+global gTemperatureUnit := "Celcius"
+global gPressureUnit := "PSI"
+global gVolumeUnit := "Liter"
+global gLengthUnit := "Meter"
+global gSpeedUnit := "km/h"
+global gNumberFormat := "#.##"
+global gTimeFormat := "[H:]M:S.##"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                    Private Function Declaration Section                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+getTemperatureUnit(unit, trans := false) {
+	return (trans ? translate(unit) : unit)
+}
+
+getPressureUnit(unit, trans := false) {
+	return (trans ? translate(unit) : unit)
+}
+
+getSpeedUnit(unit, trans := false) {
+	return (trans ? translate(unit) : unit)
+}
+
+getLengthUnit(unit, trans := false) {
+	return (trans ? translate(unit) : unit)
+}
+
+getMassUnit(unit, trans := false) {
+	return (trans ? translate(unit) : unit)
+}
+
+getVolumeUnit(unit, trans := false) {
+	return (trans ? translate(unit) : unit)
+}
+
+displayTemperatureValue(unit, celsius, rnd) {
+	if isNumber(celsius) {
+		switch unit, false {
+			case "Celsius":
+				return (rnd ? Round(celsius, 1) : celsius)
+			case "Fahrenheit":
+				return (rnd ? Round(((celsius * 1.8) + 32), 1) : ((celsius * 1.8) + 32))
+			default:
+				throw "Unknown temperature unit detected in displayTemperatureValue..."
+		}
+	}
+	else
+		return celsius
+}
+
+displayPressureValue(unit, psi, rnd) {
+	if isNumber(psi) {
+		switch unit, false {
+			case "PSI":
+				return (rnd ? Round(psi, 1) : psi)
+			case "Bar":
+				return (rnd ? Round(psi / 14.503773, 2) : (psi / 14.503773))
+			case "KPa":
+				return (rnd ? Round(psi * 6.894757) : (psi * 6.894757))
+			default:
+				throw "Unknown pressure unit detected in displayPressureValue..."
+		}
+	}
+	else
+		return psi
+}
+
+displayLengthValue(unit, meter, rnd) {
+	if isNumber(meter) {
+		switch unit, false {
+			case "Meter":
+				return (rnd ? Round(meter, 1) : meter)
+			case "Yard":
+				return (rnd ? Round(meter * 0.9144) : (meter * 0.9144))
+			default:
+				throw "Unknown length unit detected in displayLengthValue..."
+		}
+	}
+	else
+		return meter
+}
+
+displaySpeedValue(unit, kmh, rnd) {
+	if isNumber(kmh) {
+		switch unit, false {
+			case "km/h":
+				return (rnd ? Round(kmh, 1) : kmh)
+			case "mph":
+				return (rnd ? Round(kmh / 1.609344, 1) : (kmh / 1.609344))
+			default:
+				throw "Unknown speed unit detected in displaySpeedValue..."
+		}
+	}
+	else
+		return kmh
+}
+
+displayMassValue(unit, kilogram, rnd) {
+	if isNumber(kilogram) {
+		switch unit, false {
+			case "Kilogram":
+				return (rnd ? Round(kilogram, 1) : kilogram)
+			case "Pound":
+				return (rnd ? Round(kilogram * 2.204623): (kilogram * 2.204623))
+			default:
+				throw "Unknown mass unit detected in displayMassValue..."
+		}
+	}
+	else
+		return kilogram
+}
+
+displayVolumeValue(unit, liter, rnd) {
+	if isNumber(liter) {
+		switch unit, false {
+			case "Liter":
+				return (rnd ? Round(liter, 1) : liter)
+			case "Gallon (US)":
+				return (rnd ? Round(liter / 3.785411, 2) : (liter / 3.785411))
+			case "Gallon (GB)", "Gallon":
+				return (rnd ? Round(liter / 4.546092, 2) : (liter / 4.546092))
+			default:
+				throw "Unknown volume unit detected in displayVolumeValue..."
+		}
+	}
+	else
+		return liter
+}
+
+displayFloatValue(format, float, precision := kUndefined) {
+	if isNumber(float) {
+		if (precision = kUndefined)
+			return StrReplace(float, ".", getFloatSeparator(format))
+		else if (precision = 0)
+			return Round(float)
+		else
+			return StrReplace(Round(float, precision), ".", getFloatSeparator(format))
+	}
+	else
+		return float
+}
+
+displayTimeValue(timeFormat, time, fillHours := false, withSeconds := true, withFractions := true, arguments*) {
+	local sign := (signum(time) < 0)
+	local hours, seconds, fraction, minutes
+
+	if isNumber(time) {
+		if ((timeFormat = "S.##") || (timeFormat = "S,##"))
+			return StrReplace(time, ".", (timeFormat = "S.##") ? "." : ",")
+		else {
+			time := Abs(time)
+
+			seconds := Floor(time)
+			fraction := (time - seconds)
+			minutes := Floor(seconds / 60)
+			hours := Floor(minutes / 60)
+
+			minutes -= (hours * 60)
+
+			fraction := Round(fraction * 10)
+
+			seconds := ((seconds - (minutes * 60) - (hours * 3600)) . "")
+
+			if (StrLen(seconds) = 1)
+				seconds := ("0" . seconds)
+
+			if fillHours {
+				hours := (Format("{1:02}", hours) . ":")
+				minutes := Format("{1:02}", minutes)
+			}
+			else if (hours > 0) {
+				hours := (hours . ":")
+				minutes := Format("{1:02}", minutes)
+			}
+			else
+				hours := ""
+
+			return ((sign ? "-" : "") . (hours . minutes . (withSeconds ? (":" . seconds . (withFractions ? (((timeFormat = "[H:]M:S.##") ? "." : ",") . fraction) : "")) : "")))
+		}
+	}
+	else
+		return time
+}
+
+internalPressureValue(unit, value, rnd) {
+	if isNumber(value) {
+		switch unit, false {
+			case "PSI":
+				return (rnd ? Round(value, 1) : value)
+			case "Bar":
+				return (rnd ? Round(value * 14.503773, 2) : (value * 14.503773))
+			case "KPa":
+				return (rnd ? Round(value / 6.894757) : (value / 6.894757))
+			default:
+				throw "Unknown pressure unit detected in internalPressureValue..."
+		}
+	}
+	else
+		return value
+}
+
+internalTemperatureValue(unit, value, rnd) {
+	if isNumber(value) {
+		switch unit, false {
+			case "Celsius":
+				return (rnd ? Round(value, 1) : value)
+			case "Fahrenheit":
+				return (rnd ? Round((value - 32) / 1.8, 1) : ((value - 32) / 1.8))
+			default:
+				throw "Unknown temperature unit detected in internalTemperatureValue..."
+		}
+	}
+	else
+		return value
+}
+
+internalLengthValue(unit, value, rnd) {
+	if isNumber(value) {
+		switch unit, false {
+			case "Meter":
+				return (rnd ? Round(value, 1) : value)
+			case "Yard":
+				return (rnd ? Round(value / 0.9144) : (value / 0.9144))
+			default:
+				throw "Unknown length unit detected in internalLengthValue..."
+		}
+	}
+	else
+		return value
+}
+
+internalSpeedValue(unit, value, rnd) {
+	if isNumber(value) {
+		switch unit, false {
+			case "km/h":
+				return (rnd ? Round(value, 1) : value)
+			case "mph":
+				return (rnd ? Round(value * 1.609344, 1) : (value * 1.609344))
+			default:
+				throw "Unknown speed unit detected in internalSpeedValue..."
+		}
+	}
+	else
+		return value
+}
+
+internalMassValue(unit, value, rnd) {
+	if isNumber(value) {
+		switch unit, false {
+			case "Kilogram":
+				return (rnd ? Round(value, 1) : value)
+			case "Pound":
+				return (rnd ? Round(value / 2.204623) : (value / 2.204623))
+			default:
+				throw "Unknown mass unit detected in internalMassValue..."
+		}
+	}
+	else
+		return value
+}
+
+internalVolumeValue(unit, value, rnd) {
+	if isNumber(value) {
+		switch unit, false {
+			case "Liter":
+				return (rnd ? Round(value, 1) : value)
+			case "Gallon (US)":
+				return (rnd ? Round(value * 3.785411, 2) : (value * 3.785411))
+			case "Gallon (GB)", "Gallon":
+				return (rnd ? Round(value * 4.546092, 2) : (value * 4.546092))
+			default:
+				throw "Unknown volume unit detected in internalVolumeValue..."
+		}
+	}
+	else
+		return value
+}
+
+internalFloatValue(format, value, precision := kUndefined) {
+	if (precision = kUndefined)
+		return StrReplace(value, getFloatSeparator(format), ".")
+	else if isNumber(value)
+		return Round(StrReplace(value, getFloatSeparator(format), "."), precision)
+	else
+		return value
+}
+
+internalTimeValue(timeFormat, time, arguments*) {
+	local seconds, fraction
+
+	if (timeFormat = "S,##")
+		return StrReplace(time, ",", ".")
+	else if (timeFormat = "S.##")
+		return time
+	else {
+		seconds := StrSplit(time, (timeFormat = "S,##") ? "," : ".")
+
+		if (seconds.Length = 1) {
+			seconds := seconds[1]
+			fraction := 0
+		}
+		else {
+			fraction := seconds[2]
+			seconds := seconds[1]
+		}
+
+		if (fraction > 0)
+			if (StrLen(fraction) = 1)
+				fraction /= 10
+			else
+				fraction /= 100
+
+		seconds := StrSplit(seconds, ":")
+
+		switch seconds.Length, false {
+			case 3:
+				return ((seconds[1] * 3600) + (seconds[2] * 60) + seconds[3] + fraction)
+			case 2:
+				return ((seconds[1] * 60) + seconds[2] + fraction)
+			case 1:
+				return (seconds[1] + fraction)
+			default:
+				throw "Invalid format detected in internalTimeValue..."
+		}
+	}
+}
+
+initializeLocalization(from := "File") {
+	global gTargetUnits, gMassUnit, gTemperatureUnit, gPressureUnit
+	global gVolumeUnit, gLengthUnit, gSpeedUnit, gNumberFormat, gTimeFormat
+
+	local configuration, index, targetUnits
+
+	static startup := true
+
+	loadUnits(units) {
+		gTargetUnits := (units.Has("Units") ? units["Units"] : translate("Standard"))
+
+		gMassUnit := (units.Has("MassUnit") ? units["MassUnit"] : "Kilogram")
+		gTemperatureUnit := (units.Has("TemperatureUnit") ? units["TemperatureUnit"] : "Celsius")
+		gPressureUnit := (units.Has("PressureUnit") ? units["PressureUnit"] : "PSI")
+		gVolumeUnit := (units.Has("VolumeUnit") ? units["VolumeUnit"] : "Liter")
+		gLengthUnit := (units.Has("LengthUnit") ? units["LengthUnit"] : "Meter")
+		gSpeedUnit := (units.Has("SpeedUnit") ? units["SpeedUnit"] : "km/h")
+
+		gNumberFormat := (units.Has("NumberFormat") ? units["NumberFormat"] : "#.##")
+		gTimeFormat := (units.Has("TimeFormat") ? units["TimeFormat"] : "H:M:S.##")
+
+		if (gVolumeUnit = "Gallon")
+			gVolumeUnit := "Gallon (GB)"
+	}
+
+	if (from = "Memory")
+		configuration := kSimulatorConfiguration
+	else if (from = "File")
+		configuration := readMultiMap(kSimulatorConfigurationFile)
+
+	loadUnits(getMultiMapValues(configuration, "Localization"))
+
+	if startup {
+		index := inList(A_Args, "-Startup")
+
+		if index {
+			targetUnits := getMultiMapValue(readMultiMap(A_Args[index + 1]), "Session", "Units", kUndefined)
+
+			if (targetUnits != kUndefined) {
+				configuration := getMultiMapValues(readMultiMap(kUserConfigDirectory . "Units.ini"), targetUnits, false)
+
+				if configuration
+					loadUnits(configuration)
+			}
+		}
+
+		startup := false
+	}
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                    Public Function Declaration Section                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+availableLanguages(target := "UI", &scopes?) {
+	local ignore, fileName, languageCode, scope, language
+
+	static translations := false
+
+	readLanguage(targetLanguageCode, &scopes) {
+		local language := false
+		local inLocale := false
+		local translation, ignore, scope
+
+		scopes := []
+
+		loop Read, getFileName("Translations." . targetLanguageCode, kUserTranslationsDirectory, kTranslationsDirectory) {
+			if (Trim(A_LoopReadLine) = "[Locale]")
+				inLocale := true
+			else if inLocale {
+				translation := StrSplit(A_LoopReadLine, "=>", " `t")
+
+				if (translation[1] = targetLanguageCode)
+					language := translation[2]
+				else if (translation[1] = "Scope") {
+					for ignore, scope in StrSplit(translation[2], ",", " `t")
+						if !inList(scopes, scope)
+							scopes.Push(scope)
+				}
+				else if (SubStr(translation[1], 1, 1) = "[")
+					break
+			}
+		}
+
+		if (scopes.Length = 0)
+			scopes := ["UI"]
+
+		if !language
+			if isDebug()
+				throw "Inconsistent translation encountered for `"" . targetLanguageCode . "`" in readLanguage..."
+			else
+				logError("Inconsistent translation encountered for `"" . targetLanguageCode . "`" in readLanguage...")
+
+		return language
+	}
+
+	if !translations {
+		translations := CaseInsenseMap("en.UI", "English")
+
+		for ignore, fileName in getFileNames("Translations.*", kUserTranslationsDirectory, kTranslationsDirectory) {
+			SplitPath(fileName, , , &languageCode)
+
+			language := readLanguage(languageCode, &scopes)
+
+			for ignore, scope in scopes
+				translations[languageCode . "." . scope] := language
+		}
+	}
+
+	sTranslations := CaseInsenseMap()
+
+	if (target = "Scopes") {
+		for scope, language in translations {
+			scope := ConfigurationItem.splitDescriptor(scope)
+
+			if sTranslations.Has(scope[1])
+				sTranslations[scope[1]].Push(scope[2])
+			else
+				sTranslations[scope[1]] := [scope[2]]
+		}
+	}
+	else
+		for scope, language in translations {
+			scope := ConfigurationItem.splitDescriptor(scope)
+
+			if (scope[2] = target)
+				sTranslations[scope[1]] := language
+		}
+
+	return sTranslations
+}
+
+readTranslations(targetLanguageCode, withUserTranslations := true, fromEditor := false) {
+	local fileNames := []
+	local fileName := (kTranslationsDirectory . "Translations." . targetLanguageCode)
+	local translations := CaseInsenseMap()
+	local section := false
+	local translation, ignore, enString, missingTranslations, inconsistentTranslations
+
+	readOriginals() {
+		local section := false
+		local fileNames := [kTranslationsDirectory . "Translations.EN"]
+		local fileName, orginals, translation, ignore
+
+		fileName := (kUserTranslationsDirectory . "Translations.EN")
+
+		if FileExist(fileName)
+			fileNames.Push(fileName)
+
+		originals := CaseInsenseMap()
+
+		for ignore, fileName in fileNames
+			loop Read, fileName {
+				translation := A_LoopReadLine
+
+				if (SubStr(translation, 1, 1) = "[")
+					section := SubStr(translation, 2, -1)
+				else if (Trim(translation) != "") {
+					translation := StrReplace(translation, "\=", "=")
+					translation := StrReplace(translation, "\\", "\")
+					translation := StrReplace(translation, "\n", "`n")
+
+					if (section != "Locale")
+						originals[StrSplit(translation, "=>")[1]] := true
+				}
+			}
+
+		return originals
+	}
+
+	if FileExist(fileName)
+		fileNames.Push(fileName)
+
+	if withUserTranslations {
+		fileName := (kUserTranslationsDirectory . "Translations." . targetLanguageCode)
+
+		if FileExist(fileName)
+			fileNames.Push(fileName)
+	}
+
+	if isDebug() {
+		inconsistentTranslations := CaseInsenseMap()
+
+		for ignore, fileName in fileNames
+			loop Read, fileName {
+				translation := A_LoopReadLine
+
+				if (SubStr(translation, 1, 1) = "[")
+					section := SubStr(translation, 2, -1)
+				else if ((Trim(translation) != "") && (section != "Locale")) {
+					translation := StrReplace(translation, "\=", "=")
+					translation := StrReplace(translation, "\\", "\")
+					translation := StrReplace(translation, "\n", "`n")
+
+					translation := StrSplit(translation, "=>")
+					enString := translation[1]
+
+					if ((SubStr(enString, 1, 1) != "[") && (fromEditor || (targetLanguageCode != "en")))
+						if (!fromEditor && ((translation.Length < 2) || (translations.Has(enString) && (translations[enString] != translation[2]))))
+							inconsistentTranslations[enString] := true
+						else
+							translations[enString] := ((translation.Length < 2) ? "" : translation[2])
+				}
+			}
+
+		if (isDebug() && (targetLanguageCode != "en")) {
+			missingTranslations := CaseInsenseMap()
+
+			for enString, ignore in readOriginals()
+				if !translations.Has(enString)
+					missingTranslations[enString] := true
+
+			deleteFile(kTempDirectory . "Translations.report")
+
+			FileAppend("Missing:`n", kTempDirectory . "Translations.report")
+
+			for enString, ignore in missingTranslations
+				FileAppend("`n" . enString, kTempDirectory . "Translations.report")
+
+			FileAppend("`n`nInconsistent:`n", kTempDirectory . "Translations.report")
+
+			for enString, ignore in inconsistentTranslations
+				FileAppend("`n" . enString, kTempDirectory . "Translations.report")
+		}
+	}
+	else
+		for ignore, fileName in fileNames
+			loop Read, fileName {
+				translation := A_LoopReadLine
+
+				if (Trim(translation) != "") {
+					translation := StrReplace(translation, "\=", "=")
+					translation := StrReplace(translation, "\\", "\")
+					translation := StrReplace(translation, "\n", "`n")
+
+					translation := StrSplit(translation, "=>")
+					enString := translation[1]
+
+					if ((SubStr(enString, 1, 1) != "[") && (fromEditor || (targetLanguageCode != "en")))
+						translations[enString] := ((translation.Length < 2) ? "" : translation[2])
+				}
+			}
+
+	return translations
+}
+
+writeTranslations(languageCode, languageName, translations) {
+	local scopes := availableLanguages("Scopes")
+	local fileName := (kUserTranslationsDirectory . "Translations." . languageCode)
+	local stdTranslations := readTranslations(languageCode, false, false)
+	local hasValues := false
+	local ignore, key, value, temp, curEncoding, original, translation
+
+	if scopes.Has(languageCode)
+		scopes := scopes[languageCode]
+	else
+		scopes := ["UI"]
+
+	for ignore, value in stdTranslations {
+		hasValues := true
+
+		break
+	}
+
+	if hasValues {
+		temp := CaseInsenseMap()
+
+		for key, value in translations
+			if (!stdTranslations.Has(key) || (stdTranslations[key] != value))
+				temp[key] := value
+
+		translations := temp
+	}
+
+	deleteFile(fileName)
+
+	curEncoding := A_FileEncoding
+
+	FileEncoding("UTF-16")
+
+	try {
+		FileAppend("[Locale]`n", fileName)
+		FileAppend(languageCode . "=>" . languageName . "`n", fileName)
+		FileAppend("Scope=>" . values2String(", ", scopes*) . "`n", fileName)
+		FileAppend("[Translations]", fileName)
+
+		for original, translation in translations {
+			original := StrReplace(original, "\", "\\")
+			original := StrReplace(original, "=", "\=")
+			original := StrReplace(original, "`n", "\n")
+
+			translation := StrReplace(translation, "\", "\\")
+			translation := StrReplace(translation, "=", "\=")
+			translation := StrReplace(translation, "`n", "\n")
+
+			FileAppend("`n" . original . "=>" . translation, fileName)
+		}
+	}
+	finally {
+		FileEncoding(curEncoding)
+	}
+}
+
+translate(string, targetLanguageCode := false) {
+	local theTranslations, translation
+
+	static currentLanguageCode := "en"
+	static translations := false
+	static cachedTranslations := CaseInsenseMap()
+
+	if (targetLanguageCode && (targetLanguageCode = "en"))
+		return string
+	else if (targetLanguageCode && (targetLanguageCode != gTargetLanguageCode)) {
+		if (cachedTranslations.Has(targetLanguageCode))
+			theTranslations := cachedTranslations[targetLanguageCode]
+		else {
+			theTranslations := readTranslations(targetLanguageCode)
+
+			cachedTranslations[targetLanguageCode] := theTranslations
+		}
+
+		if theTranslations.Has(string) {
+			translation := theTranslations[string]
+
+			return ((translation != "") ? translation : string)
+		}
+		else
+			return string
+	}
+	else if (gTargetLanguageCode != "en") {
+		if (gTargetLanguageCode != currentLanguageCode) {
+			currentLanguageCode := gTargetLanguageCode
+
+			cachedTranslations := CaseInsenseMap()
+
+			translations := readTranslations(currentLanguageCode)
+		}
+
+		if (translations && translations.Has(string)) {
+			translation := translations[string]
+
+			return ((translation != "") ? translation : string)
+		}
+		else
+			return string
+	}
+	else
+		return string
+}
+
+setLanguage(languageCode) {
+	global gTargetLanguageCode
+
+	local igore, callback
+
+	if (gTargetLanguageCode != languageCode) {
+		gTargetLanguageCode := languageCode
+
+		for ignore, callback in gLocalizationCallbacks.Clone()
+			callback.Call({Language: languageCode})
+	}
+}
+
+getLanguageFromLCID(lcid) {
+	local code := SubStr(lcid, StrLen(lcid) - 1)
+
+	if (code = "07")
+		return "DE"
+	else if (code = "0c")
+		return "FR"
+	else if (code = "0a")
+		return "ES"
+	else if (code = "10")
+		return "IT"
+	else
+		return "EN"
+}
+
+getSystemLanguage() {
+	return getLanguageFromLCID(A_Language)
+}
+
+getLanguage() {
+	return gTargetLanguageCode
+}
+
+registerLocalizationCallback(callback) {
+	gLocalizationCallbacks.Push(callback)
+}
+
+getUnit(type, translate := false) {
+	switch isObject(type) ? type.Type : type, false {
+		case "Pressure":
+			return getPressureUnit(isObject(type) ? type.Unit : gPressureUnit, translate)
+		case "Temperature":
+			return getTemperatureUnit(isObject(type) ? type.Unit : gTemperatureUnit, translate)
+		case "Length":
+			return getLengthUnit(isObject(type) ? type.Unit : gLengthUnit, translate)
+		case "Speed":
+			return getSpeedUnit(isObject(type) ? type.Unit : gSpeedUnit, translate)
+		case "Mass":
+			return getMassUnit(isObject(type) ? type.Unit : gMassUnit, translate)
+		case "Volume":
+			return getVolumeUnit(isObject(type) ? type.Unit : gVolumeUnit, translate)
+		default:
+			throw "Unknown unit type detected in getUnit..."
+	}
+}
+
+getFloatSeparator(format := gNumberFormat) {
+	return (format == "#.##" ? "." : ",")
+}
+
+convertUnit(type, value, display := true, rnd := true) {
+	if (display == true) {
+		switch isObject(type) ? type.Type : type, false {
+			case "Pressure":
+				return displayPressureValue(isObject(type) ? type.Unit : gPressureUnit, value, rnd)
+			case "Temperature":
+				return displayTemperatureValue(isObject(type) ? type.Unit : gTemperatureUnit, value, rnd)
+			case "Length":
+				return displayLengthValue(isObject(type) ? type.Unit : gLengthUnit, value, rnd)
+			case "Speed":
+				return displaySpeedValue(isObject(type) ? type.Unit : gSpeedUnit, value, rnd)
+			case "Mass":
+				return displayMassValue(isObject(type) ? type.Unit : gMassUnit, value, rnd)
+			case "Volume":
+				return displayVolumeValue(isObject(type) ? type.Unit : gVolumeUnit, value, rnd)
+			default:
+				throw "Unknown unit type detected in convertUnit..."
+		}
+	}
+	else if display {
+		switch type, false {
+			case "Pressure":
+				return internalPressureValue(isObject(type) ? type.Unit : display, value, rnd)
+			case "Temperature":
+				return internalTemperatureValue(isObject(type) ? type.Unit : display, value, rnd)
+			case "Length":
+				return internalLengthValue(isObject(type) ? type.Unit : display, value, rnd)
+			case "Speed":
+				return internalSpeedValue(isObject(type) ? type.Unit : display, value, rnd)
+			case "Mass":
+				return internalMassValue(isObject(type) ? type.Unit : display, value, rnd)
+			case "Volume":
+				return internalVolumeValue(isObject(type) ? type.Unit : display, value, rnd)
+			default:
+				throw "Unknown unit type detected in convertUnit..."
+		}
+	}
+	else
+		switch type, false {
+			case "Pressure":
+				return internalPressureValue(isObject(type) ? type.Unit : gPressureUnit, value, rnd)
+			case "Temperature":
+				return internalTemperatureValue(isObject(type) ? type.Unit : gTemperatureUnit, value, rnd)
+			case "Length":
+				return internalLengthValue(isObject(type) ? type.Unit : gLengthUnit, value, rnd)
+			case "Speed":
+				return internalSpeedValue(isObject(type) ? type.Unit : gSpeedUnit, value, rnd)
+			case "Mass":
+				return internalMassValue(isObject(type) ? type.Unit : gMassUnit, value, rnd)
+			case "Volume":
+				return internalVolumeValue(isObject(type) ? type.Unit : gVolumeUnit, value, rnd)
+			default:
+				throw "Unknown unit type detected in convertUnit..."
+		}
+}
+
+displayValue(type, value, arguments*) {
+	switch isObject(type) ? type.Type : type, false {
+		case "Float":
+			return displayFloatValue(isObject(type) ? type.Format : gNumberFormat, value, arguments*)
+		case "Time":
+			return displayTimeValue(isObject(type) ? type.Format : gTimeFormat, value, arguments*)
+		default:
+			throw "Unknown format type detected in displayValue..."
+	}
+}
+
+internalValue(type, value, arguments*) {
+	switch isObject(type) ? type.Type : type, false {
+		case "Float":
+			return internalFloatValue(isObject(type) ? type.Format : gNumberFormat, value, arguments*)
+		case "Time":
+			return internalTimeValue(isObject(type) ? type.Format : gTimeFormat, value, arguments*)
+		default:
+			throw "Unknown format type detected in internalValue..."
+	}
+}
+
+validNumber(value, display := false) {
+	if isInteger(value)
+		return true
+	else {
+		if display
+			value := StrReplace(value, getFloatSeparator(), ".")
+
+		if isFloat(value)
+			return true
+		else
+			return false
+	}
+}
+
+getFormat(type) {
+	global gNumberFormat, gTimeFormat
+
+	switch type, false {
+		case "Float":
+			return gNumberFormat
+		case "Time":
+			return gTimeFormat
+		default:
+			throw "Unknown format type detected in getFormat..."
+	}
+}
+
+setFormat(type, format) {
+	global gNumberFormat, gTimeFormat
+
+	local oldFormat
+
+	switch type, false {
+		case "Float":
+			oldFormat := gNumberFormat
+
+			gNumberFormat := format
+		case "Time":
+			oldFormat := gTimeFormat
+
+			gTimeFormat := format
+		default:
+			throw "Unknown format type detected in setFormat..."
+	}
+
+	return oldFormat
+}
+
+withFormat(type, format, function, arguments*) {
+	local oldFormat := setFormat(type, format)
+
+	try {
+		function.Call(arguments*)
+	}
+	finally {
+		setFormat(type, oldFormat)
+	}
+}
+
+chooseUnits(units, temporary := false) {
+	local configuration := readMultiMap(kUserConfigDirectory . "Units.ini")
+	local unitsSet
+
+	unitsSet := getMultiMapValues(readMultiMap(kUserConfigDirectory . "Units.ini"), units, false)
+
+	if unitsSet {
+		if !temporary {
+			configuration := readMultiMap(kSimulatorConfigurationFile)
+
+			setMultiMapValues(configuration, "Localization", unitsSet)
+			setMultiMapValue(configuration, "Localization", "Units", units)
+
+			writeMultiMap(kSimulatorConfigurationFile, configuration)
+		}
+
+		setMultiMapValues(kSimulatorConfiguration, "Localization", unitsSet)
+		setMultiMapValue(kSimulatorConfiguration, "Localization", "Units", units)
+	}
+
+	initializeLocalization("Memory")
+}
+
+allUnits() {
+	local units := getKeys(readMultiMap(kUserConfigDirectory . "Units.ini"))
+
+	return ((units.Length > 0) ? units : [translate("Standard")])
+}
+
+currentUnits() {
+	return gTargetUnits
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Initialization Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+initializeLocalization("File")

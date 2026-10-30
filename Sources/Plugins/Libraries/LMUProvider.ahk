@@ -1,0 +1,802 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - LMU Provider                    ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Database\Libraries\SessionDatabase.ahk"
+#Include "LMURestProvider.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class LMUProvider extends Sector397Provider {
+	static kAPIType := getMultiMapValue(readMultiMap(getFileName("Core Settings.ini"
+															   , kUserConfigDirectory, kConfigDirectory))
+									  , "Simulator.Le Mans Ultimate", "API Type", "LMU")
+	static kRESTAPI := getMultiMapValue(readMultiMap(getFileName("Core Settings.ini"
+															   , kUserConfigDirectory, kConfigDirectory))
+									  , "Simulator.Le Mans Ultimate", "REST API", true)
+
+	static sDriversData := false
+
+	iTeamData := false
+	iTrackData := false
+	iGridData := false
+
+	iLastDriver := false
+
+	iStandingsData := false
+
+	iFuelRatio := false
+
+	static Simulator {
+		Get {
+			return "Le Mans Ultimate"
+		}
+	}
+
+	static Protocols {
+		Get {
+			local protocols := super.Protocols
+			local ignore, protocol
+
+			if (LMUProvider.kAPIType = "RF2")
+				for ignore, protocol in ["Connector", "Provider", "Spotter", "Coach"]
+					protocols.%protocol%.File := StrReplace(protocols.%protocol%.File, "%simulator%", "RF2")
+
+			return protocols
+		}
+	}
+
+	Simulator {
+		Get {
+			return LMUProvider.Simulator
+		}
+	}
+
+	GridData {
+		Get {
+			if !this.iGridData
+				this.iGridData := LMURESTProvider.GridData()
+
+			return this.iGridData
+		}
+	}
+
+	DriversData {
+		Get {
+			if !LMUProvider.sDriversData
+				LMUProvider.sDriversData := LMURESTProvider.DriversData()
+
+			return LMUProvider.sDriversData
+		}
+	}
+
+	TeamData {
+		Get {
+			if !this.iTeamData
+				this.iTeamData := LMURESTProvider.TeamData()
+
+			return this.iTeamData
+		}
+	}
+
+	TrackData {
+		Get {
+			if !this.iTrackData
+				this.iTrackData := LMURESTProvider.TrackData()
+
+			return this.iTrackData
+		}
+	}
+
+	StandingsData {
+		Get {
+			return this.iStandingsData
+		}
+	}
+
+	static __New(arguments*) {
+		SimulatorProvider.registerSimulatorProvider("LMU", LMUProvider)
+	}
+
+	supportsPitstop(&refuelService?, &tyreService?, &brakeService?, &repairService?) {
+		refuelService := true
+		tyreService := "Wheel"
+		brakeService := true
+		repairService := ["Bodywork", "Suspension"]
+
+		return true
+	}
+
+	supportsTyreManagement(&mixedCompounds?, &tyreSets?) {
+		mixedCompounds := "Wheel"
+		tyreSets := false
+
+		return true
+	}
+
+	prepareProvider() {
+		local ignore
+
+		super.prepareProvider()
+
+		ignore := this.TeamData.Data
+
+		if (LMUProvider.kAPIType = "RF2") {
+			ignore := this.TrackData.Data
+			ignore := this.DriversData.Data
+			ignore := this.GridData.Data
+			ignore := this.GridData.CarData.Data
+		}
+	}
+
+	getRefuelAmount(setupData) {
+		return setupData.getRefuelLevel()
+	}
+
+	retrieveCategory(candidate, &rest) {
+		super.retrieveCategory(candidate, &rest)
+
+		return false
+	}
+
+	retrieveCarName(carID, carModel, carName, &model?, &nr?, &category?, &team?) {
+		local gridData
+
+		static nextReload := 0
+
+		if (LMUProvider.kAPIType = "RF2") {
+			gridData := this.GridData
+
+			model := gridData.Car[carName]
+			team := gridData.Team[carName]
+
+			if !model {
+				if isDebug()
+					logMessage(kLogDebug, "Car model not found for car " . carName . "...")
+
+				if (A_TickCount > nextReload) {
+					nextReload := (A_TickCount + 10000)
+
+					gridData.reload()
+
+					model := gridData.Car[carName]
+					team := gridData.Team[carName]
+				}
+			}
+
+			if ((carName != "") && isNumber(SubStr(carName, 1, 1))) {
+				nr := this.retrieveNr(carName, &carName)
+
+				super.retrieveCarName(carID, carModel, carName, , , &category)
+			}
+			else
+				super.retrieveCarName(carID, carModel, carName, , &nr, &category)
+		}
+		else {
+			model := carModel
+			team := ""
+
+			if ((carName != "") && isNumber(SubStr(carName, 1, 1))) {
+				nr := this.retrieveNr(carName, &carName)
+
+				super.retrieveCarName(carID, carModel, carName, , , &category)
+			}
+			else
+				super.retrieveCarName(carID, carModel, carName, , &nr, &category)
+		}
+	}
+
+	retrieveDriverName(carID, carName, forname, surname, nickname, &category?) {
+		local drivers, standingsData
+
+		getCategory(drivers, driver) {
+			local ignore, candidate
+
+			for ignore, candidate in drivers
+				if (InStr(driver, candidate.Name) = 1)
+					return candidate.Category
+
+			return false
+		}
+
+		if ((LMUProvider.kAPIType = "RF2") && isSet(category)) {
+			try {
+				drivers := this.DriversData.Drivers[carName]
+				standingsData := (carID ? this.StandingsData : false)
+
+				category := (standingsData ? getCategory(drivers, standingsData.Driver[carID]) : false)
+			}
+			catch Any {
+				category := false
+			}
+		}
+		else
+			category := false
+
+		return super.retrieveDriverName(carID, carName, forname, surname, nickname)
+	}
+
+	acquireStandingsData(telemetryData, finished := false) {
+		local teamSession := this.TeamData.TeamSession
+		local rf2APIType := (LMUProvider.kAPIType = "RF2")
+		local standingsData, forname, surname, nickname, id, teamID, car
+
+		if ((rf2APIType || teamSession) && LMUProvider.kRESTAPI)
+			this.iStandingsData := LMURESTProvider.StandingsData()
+
+		standingsData := super.acquireStandingsData(telemetryData, finished)
+
+		loop getMultiMapValue(standingsData, "Position Data", "Car.Count", 0) {
+			forname := getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Driver.Forname")
+			surname := getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Driver.Surname")
+
+			car := getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Car")
+
+			if (InStr(car, "Chevrolet Corvette Z06") == 1)
+				setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Car", "Chevrolet Corvette Z06 LMGT3.R")
+			else if (InStr(car, "Aston Martin Vantage AMR LMGT") == 1)
+				setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Car", "Aston Martin Vantage AMR LMGT3")
+			else if (InStr(car, "Lamborghini Huracan LMGT3") == 1)
+				setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Car", "Lamborghini Huracan LMGT3 Evo2")
+
+			id := getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".ID")
+
+			if teamSession {
+				teamID := this.TeamData.TeamID[forname . A_Space . surname]
+
+				if teamID {
+					nr := this.TeamData.Nr[teamID]
+
+					if nr
+						setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Nr", nr)
+
+					team := this.TeamData.Team[teamID]
+
+					if team
+						setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Team", team)
+				}
+			}
+
+			if (rf2APIType && !isDebug()) {
+				removeMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".TyreCompound")
+				removeMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".TyreCompoundFront")
+				removeMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".TyreCompoundRear")
+			}
+
+			if (rf2APIType || teamSession) {
+				parseDriverName(this.StandingsData.Driver[id], &forname, &surname, &nickname)
+
+				setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Driver.Forname", forname)
+				setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Driver.Surname", surname)
+				setMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Driver.Nickname", nickname)
+			}
+		}
+
+		return standingsData
+	}
+
+	acquireSessionData(&telemetryData, &standingsData, finished := false) {
+		local driver, forname, surname, nickname
+
+		super.acquireSessionData(&telemetryData, &standingsData, finished)
+
+		driver := getMultiMapValue(standingsData, "Position Data", "Driver.Car", false)
+
+		if !driver
+			driver := this.iLastDriver
+
+		if driver {
+			this.iLastDriver := driver
+
+			forname := getMultiMapValue(standingsData, "Position Data", "Car." . driver . ".Driver.Forname")
+			surname := getMultiMapValue(standingsData, "Position Data", "Car." . driver . ".Driver.Surname")
+			nickname := getMultiMapValue(standingsData, "Position Data", "Car." . driver . ".Driver.Nickname")
+
+			if ((forname != getMultiMapValue(telemetryData, "Stint Data", "DriverForname"))
+			 || (surname != getMultiMapValue(telemetryData, "Stint Data", "DriverSurname")))
+				setMultiMapValue(telemetryData, "Session Data", "Paused", true)
+
+			setMultiMapValue(telemetryData, "Stint Data", "DriverForname", forname)
+			setMultiMapValue(telemetryData, "Stint Data", "DriverSurname", surname)
+			setMultiMapValue(telemetryData, "Stint Data", "DriverNickname", nickname)
+		}
+	}
+
+	readSessionData(options := "", protocol?) {
+		local standings := InStr(options, "Standings=true")
+		local simulator := this.Simulator
+		local carData := false
+		local energyData := false
+		local splitTime := A_TickCount
+		local startTime := splitTime
+		local lmuAPIType := (LMUProvider.kAPIType = "LMU")
+		local lmuRESTAPI := LMUProvider.kRESTAPI
+		local car, track, data, setupData, tyreCompound, tyreCompoundColor, key, postFix, fuelAmount
+		local weatherData, lap, weather, time, session, remainingTime, fuelRatio
+		local newPositions, position, virtualEnergy, tyreWear, brakeWear, suspensionDamage
+		local sessionData, sessionState, paused, fuelAmount, tyreWear, brakeWear, active
+
+		static logRequests := getMultiMapValue(readMultiMap(getFileName("Core Settings.ini"
+																	  , kUserConfigDirectory, kConfigDirectory))
+											 , "Debug", "LogSimulator", false)
+
+		static keys := Map("All", "", "Front Left", "FrontLeft", "Front Right", "FrontRight"
+									, "Rear Left", "RearLeft", "Rear Right", "RearRight")
+
+		static wheels := Map("Front Left", "FrontLeft", "Front Right", "FrontRight"
+						   , "Rear Left", "RearLeft", "Rear Right", "RearRight")
+
+		static tyreTypes := false
+
+		static lastPositions := false
+
+		static lastLap := -1
+		static duration := 0
+		static lastWeather := false
+		static lastWeather10Min := false
+		static lastWeather30Min := false
+		static lastWheelData := false
+		static lastTyreWear := false
+		static lastBrakeWear := false
+
+		static nextUpdate := 0
+		static lastFuelAmount := 0
+
+		static wasActive := false
+		static waitForFinish := false
+		; static waitForDriverSwap := false
+
+		static lmuApplication := Application("Le Mans Ultimate", kSimulatorConfiguration)
+
+		if !tyreTypes {
+			tyreTypes := ["Soft", "Medium", "Hard", "Wet"]
+
+			tyreTypes.Default := "Medium"
+		}
+
+		if InStr(options, "Setup=true") {
+			car := this.Car
+			track := this.Track
+
+			setupData := LMURESTProvider.PitstopData(simulator, car, track)
+
+			if logRequests {
+				logMessage(kLogInfo, "Read LMU session data (Setup=true->Pitstop):" . (A_TickCount - splitTime) . " ms...")
+
+				splitTime := A_TickCount
+			}
+
+			data := super.readSessionData(options, protocol?)
+
+			if logRequests {
+				logMessage(kLogInfo, "Read LMU session data (Setup=true->SHM):" . (A_TickCount - splitTime) . " ms...")
+
+				splitTime := A_TickCount
+			}
+
+			fuelAmount := this.getRefuelAmount(setupData)
+
+			setMultiMapValue(data, "Setup Data", "FuelAmount.Silent", (fuelAmount = lastFuelAmount))
+			setMultiMapValue(data, "Setup Data", "FuelAmount", fuelAmount)
+			setMultiMapValue(data, "Setup Data", "RefuelAmount", setupData.getRefuelLevel() - getMultiMapValue(data, "Setup Data", "FuelRemaining", 0))
+
+			lastFuelAmount := fuelAmount
+
+			for key, postFix in keys {
+				tyreCompound := setupData.TyreCompound[key]
+
+				if tyreCompound {
+					tyreCompound := SessionDatabase.getTyreCompoundName(simulator, car, track, tyreCompound, false)
+
+					if tyreCompound {
+						splitCompound(tyreCompound, &tyreCompound, &tyreCompoundColor)
+
+						setMultiMapValue(data, "Setup Data", "TyreCompound" . postFix, tyreCompound)
+						setMultiMapValue(data, "Setup Data", "TyreCompoundColor" . postFix, tyreCompoundColor)
+					}
+				}
+				else {
+					setMultiMapValue(data, "Setup Data", "TyreCompound" . postFix, false)
+					setMultiMapValue(data, "Setup Data", "TyreCompoundColor" . postFix, false)
+				}
+			}
+
+			setMultiMapValue(data, "Setup Data", "TyrePressureFL", setupData.TyrePressure["Front Left"])
+			setMultiMapValue(data, "Setup Data", "TyrePressureFR", setupData.TyrePressure["Front Right"])
+			setMultiMapValue(data, "Setup Data", "TyrePressureRL", setupData.TyrePressure["Rear Left"])
+			setMultiMapValue(data, "Setup Data", "TyrePressureRR", setupData.TyrePressure["Rear Right"])
+
+			setMultiMapValue(data, "Setup Data", "ChangeBrakes", setupData.BrakeChange)
+
+			setMultiMapValue(data, "Setup Data", "RepairBodywork", setupData.RepairBodywork)
+			setMultiMapValue(data, "Setup Data", "RepairSuspension", setupData.RepairSuspension)
+			setMultiMapValue(data, "Setup Data", "RepairEngine", setupData.RepairEngine)
+
+			setMultiMapValue(data, "Setup Data", "Driver", setupData.Driver)
+
+			fuelRatio := setupData.FuelRatio
+
+			if (fuelRatio && isNumber(fuelRatio))
+				this.iFuelRatio := fuelRatio
+
+			setMultiMapValue(data, "Setup Data", "ServiceTime", LMURESTProvider.ServiceData().ServiceTime)
+
+			if logRequests {
+				logMessage(kLogInfo, "Read LMU session data (Setup=true->Tyres):" . (A_TickCount - splitTime) . " ms...")
+
+				splitTime := A_TickCount
+			}
+		}
+		else {
+			data := super.readSessionData(options, protocol?)
+
+			if logRequests {
+				logMessage(kLogInfo, "Read LMU session data (" . options . "->SHM):" . (A_TickCount - splitTime) . " ms...")
+
+				splitTime := A_TickCount
+			}
+
+			if (!standings && (getMultiMapValues(data, "Car Data").Count = 0)
+						   && (getMultiMapValue(data, "Stint Data", "Laps", 0) = 0)) {
+				if logRequests {
+					logMessage(kLogWarn, "SHM LMU Session State: Waiting...")
+					logMessage(kLogInfo, "Read LMU session data (Overall):" . (A_TickCount - startTime) . " ms...")
+				}
+
+				return data
+			}
+
+			sessionData := LMURESTProvider.SessionData()
+
+			if logRequests {
+				logMessage(kLogInfo, "Read LMU session data (" . options . "->Session):" . (A_TickCount - splitTime) . " ms...")
+
+				splitTime := A_TickCount
+			}
+
+			if lmuAPIType {
+				car := getMultiMapValue(data, "Session Data", "Car")
+				track := getMultiMapValue(data, "Session Data", "Track")
+			}
+			else {
+				car := (this.Car || this.TeamData.Car)
+				track := (this.Track || this.TrackData.Track)
+			}
+
+			if (InStr(car, "Chevrolet Corvette Z06") == 1)
+				car := "Chevrolet Corvette Z06 LMGT3.R"
+			else if (InStr(car, "Aston Martin Vantage AMR LMGT") == 1)
+				car := "Aston Martin Vantage AMR LMGT3"
+			else if (InStr(car, "Lamborghini Huracan LMGT3") == 1)
+				car := "Lamborghini Huracan LMGT3 Evo2"
+
+			if logRequests {
+				logMessage(kLogInfo, "Read LMU session data (" . options . "->Car, Track):" . (A_TickCount - splitTime) . " ms...")
+
+				splitTime := A_TickCount
+			}
+
+			if data.Has("Weather Data") {
+				lap := getMultiMapValue(data, "Stint Data", "Laps", 0)
+
+				if ((lap < lastLap) || (lap = 0) || (lap > (lastLap + 1)) || (duration = 0)) {
+					lastLap := -1
+
+					lastWeather := getMultiMapValue(data, "Weather Data", "Weather", "Dry")
+					lastWeather10Min := getMultiMapValue(data, "Weather Data", "Weather10Min", "Dry")
+					lastWeather30Min := getMultiMapValue(data, "Weather Data", "Weather30Min", "Dry")
+
+					duration := (sessionData.Duration[getMultiMapValue(data, "Session Data"
+																		   , "Session", "Race")] * 1000)
+				}
+
+				if (lap != lastLap) {
+					lastLap := lap
+
+					nextUpdate := (A_TickCount - 1)
+
+					if lmuRESTAPI {
+						session := getMultiMapValue(data, "Session Data", "Session", "Race")
+						remainingTime := getMultiMapValue(data, "Session Data", "SessionTimeRemaining", 0)
+
+						if ((remainingTime = 0) && (lap < 3))
+							remainingTime := duration
+
+						weatherData := LMURestProvider.WeatherData()
+
+						if false
+							weather := weatherData.Weather["Now"]
+						else {
+							time := ((duration > 0) ? Round(100 - (Max(0, remainingTime) / duration * 100)) : 0)
+							weather := weatherData.Weather[session, time]
+						}
+
+						if weather
+							lastWeather := weather
+
+						time := ((duration > 0) ? Round(100 - (Max(0, remainingTime - 600000) / duration * 100)) : 0)
+						weather := weatherData.Weather[session, time]
+
+						if weather
+							lastWeather10Min := weather
+
+						time := ((duration > 0) ? Round(100 - (Max(0, remainingTime - 1800000) / duration * 100)) : 0)
+						weather := weatherData.Weather[session, time]
+
+						if weather
+							lastWeather30Min := weather
+
+						if logRequests {
+							logMessage(kLogInfo, "Read LMU session data (" . options . "->Weather):" . (A_TickCount - splitTime) . " ms...")
+
+							splitTime := A_TickCount
+						}
+					}
+				}
+			}
+
+			if !standings {
+				sessionState := sessionData.State
+
+				if logRequests
+					if !getMultiMapValue(data, "Session Data", "Active", false)
+						logMessage(kLogWarn, "SHM LMU Session State: Shutdown [" . sessionState . "](" . sessionData.State[true] . ")...")
+					else if getMultiMapValue(data, "Session Data", "Paused", false)
+						logMessage(kLogInfo, "SHM LMU Session State: Paused [" . sessionState . "](" . sessionData.State[true] . ")...")
+					else
+						logMessage(kLogInfo, "SHM LMU Session State: Running [" . sessionState . "](" . sessionData.State[true] . ")...")
+
+				switch sessionState, false {
+					case "Driving", "Disabled":
+						setMultiMapValue(data, "Session Data", "Active", true)
+						setMultiMapValue(data, "Session Data", "Paused", false)
+					case "Not Driving", "Paused":
+						setMultiMapValue(data, "Session Data", "Active", true)
+						setMultiMapValue(data, "Session Data", "Paused", true)
+
+						if (sessionState = "Not Driving") {
+							setMultiMapValue(data, "Stint Data", "Driving", false)
+							setMultiMapValue(data, "Stint Data", "DriverForname", "-")
+							setMultiMapValue(data, "Stint Data", "DriverSurname", "-")
+							setMultiMapValue(data, "Stint Data", "DriverNickname", "-")
+						}
+					case "Inactive":
+						setMultiMapValue(data, "Session Data", "Active", false)
+					case "No Data":
+						if lmuApplication.isRunning() {
+							setMultiMapValue(data, "Session Data", "Active", true)
+							setMultiMapValue(data, "Session Data", "Paused", true)
+						}
+						else
+							setMultiMapValue(data, "Session Data", "Active", false)
+					default:
+						throw "Unknown session state detected in LMUProvider.readSessionData..."
+				}
+
+				active := getMultiMapValue(data, "Session Data", "Active", false)
+
+				if !active {
+					if wasActive
+						waitForFinish := 5
+
+					if (waitForFinish-- > 0) {
+						if logRequests
+							logMessage(kLogWarn, "Deferred LMU Session State: Waiting for Shutdown...")
+
+						setMultiMapValue(data, "Session Data", "Paused", true)
+						setMultiMapValue(data, "Session Data", "Active", true)
+					}
+					else {
+						waitForFinish := false
+
+						if (logRequests && !active)
+							logMessage(kLogWarn, "Deferred LMU Session State: Shutdown [" . sessionState . "](" . sessionData.State[true] . ")...")
+					}
+				}
+				else if (logRequests && !wasActive && waitForFinish)
+					logMessage(kLogWarn, "Deferred LMU Session State: Continue [" . sessionState . "](" . sessionData.State[true] . ")...")
+
+				wasActive := active
+
+				/*
+				if (false && getMultiMapValue(data, "Stint Data", "InPit", false)) {
+					setMultiMapValue(data, "Session Data", "Active", true)
+					setMultiMapValue(data, "Session Data", "Paused", true)
+
+					setMultiMapValue(data, "Stint Data", "Driving", false)
+					setMultiMapValue(data, "Stint Data", "DriverForname", "-")
+					setMultiMapValue(data, "Stint Data", "DriverSurname", "-")
+					setMultiMapValue(data, "Stint Data", "DriverNickname", "-")
+				}
+				else if (!waitForDriverSwap && getMultiMapValue(data, "Stint Data", "InPit", false))
+					waitForDriverSwap := true
+				else if waitForDriverSwap {
+					waitForDriverSwap := false
+
+					setMultiMapValue(data, "Session Data", "Active", true)
+					setMultiMapValue(data, "Session Data", "Paused", true)
+
+					setMultiMapValue(data, "Stint Data", "Driving", false)
+					setMultiMapValue(data, "Stint Data", "DriverForname", "-")
+					setMultiMapValue(data, "Stint Data", "DriverSurname", "-")
+					setMultiMapValue(data, "Stint Data", "DriverNickname", "-")
+				}
+				*/
+
+				if car
+					setMultiMapValue(data, "Session Data", "Car", car)
+				else
+					car := this.Car
+
+				if track
+					setMultiMapValue(data, "Session Data", "Track", track)
+				else
+					track := this.Track
+
+				if !getMultiMapValue(data, "Car Data", "TC", false)
+					setMultiMapValue(data, "Car Data", "TC", "n/a")
+
+				if !getMultiMapValue(data, "Car Data", "ABS", false)
+					setMultiMapValue(data, "Car Data", "ABS", "n/a")
+
+				setMultiMapValue(data, "Weather Data", "Weather", lastWeather)
+				setMultiMapValue(data, "Weather Data", "Weather10Min", lastWeather10Min)
+				setMultiMapValue(data, "Weather Data", "Weather30Min", lastWeather30Min)
+
+				if (getMultiMapValue(data, "Session Data", "Active", false) && !getMultiMapValue(data, "Session Data", "Paused", false)) {
+					if data.Has("Car Data") {
+						if logRequests {
+							logMessage(kLogInfo, "Read LMU session data (" . options . "->Energy):" . (A_TickCount - splitTime) . " ms...")
+
+							splitTime := A_TickCount
+						}
+
+						if lmuRESTAPI {
+							if !energyData
+								energyData := LMURESTProvider.EnergyData(simulator, car, track)
+
+							fuelAmount := (energyData.hasVirtualEnergy() ? energyData.MaxFuelAmount : false)
+
+							if !fuelAmount {
+								if (getMultiMapValue(data, "Session Data", "CarClass", "Unknown") = "GTE")
+									fuelAmount := LMURestProvider.SetupData().FuelAmount
+
+								if !fuelAmount {
+									if !carData
+										carData := LMURestProvider.CarData()
+
+									fuelAmount := carData.FuelAmount
+								}
+
+								if isNumber(fuelAmount)
+									setMultiMapValue(data, "Session Data", "FuelAmount", fuelAmount)
+							}
+						}
+						else
+							fuelAmount := getMultiMapValue(data, "Session Data", "FuelAmount", false)
+
+						if !isNumber(fuelAmount) {
+							fuelAmount := 0
+
+							setMultiMapValue(data, "Session Data", "FuelAmount", 0)
+						}
+
+						if (fuelAmount && this.iFuelRatio)
+							setMultiMapValue(data, "Session Data", "FuelAmount", Round(this.iFuelRatio * 100, 1))
+
+						virtualEnergy := getMultiMapValue(data, "Car Data", "EnergyRemaining", kUndefined)
+
+						if ((virtualEnergy == kUndefined) && lmuRESTAPI) {
+							if !energyData
+								energyData := LMURESTProvider.EnergyData(simulator, car, track)
+
+							virtualEnergy := (energyData.hasVirtualEnergy() ? energyData.RemainingVirtualEnergy : false)
+
+							if virtualEnergy
+								setMultiMapValue(data, "Car Data", "EnergyRemaining", virtualEnergy)
+						}
+
+						if (logRequests && energyData) {
+							logMessage(kLogInfo, "Read LMU session data (" . options . "->Fuel):" . (A_TickCount - splitTime) . " ms...")
+
+							splitTime := A_TickCount
+						}
+					}
+
+					if (A_TickCount > nextUpdate) {
+						nextUpdate := (A_TickCount + 60000)
+
+						tyreWear := getMultiMapValue(data, "Car Data", "TyreWear", kUndefined)
+						brakeWear := false ; getMultiMapValue(data, "Car Data", "BrakeWear", kUndefined)
+
+						if (((tyreWear == kUndefined) || (brakeWear == kUndefined)) && lmuRESTAPI) {
+							if !carData
+								carData := LMURestProvider.CarData()
+
+							if !lmuAPIType
+								lastWheelData := LMURestProvider.WheelData()
+
+							if (tyreWear == kUndefined)
+								lastTyreWear := carData.TyreWear["All"]
+
+							if (brakeWear == kUndefined)
+								lastBrakeWear := carData.BrakePadWear["All"]
+						}
+					}
+
+					if logRequests {
+						logMessage(kLogInfo, "Read LMU session data (" . options . "->Wheels):" . (A_TickCount - splitTime) . " ms...")
+
+						splitTime := A_TickCount
+					}
+
+					if lmuAPIType {
+						tyreCompound := tyreTypes[getMultiMapValue(data, "Car Data", "TyreCompoundRaw", 1) + 1]
+
+						tyreCompound := SessionDatabase.getTyreCompoundName(simulator, car, track, tyreCompound, false)
+
+						if tyreCompound {
+							splitCompound(tyreCompound, &tyreCompound, &tyreCompoundColor)
+
+							setMultiMapValue(data, "Car Data", "TyreCompound", tyreCompound)
+							setMultiMapValue(data, "Car Data", "TyreCompoundColor", tyreCompoundColor)
+						}
+					}
+
+					for key, postFix in wheels {
+						if lmuAPIType
+							tyreCompound := tyreTypes[getMultiMapValue(data, "Car Data", "TyreCompoundRaw" . postFix, 1) + 1]
+						else
+							tyreCompound := lastWheelData.TyreCompound[key]
+
+						tyreCompound := SessionDatabase.getTyreCompoundName(simulator, car, track, tyreCompound, false)
+
+						if tyreCompound {
+							splitCompound(tyreCompound, &tyreCompound, &tyreCompoundColor)
+
+							setMultiMapValue(data, "Car Data", "TyreCompound" . postFix, tyreCompound)
+							setMultiMapValue(data, "Car Data", "TyreCompoundColor" . postFix, tyreCompoundColor)
+						}
+					}
+
+					if (isObject(lastTyreWear) && exist(lastTyreWear, (w) => (w != false)))
+						setMultiMapValue(data, "Car Data", "TyreWear", values2String(",", lastTyreWear*))
+
+					if (isObject(lastBrakeWear) && exist(lastBrakeWear, (w) => (w != false)))
+						setMultiMapValue(data, "Car Data", "BrakeWear", values2String(",", lastBrakeWear*))
+
+					if ((getMultiMapValue(data, "Car Data", "SuspensionDamage", kUndefined) == kUndefined) && lmuRESTAPI) {
+						if !carData
+							carData := LMURestProvider.CarData()
+
+						suspensionDamage := carData.SuspensionDamage["All"]
+
+						if (isObject(suspensionDamage) && exist(suspensionDamage, (d) => (d != false)))
+							setMultiMapValue(data, "Car Data", "SuspensionDamage", values2String(",", suspensionDamage*))
+
+						if logRequests {
+							logMessage(kLogInfo, "Read LMU session data (" . options . "->Damage):" . (A_TickCount - splitTime) . " ms...")
+
+							splitTime := A_TickCount
+						}
+					}
+				}
+			}
+		}
+
+		if logRequests
+			logMessage(kLogInfo, "Read LMU session data (Overall):" . (A_TickCount - startTime) . " ms...")
+
+		return data
+	}
+}

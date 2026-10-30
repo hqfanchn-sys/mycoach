@@ -1,0 +1,1797 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Voice Chat Manager              ;;;
+;;;                                         Client for Voice Server         ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Global Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Framework.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Extensions\Task.ahk"
+#Include "..\..\Framework\Extensions\Messages.ahk"
+#Include "..\..\Framework\Extensions\Hotkeys.ahk"
+#Include "..\..\Framework\Extensions\SpeechSynthesizer.ahk"
+#Include "..\..\Framework\Extensions\SpeechRecognizer.ahk"
+#Include "..\..\Framework\Extensions\Translator.ahk"
+#Include "..\..\Framework\Extensions\LLMBooster.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Public Constant Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kDebugOff := 0
+global kDebugGrammars := 1
+global kDebugPhrases := 2
+global kDebugRecognitions := 4
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class VoiceManager extends ConfigurationItem {
+	static sInterruptable := getMultiMapValue(readMultiMap(getFileName("Core Settings.ini", kUserConfigDirectory, kConfigDirectory))
+											, "Voice", "Interruptable", false)
+
+	iDebug := kDebugOff
+
+	iOriginalLanguage := "en"
+	iTranslatedLanguage := "en"
+	iTranslator := false
+	iSpeakerTranslator := false
+	iListenerTranslator := false
+
+	iName := false
+
+	iSynthesizer := "dotNET"
+	iSpeaker := false
+	iSpeakerVolume := 100
+	iSpeakerPitch := 0
+	iSpeakerSpeed := 0
+	iSpeakerBooster := false
+
+	iMuted := false
+
+	iRecognizer := "Desktop"
+	iListener := false
+	iListenerBooster := false
+
+	iListenerActive := true
+
+	iBooster := false
+
+	iRecognizerMode := "Grammar"
+
+	iVoiceServer := false
+	iGrammars := CaseInsenseMap()
+
+	iPushToTalk := false
+	iPushToTalkMode := "Hold"
+
+	iSpeechSynthesizer := false
+	iSpeechRecognizer := false
+	iUseTalking := true
+	iIsSpeaking := false
+	iIsListening := false
+
+	iActiveContinuation := false
+
+	class RemoteSpeaker {
+		iVoiceManager := false
+		iFragments := CaseInsenseWeakMap()
+		iPhrases := CaseInsenseMap()
+
+		iSpeaker := false
+
+		iOriginalLanguage := false
+		iTranslatedLanguage := false
+
+		iIsTalking := false
+		iText := ""
+		iFocus := false
+		iOptions := CaseInsenseMap()
+
+		VoiceManager {
+			Get {
+				return this.iVoiceManager
+			}
+		}
+
+		Speaking {
+			Get {
+				return this.VoiceManager.Speaking
+			}
+
+			Set {
+				return (this.VoiceManager.Speaking := value)
+			}
+		}
+
+		UseTalking {
+			Get {
+				return this.VoiceManager.UseTalking
+			}
+		}
+
+		Talking {
+			Get {
+				return this.iIsTalking
+			}
+		}
+
+		Phrases[key?] {
+			Get {
+				return (isSet(key) ? this.iPhrases[key] : this.iPhrases)
+			}
+		}
+
+		Fragments[key?] {
+			Get {
+				return (isSet(key) ? this.iFragments[key] : this.iFragments)
+			}
+		}
+
+		__New(voiceManager, synthesizer, speaker, originalLanguage, translatedLanguage, fragments, phrases) {
+			this.iVoiceManager := voiceManager
+			this.iFragments := toMap(fragments, CaseInsenseWeakMap)
+			this.iFragments.Default := ""
+			this.iPhrases := phrases
+
+			this.iSpeaker := speaker
+			this.iOriginalLanguage := originalLanguage
+			this.iTranslatedLanguage := translatedLanguage
+		}
+
+		beginTalk(force := false) {
+			this.iIsTalking := true
+		}
+
+		endTalk(options := false) {
+			local text, focus
+
+			if this.Talking {
+				text := this.iText
+				focus := this.iFocus
+
+				options := (options ? combine(this.iOptions, options) : this.iOptions)
+
+				if focus
+					options.Important := true
+
+				this.iText := ""
+				this.iFocus := false
+				this.iIsTalking := false
+				this.iOptions := CaseInsenseMap()
+
+				if (StrLen(Trim(text)) > 0)
+					this.speak(text, focus, false, (options.Count > 0) ? options : false)
+			}
+		}
+
+		speak(text, focus := false, cache := false, options := false) {
+			text := StrReplace(text, ";", ",")
+
+			if this.Talking {
+				this.iText .= (A_Space . text)
+				this.iFocus := (this.iFocus || focus)
+
+				if options
+					this.iOptions := combine(this.iOptions, options)
+			}
+			else {
+				if options
+					options.UseTalking := this.UseTalking
+				else
+					options := {UseTalking: this.UseTalking}
+
+				if focus
+					options.Important := true
+
+				messageSend(kFileMessage, "Voice", "speak:" . values2String(";", this.VoiceManager.Name, text, focus, options ? map2String("|", "->", toMap(options)) : false)
+										, this.VoiceManager.VoiceServer)
+			}
+		}
+
+		getAllPhrases(phrase) {
+			local phrases := this.Phrases
+
+			return (phrases.Has(phrase) ? phrases[phrase] : [])
+		}
+
+		getPhrase(phrase, variables := false, &cache := false, &index?) {
+			local phrases := this.Phrases
+
+			if phrases.Has(phrase) {
+				phrases := phrases[phrase]
+
+				index := Round(Random(0.55, phrases.Length + 0.45))
+
+				if cache
+					cache .= ("." . index)
+
+				phrase := substituteVariables(phrases[index], this.VoiceManager.getPhraseVariables(variables))
+			}
+
+			return phrase
+		}
+
+		speakPhrase(phrase, variables := false, focus := false, cache := false, options := false) {
+			phrase := this.getPhrase(phrase, variables, &cache)
+
+			if phrase
+				this.speak(phrase, focus, cache, options)
+		}
+
+		number2Speech(number, precision := kUndefined) {
+			static divider := false
+
+			if (precision != kUndefined)
+				if (precision = 0)
+					return Round(number)
+				else
+					number := Round(number, precision)
+
+			if !divider
+				divider := (A_Space . this.Fragments[(getFormat("Float") = "#.##") ? "Point" : "Comma"] . A_Space)
+
+			return StrReplace(number, ".", divider)
+		}
+	}
+
+	class LocalSpeaker extends SpeechSynthesizer {
+		iVoiceManager := false
+		iFragments := CaseInsenseWeakMap()
+		iPhrases := CaseInsenseMap()
+
+		iBooster := false
+
+		iIsTalking := false
+		iText := ""
+		iFocus := false
+		iOptions := CaseInsenseMap()
+
+		Routing {
+			Get {
+				return this.VoiceManager.Routing
+			}
+		}
+
+		VoiceManager {
+			Get {
+				return this.iVoiceManager
+			}
+		}
+
+		Booster {
+			Get {
+				return this.iBooster
+			}
+		}
+
+		Speaking {
+			Get {
+				return (this.VoiceManager.Speaking || super.Speaking)
+			}
+
+			Set {
+				return (this.VoiceManager.Speaking := value)
+			}
+		}
+
+		UseTalking {
+			Get {
+				return this.VoiceManager.UseTalking
+			}
+		}
+
+		Talking {
+			Get {
+				return this.iIsTalking
+			}
+		}
+
+		Phrases[key?] {
+			Get {
+				return (isSet(key) ? this.iPhrases[key] : this.iPhrases)
+			}
+		}
+
+		Fragments[key?] {
+			Get {
+				return (isSet(key) ? this.iFragments[key] : this.iFragments)
+			}
+		}
+
+		__New(voiceManager, synthesizer, speaker, sourceLanguage, targetLanguage, fragments, phrases) {
+			local booster
+
+			this.iVoiceManager := voiceManager
+			this.iFragments := fragments
+			this.iPhrases := phrases
+
+			if voiceManager.SpeakerBooster {
+				booster := SpeechBooster(voiceManager.SpeakerBooster, voiceManager.Configuration, sourceLanguage)
+
+				if (booster.Model && booster.Active)
+					this.iBooster := booster
+			}
+
+			super.__New(synthesizer, speaker, targetLanguage)
+
+			this.setTranslator(voiceManager.SpeakerTranslator)
+		}
+
+		beginTalk(options := false) {
+			this.iIsTalking := true
+		}
+
+		endTalk(options := false) {
+			local text, focus
+
+			if this.Talking {
+				text := this.iText
+				focus := this.iFocus
+
+				if focus
+					this.iOptions["Important"] := true
+
+				options := (options ? combine(this.iOptions, options) : this.iOptions)
+
+				this.iText := ""
+				this.iFocus := false
+				this.iIsTalking := false
+				this.iOptions := CaseInsenseMap()
+
+				if (StrLen(Trim(text)) > 0)
+					return this.speak(text, focus, false, (options.Count > 0) ? options : false)
+			}
+		}
+
+		speak(text, focus := false, cache := false, options := false) {
+			local booster, stopped, ignore, part
+
+			if this.Talking {
+				this.iText .= (A_Space . text)
+				this.iFocus := (this.iFocus || focus)
+
+				if options
+					this.iOptions := combine(this.iOptions, options)
+			}
+			else {
+				if focus
+					if options
+						options.Important := true
+					else
+						options := {Important: true}
+
+				stopped := this.VoiceManager.stopListening()
+
+				try {
+					booster := this.Booster
+
+					if booster {
+						if options {
+							options := toMap(options)
+
+							text := booster.speak(text, Map("Rephrase", (!options.Has("Rephrase") || options["Rephrase"])
+														  , "Translate", (options.Has("Translate") && options["Tranlate"])
+														  , "Variables", {assistant: this.VoiceManager.Routing}))
+						}
+						else
+							text := booster.speak(text, Map("Variables", {assistant: this.VoiceManager.Routing}))
+					}
+
+					this.Speaking := true
+
+					try {
+						if this.UseTalking
+							return super.speak(text, !this.Awaitable, cache, options)
+						else if InStr(text, "。") {
+							for ignore, part in string2Values("。", text)
+								if (Trim(part) != "")
+									super.speak(part . "。", !this.Awaitable, cache, options)
+						}
+						else if InStr(text, translate(". ")) {
+							for ignore, part in string2Values(translate(". "), text)
+								if (Trim(part) != "")
+									super.speak(part . translate("."), !this.Awaitable, cache, options)
+						}
+						else
+							return super.speak(text, !this.Awaitable, cache, options)
+					}
+					finally {
+						this.Speaking := false
+					}
+				}
+				finally {
+					if (stopped && !this.VoiceManager.PushToTalk)
+						this.VoiceManager.startListening()
+				}
+			}
+
+			return false
+		}
+
+		getAllPhrases(phrase) {
+			local phrases := this.Phrases
+
+			return (phrases.Has(phrase) ? phrases[phrase] : [])
+		}
+
+		getPhrase(phrase, variables := false, &cache := false, &index?) {
+			local phrases := this.Phrases
+
+			if phrases.Has(phrase) {
+				phrases := phrases[phrase]
+
+				index := Round(Random(0.55, phrases.Length + 0.45))
+
+				if (cache == true)
+					cache := phrase
+
+				if cache
+					cache .= ("." . index)
+
+				phrase := substituteVariables(phrases[index], this.VoiceManager.getPhraseVariables(variables))
+			}
+			else
+				index := false
+
+			return phrase
+		}
+
+		speakPhrase(phrase, variables := false, focus := false, cache := false, options := false) {
+			phrase := this.getPhrase(phrase, variables, &cache)
+
+			if phrase
+				return this.speak(phrase, focus, cache, options)
+		}
+
+		number2Speech(number, precision := kUndefined) {
+			static divider := false
+
+			if (precision != kUndefined)
+				if (precision = 0)
+					return Round(number)
+				else
+					number := Round(number, precision)
+
+			if !divider
+				divider := (A_Space . this.Fragments[(getFormat("Float") = "#.##") ? "Point" : "Comma"] . A_Space)
+
+			return StrReplace(number, ".", divider)
+		}
+	}
+
+	class LocalRecognizer extends SpeechRecognizer {
+		iVoiceManager := false
+
+		iBooster := false
+
+		Routing {
+			Get {
+				return this.VoiceManager.Routing
+			}
+		}
+
+		VoiceManager {
+			Get {
+				return this.iVoiceManager
+			}
+		}
+
+		Booster {
+			Get {
+				return this.iBooster
+			}
+		}
+
+		__New(voiceManager, arguments*) {
+			local booster
+
+			this.iVoiceManager := voiceManager
+
+			if voiceManager.ListenerBooster {
+				booster := RecognitionBooster(voiceManager.ListenerBooster, voiceManager.Configuration, voiceManager.Language["Original"])
+
+				if (booster.Model && booster.Active)
+					this.iBooster := booster
+			}
+
+			super.__New(arguments*)
+
+			this.setTranslator(voiceManager.ListenerTranslator)
+		}
+
+		textRecognized(text) {
+			this.VoiceManager.raiseTextRecognized("Text", text)
+		}
+
+		parseText(&text, recognize := false) {
+			local booster := this.Booster
+			local alternateText
+
+			if (booster && recognize && (booster.Mode = "Always")) {
+				alternateText := booster.recognize(text)
+
+				if (alternateText && (alternateText != ""))
+					text := alternateText
+			}
+
+			return super.parseText(&text)
+		}
+
+		unknownRecognized(&text, recognize := false) {
+			local booster := this.Booster
+			local alternateText
+
+			if (booster && recognize && (booster.Mode = "Unknown")) {
+				alternateText := booster.recognize(text)
+
+				if (alternateText && (alternateText != "") && (alternateText != text)) {
+					text := alternateText
+
+					return true
+				}
+			}
+
+			if this.Grammars.Has("?") {
+				this.VoiceManager.unknownRecognized(text)
+
+				return false
+			}
+			else
+				return super.unknownRecognized(&text)
+		}
+	}
+
+	class Continuation {
+		iManager := false
+		iContinuation := false
+
+		Manager {
+			Get {
+				return this.iManager
+			}
+		}
+
+		Continuation {
+			Get {
+				return this.iContinuation
+			}
+		}
+
+		__New(manager, continuation := false) {
+			this.iManager := manager
+			this.iContinuation := continuation
+		}
+
+		continue() {
+			local continuation := this.Continuation
+
+			if isInstance(continuation, VoiceManager.Continuation)
+				continuation.continue()
+			else if isInstance(continuation, Func)
+				continuation()
+		}
+	}
+
+	class QuestionContinuation extends VoiceManager.Continuation {
+		iRejectContinuation := false
+
+		iAcceptPhrase := false
+		iRejectPhrase := false
+
+		AcceptContinuation {
+			Get {
+				return this.Continuation
+			}
+		}
+
+		RejectContinuation {
+			Get {
+				return this.iRejectContinuation
+			}
+		}
+
+		AcceptPhrase {
+			Get {
+				return this.iAcceptPhrase
+			}
+		}
+
+		RejectPhrase {
+			Get {
+				return this.iRejectPhrase
+			}
+		}
+
+		__New(manager, acceptContinuation := false, rejectContinuation := false
+					 , acceptPhrase := "Confirm", rejectPhrase := "Okay") {
+			this.iRejectContinuation := rejectContinuation
+			this.iAcceptPhrase := acceptPhrase
+			this.iRejectPhrase := rejectPhrase
+
+			super.__New(manager, acceptContinuation)
+		}
+
+		continue() {
+			if (this.Manager.Speaker && this.AcceptPhrase)
+				this.Manager.getSpeaker().speakPhrase(this.AcceptPhrase)
+
+			super.continue()
+		}
+
+		accept() {
+			this.continue()
+		}
+
+		abort() {
+			local continuation := this.RejectContinuation
+
+			if (this.Manager.Speaker && this.RejectPhrase)
+				this.Manager.getSpeaker().speakPhrase(this.RejectPhrase)
+
+			if isInstance(continuation, VoiceManager.QuestionContinuation)
+				continuation.reject()
+			else if isInstance(continuation, Func)
+				continuation()
+		}
+
+		reject() {
+			this.abort()
+		}
+	}
+
+	Debug[option] {
+		Get {
+			return (this.iDebug & option)
+		}
+	}
+
+	VoiceServer {
+		Get {
+			return this.iVoiceServer
+		}
+	}
+
+	Language[mode := "Original"] {
+		Get {
+			return ((mode = "Original") ? this.iOriginalLanguage : this.iTranslatedLanguage)
+		}
+	}
+
+	Translator {
+		Get {
+			return this.iTranslator
+		}
+	}
+
+	SpeakerTranslator {
+		Get {
+			local arguments
+
+			if (!this.iSpeakerTranslator && this.Translator) {
+				arguments := string2Values("|", this.Translator)
+
+				this.iSpeakerTranslator := Translator(arguments[1], arguments[2], arguments[3]
+													, arguments[4], string2Values(",", arguments[5])*)
+			}
+
+			return this.iSpeakerTranslator
+		}
+	}
+
+	ListenerTranslator {
+		Get {
+			local arguments
+
+			if (!this.iListenerTranslator && this.Translator) {
+				arguments := string2Values("|", this.Translator)
+
+				this.iListenerTranslator := Translator(arguments[1], arguments[3], arguments[2]
+													 , arguments[4], string2Values(",", arguments[5])*)
+			}
+
+			return this.iListenerTranslator
+		}
+	}
+
+	Name {
+		Get {
+			return this.iName
+		}
+	}
+
+	Routing {
+		Get {
+			throw "Virtual property VoiceManager.Routing must be implemented in a subclass..."
+		}
+	}
+
+	Synthesizer {
+		Get {
+			return this.iSynthesizer
+		}
+	}
+
+	Muted {
+		Get {
+			return this.iMuted
+		}
+
+		Set {
+			return (this.iMuted := value)
+		}
+	}
+
+	Speaker[force := true] {
+		Get {
+			return (force || !this.Muted) ? this.iSpeaker : false
+		}
+	}
+
+	UseTalking {
+		Get {
+			return this.iUseTalking
+		}
+
+		Set {
+			return (this.iUseTalking := value)
+		}
+	}
+
+	static Interruptable {
+		Get {
+			return VoiceManager.sInterruptable
+		}
+	}
+
+	Interruptable {
+		Get {
+			return VoiceManager.Interruptable
+		}
+	}
+
+	Speaking[any := false] {
+		Get {
+			return (this.iIsSpeaking || (any && FileExist(kTempDirectory . "Speaking.status")))
+		}
+
+		Set {
+			return (this.iIsSpeaking := value)
+		}
+	}
+
+	Recognizer {
+		Get {
+			return this.iRecognizer
+		}
+	}
+
+	Listener {
+		Get {
+			return this.iListener
+		}
+	}
+
+	ListenerActive {
+		Get {
+			return this.iListenerActive
+		}
+	}
+
+	ListenerBooster {
+		Get {
+			return this.iListenerBooster
+		}
+	}
+
+	Booster {
+		Get {
+			local booster
+
+			if (this.ListenerBooster && !this.iBooster) {
+				booster := RecognitionBooster(this.ListenerBooster, this.Configuration, this.Language["Original"])
+
+				if (booster.Model && booster.Active)
+					this.iBooster := booster
+			}
+
+			return this.iBooster
+		}
+	}
+
+	Listening {
+		Get {
+			return this.iIsListening
+		}
+	}
+
+	SpeakerVolume {
+		Get {
+			return this.iSpeakerVolume
+		}
+	}
+
+	SpeakerPitch {
+		Get {
+			return this.iSpeakerPitch
+		}
+	}
+
+	SpeakerSpeed {
+		Get {
+			return this.iSpeakerSpeed
+		}
+	}
+
+	SpeakerBooster {
+		Get {
+			return this.iSpeakerBooster
+		}
+	}
+
+	Grammars[key?] {
+		Get {
+			return (isSet(key) ? this.iGrammars[key] : this.iGrammars)
+		}
+
+		Set {
+			return (isSet(key) ? (this.iGrammars[key] := value) : (this.iGrammars := value))
+		}
+	}
+
+	PushToTalk {
+		Get {
+			return this.iPushToTalk
+		}
+	}
+
+	PushToTalkMode {
+		Get {
+			return this.iPushToTalkMode
+		}
+	}
+
+	User {
+		Get {
+			throw "Virtual property VoiceManager.User must be implemented in a subclass..."
+		}
+	}
+
+	ActiveContinuation {
+		Get {
+			return this.iActiveContinuation
+		}
+	}
+
+	__New(name, configuration, options) {
+		this.iName := name
+
+		super.__New(configuration)
+
+		deleteFile(kTempDirectory . "Voice.cmd")
+		deleteFile(kTempDirectory . "Speaking.status")
+
+		this.initialize(options)
+
+		if !this.Speaker
+			this.iListener := false
+
+		registerMessageHandler("Voice", methodMessageHandler, this)
+
+		if (!this.VoiceServer && this.PushToTalk) {
+			this.initializePushToTalk()
+
+			if getMultiMapValue(readMultiMap(getFileName("Core Settings.ini", kUserConfigDirectory, kConfigDirectory))
+							  , "Voice", "Keyboard Hook", false)
+				installKeyboardHook(true, true)
+		}
+
+		if this.VoiceServer
+			OnExit(ObjBindMethod(this, "shutdownVoiceManager"))
+	}
+
+	shutdownVoiceManager(arguments*) {
+		if ((arguments.Length > 0) && inList(["Logoff", "Shutdown"], arguments[1]))
+			return false
+
+		if (this.VoiceServer && this.iSpeechSynthesizer) {
+			messageSend(kFileMessage, "Voice", "unregisterVoiceClient:" . values2String(";", this.Name, ProcessExist()), this.VoiceServer)
+
+			Sleep(2000)
+		}
+
+		return false
+	}
+
+	initialize(options) {
+		local vocalics
+
+		if options.Has("Vocalics") {
+			vocalics := options["Vocalics"]
+
+			if !options.Has("SpeakerVolume")
+				options["SpeakerVolume"] := vocalics[1]
+
+			if !options.Has("SpeakerPitch")
+				options["SpeakerPitch"] := vocalics[2]
+
+			if !options.Has("SpeakerSpeed")
+				options["SpeakerSpeed"] := vocalics[3]
+		}
+
+		if options.Has("Language")
+			this.iTranslatedLanguage := options["Language"]
+
+		if options.Has("Translator")
+			this.iTranslator := options["Translator"]
+
+		if this.Translator
+			this.iOriginalLanguage := "en"
+		else
+			this.iOriginalLanguage := this.iTranslatedLanguage
+
+		if options.Has("Synthesizer")
+			this.iSynthesizer := options["Synthesizer"]
+
+		if options.Has("UseTalking")
+			this.iUseTalking := options["UseTalking"]
+
+		if options.Has("Speaker")
+			this.iSpeaker := options["Speaker"]
+
+		if options.Has("SpeakerVolume")
+			this.iSpeakerVolume := options["SpeakerVolume"]
+
+		if options.Has("SpeakerPitch")
+			this.iSpeakerPitch := options["SpeakerPitch"]
+
+		if options.Has("SpeakerSpeed")
+			this.iSpeakerSpeed := options["SpeakerSpeed"]
+
+		if options.Has("SpeakerBooster")
+			this.iSpeakerBooster := options["SpeakerBooster"]
+
+		if options.Has("Recognizer")
+			this.iRecognizer := options["Recognizer"]
+
+		if options.Has("Listener")
+			this.iListener := options["Listener"]
+
+		if options.Has("ListenerBooster") {
+			this.iListenerBooster := options["ListenerBooster"]
+		}
+
+		if options.Has("PushToTalk")
+			this.iPushToTalk := options["PushToTalk"]
+
+		if options.Has("PushToTalkMode")
+			this.iPushToTalkMode := options["PushToTalkMode"]
+
+		if options.Has("VoiceServer")
+			this.iVoiceServer := options["VoiceServer"]
+
+		if this.PushToTalk
+			this.iPushToTalk := string2Values(InStr(this.PushToTalk, ";") ? ";" : "|", this.PushToTalk)
+	}
+
+	hasPushtoTalk() {
+		return ((this.PushToTalkMode = "Custom") || this.PushToTalk)
+	}
+
+	initializePushToTalk() {
+		local p2tHotkey := this.PushToTalk
+		local ignore, key
+
+		switch this.PushToTalkMode, false {
+			case "Press":
+				if p2tHotkey
+					for ignore, key in p2tHotkey
+						setHotkey(key, ObjBindMethod(this, "listen", true), "On")
+			case "Hold":
+				if p2THotkey
+					PeriodicTask(ObjBindMethod(this, "listen", false), 50, kInterruptPriority).start()
+			case "Custom":
+				PeriodicTask(ObjBindMethod(this, "processExternalCommand"), 50, kInterruptPriority).start()
+		}
+
+		if (this.PushToTalkMode != "Custom")
+			PeriodicTask(ObjBindMethod(this, "processExternalCommand"), 1000).start()
+	}
+
+	processExternalCommand() {
+		local fileName := (kTempDirectory . "Voice.cmd")
+		local file, command, descriptor
+
+		try {
+			file := FileOpen(fileName, "r-rwd")
+
+			if !file
+				return
+			else if (file.Length == 0) {
+				file.Close()
+
+				return
+			}
+			else {
+				file.Pos := 0
+
+				command := file.ReadLine()
+
+				file.Close()
+
+				if ((command != "Disable") && (command != "Enable")) {
+					deleteFile(fileName)
+
+					if !this.ListenerActive
+						return
+				}
+
+				if ((command = "Activation") || (command = "Listen"))
+					this.startListening(false)
+				else if (command = "Stop")
+					this.stopListening()
+				else if (command = "Disable")
+					this.disableListening()
+				else if (command = "Enable")
+					this.enableListening()
+			}
+		}
+		catch Any {
+		}
+	}
+
+	listen(toggle, down := true) {
+		local listen := false
+		local pressed := false
+		local clicked := false
+		local ignore, key
+
+		static isPressed := false
+		static lastDown := 0
+		static lastUp := 0
+		static clicks := 0
+		static activation := false
+		static listening := false
+
+		static listenTask := false
+
+		static speed := getMultiMapValue(readMultiMap(getFileName("Core Settings.ini", kUserConfigDirectory, kConfigDirectory))
+									   , "Voice", "Activation Speed", DllCall("GetDoubleClickTime"))
+
+		if !this.ListenerActive {
+			isPressed := false
+			lastDown := 0
+			lastUp := 0
+			clicks := 0
+			activation := false
+			listening := false
+
+			if listenTask {
+				listenTask.stop()
+
+				listenTask := false
+			}
+
+			this.stopListening()
+
+			return
+		}
+
+		try {
+			for ignore, key in this.PushToTalk
+				clicked := (clicked || keyPressed(key))
+
+			pressed := (toggle ? down : clicked)
+		}
+
+		if (pressed && !isPressed) {
+			lastDown := A_TickCount
+			isPressed := true
+
+			if !toggle
+				logMessage(kLogDebug, "Hold & Talk input detected as pressed.")
+
+			if (((lastDown - lastUp) < speed) && (clicks == 1))
+				activation := true
+			else {
+				clicks := 0
+
+				activation := false
+			}
+		}
+		else if (!pressed && isPressed) {
+			lastUp := A_TickCount
+			isPressed := false
+
+			if !toggle
+				logMessage(kLogDebug, "Hold & Talk input released after " . (lastUp - lastDown) . " ms.")
+
+			if ((lastUp - lastDown) < speed)
+				clicks += 1
+			else
+				clicks := 0
+		}
+
+		if toggle {
+			if pressed {
+				if listenTask {
+					listen := true
+
+					listenTask.stop()
+
+					listenTask := false
+				}
+
+				if listening {
+					this.stopListening()
+
+					if activation
+						this.startActivationListener()
+					else
+						listening := false
+				}
+				else if activation {
+					this.startActivationListener()
+
+					listening := true
+				}
+				else if listen {
+					this.startListening(false)
+
+					listening := true
+				}
+				else if !listenTask {
+					listenTask := Task(ObjBindMethod(this, "listen", true, true), speed, kInterruptPriority)
+
+					Task.startTask(listenTask)
+				}
+			}
+
+			if down
+				this.listen(true, false)
+		}
+		else {
+			if (((A_TickCount - lastDown) < (speed / 2)) && !activation)
+				pressed := false
+
+			if ((!this.Speaking || this.Interruptable) && pressed) {
+				if activation
+					this.startActivationListener()
+				else
+					this.startListening(false)
+
+				listening := true
+			}
+			else if !pressed {
+				this.stopActivationListener()
+				this.stopListening()
+
+				listening := false
+			}
+		}
+	}
+
+	setDebug(option, enabled, *) {
+		if enabled
+			this.iDebug := (this.iDebug | option)
+		else if (this.Debug[option] == option)
+			this.iDebug := (this.iDebug - option)
+	}
+
+	getPhraseVariables(variables := false) {
+		if variables {
+			variables := variables.Clone()
+
+			if isInstance(variables, Map) {
+				variables["Name"] := this.Name
+				variables["User"] := this.User
+			}
+			else {
+				variables.Name := this.Name
+				variables.User := this.User
+			}
+
+			return variables
+		}
+		else
+			return {Name: this.Name, User: this.User}
+	}
+
+	getSpeaker() {
+		if (this.Speaker && !this.iSpeechSynthesizer) {
+			this.iSpeechSynthesizer := (this.VoiceServer ? this.getRemoteSpeaker() : this.getLocalSpeaker())
+
+			this.startListener()
+		}
+
+		return this.iSpeechSynthesizer
+	}
+
+	getRemoteSpeaker() {
+		local grammars := this.getGrammars(this.Language["Original"])
+		local pid := ProcessExist()
+		local mode := getMultiMapValue(grammars, "Configuration", "Recognizer", "Grammar")
+		local activationCommand := substituteVariables(getMultiMapValue(grammars, "Listener Grammars", "Call", false)
+													 , {name: this.Name})
+
+		if (mode = "Mixed")
+			mode := "Text"
+
+		messageSend(kFileMessage, "Voice"
+								, "registerVoiceClient:" . values2String(";", this.Name, this.Routing, ProcessExist()
+																			, StrReplace(activationCommand, ";", ",")
+																			, "remoteActivationRecognized", "remoteDeactivationRecognized"
+																			, "remoteSpeakingStatusUpdate"
+																			, this.Language["Original"]
+																			, this.Language["Translated"]
+																			, this.Translator
+																			, this.Synthesizer, this.Speaker
+																			, this.Recognizer, this.Listener
+																			, this.SpeakerVolume, this.SpeakerPitch, this.SpeakerSpeed
+																			, this.SpeakerBooster, this.ListenerBooster
+																			, mode)
+								, this.VoiceServer)
+
+		return VoiceManager.RemoteSpeaker(this, this.Synthesizer, this.Speaker
+											  , this.Language["Original"], this.Language["Translated"]
+											  , this.buildFragments(this.Language["Original"])
+											  , this.buildPhrases(this.Language["Original"]))
+	}
+
+	getLocalSpeaker() {
+		local speaker
+
+		speaker := VoiceManager.LocalSpeaker(this, this.Synthesizer, this.Speaker
+												 , this.Language["Original"], this.Language["Translated"]
+												 , this.buildFragments(this.Language["Original"])
+												 , this.buildPhrases(this.Language["Original"]))
+
+		speaker.setVolume(this.SpeakerVolume)
+		speaker.setPitch(this.SpeakerPitch)
+		speaker.setRate(this.SpeakerSpeed)
+
+		return speaker
+	}
+
+	startListener() {
+		local recognizer, mode, translator
+
+		static initialized := false
+
+		if (!initialized && this.Listener && !this.iSpeechRecognizer) {
+			initialized := true
+
+			if this.VoiceServer
+				this.buildGrammars(false, this.Language["Original"])
+			else {
+				mode := getMultiMapValue(this.getGrammars(this.Language["Original"]), "Configuration", "Recognizer", "Grammar")
+
+				if (mode = "Mixed")
+					mode := "Text"
+
+				recognizer := VoiceManager.LocalRecognizer(this, this.Recognizer, this.Listener, this.Language["Translated"], false, mode)
+
+				this.buildGrammars(recognizer, this.Language["Original"])
+
+				if !this.PushToTalk
+					recognizer.startRecognizer()
+
+				this.iSpeechRecognizer := recognizer
+			}
+		}
+	}
+
+	startActivationListener(retry := true) {
+		this.startListening(retry)
+	}
+
+	enableListening() {
+		this.iListenerActive := true
+	}
+
+	disableListening() {
+		this.iListenerActive := false
+	}
+
+	startListening(retry := true) {
+		static talkSound := getFileName("Talk.wav", kUserHomeDirectory . "Sounds\", kResourcesDirectory . "Sounds\")
+		static startTalkSound := getFileName("Talk On.wav", kUserHomeDirectory . "Sounds\", kResourcesDirectory . "Sounds\")
+
+		if (this.iSpeechRecognizer && !this.Listening && this.ListenerActive) {
+			if !this.iSpeechRecognizer.startRecognizer() {
+				if retry
+					Task.startTask(ObjBindMethod(this, "startListening", true), 200)
+
+				return false
+			}
+			else {
+				if this.Interruptable
+					this.interrupt(true)
+
+				if this.hasPushToTalk()
+					playSound("VMSoundPlayer", (this.PushToTalkMode = "Hold") ? talkSound : startTalkSound
+												 , getAudioSettings("Activation"))
+
+				this.iIsListening := true
+
+				return true
+			}
+		}
+		else
+			return false
+	}
+
+	stopActivationListener(retry := false) {
+		return this.stopListening(retry)
+	}
+
+	stopListening(retry := false) {
+		static stopTalkSound := getFileName("Talk Off.wav", kUserHomeDirectory . "Sounds\", kResourcesDirectory . "Sounds\")
+
+		if (this.iSpeechRecognizer && this.Listening) {
+			if !this.iSpeechRecognizer.stopRecognizer() {
+				if retry
+					Task.startTask(ObjBindMethod(this, "stopListening", true), 200)
+
+				return false
+			}
+			else {
+				if ((this.PushToTalkMode != "Hold") && this.hasPushToTalk())
+					playSound("VMSoundPlayer", stopTalkSound, getAudioSettings("Activation"))
+
+				this.iIsListening := false
+
+				return true
+			}
+		}
+		else
+			return false
+	}
+
+	interrupt(all := false) {
+		local voiceServer := this.VoiceServer
+		local speaker
+
+		if voiceServer {
+			if all
+				messageSend(kWindowMessage, "Voice", "Interrupt", "ahk_pid " . this.VoiceServer, "INTR")
+			else
+				messageSend(kWindowMessage, "Voice", "Interrupt:" . this.Name, "ahk_pid " . this.VoiceServer, "INTR")
+		}
+		else {
+			speaker := this.getSpeaker()
+
+			if speaker
+				speaker.stop()
+		}
+	}
+
+	mute() {
+		local voiceServer := this.VoiceServer
+
+		if voiceServer
+			try {
+				FileAppend("TRUE", kTempDirectory . "Voice.mute")
+			}
+			catch Any as exception {
+				logError(exception)
+			}
+	}
+
+	unmute() {
+		local voiceServer := this.VoiceServer
+
+		if voiceServer
+			deleteFile(kTempDirectory . "Voice.mute")
+	}
+
+	getGrammars(language) {
+		throw "Virtual method VoiceManager.getGrammars must be implemented in a subclass..."
+	}
+
+	buildFragments(language) {
+		local fragments := CaseInsenseWeakMap()
+		local grammars := this.getGrammars(language)
+		local fragment, word
+
+		prepareGrammar(name, grammar) {
+			local start := A_TickCount
+
+			grammar.Phrases
+
+			if isDebug()
+				logMessage(kLogDebug, "Preparing grammar " . name . " took " . (A_TickCount - start) . " ms")
+		}
+
+		for fragment, word in getMultiMapValues(grammars, "Fragments")
+			fragments[fragment] := word
+
+		return fragments
+	}
+
+	buildPhrases(language, section := "Speaker Phrases") {
+		local phrases := CaseInsenseMap()
+		local grammars := this.getGrammars(language)
+		local key, value
+
+		for key, value in getMultiMapValues(grammars, section) {
+			key := ConfigurationItem.splitDescriptor(key)[1]
+
+			if this.Debug[kDebugPhrases]
+				showMessage("Register voice phrase: " . key . " = " . value)
+
+			if phrases.Has(key)
+				phrases[key].Push(value)
+			else
+				phrases[key] := Array(value)
+		}
+
+		return phrases
+	}
+
+	buildGrammars(spRecognizer, language) {
+		local grammars := this.getGrammars(language)
+		local mode := getMultiMapValue(grammars, "Configuration", "Recognizer", "Grammar")
+		local compilerRecognizer := SpeechRecognizer("Compiler", true, this.Language["Original"], false, "Text")
+		local booster := this.Booster
+		local grammar, definition, name, choices, nextCharIndex
+
+		this.iRecognizerMode := mode
+
+		for name, choices in getMultiMapValues(grammars, "Choices") {
+			compilerRecognizer.setChoices(name, choices)
+
+			if booster
+				booster.setChoices(name, choices)
+
+			if spRecognizer {
+				spRecognizer.setChoices(name, choices)
+
+				if spRecognizer.Booster
+					spRecognizer.Booster.setChoices(name, choices)
+			}
+			else
+				messageSend(kFileMessage, "Voice", "registerChoices:" . values2String(";", this.Name, name, string2Values(",", StrReplace(choices, ";", ","))*)
+										, this.VoiceServer)
+		}
+
+		for grammar, definition in getMultiMapValues(grammars, "Listener Grammars") {
+			definition := substituteVariables(definition, {name: this.Name})
+
+			if booster
+				booster.setGrammar(grammar, definition)
+
+			if (spRecognizer && spRecognizer.Booster)
+				spRecognizer.Booster.setGrammar(grammar, definition)
+
+			if (mode = "Mixed") {
+				if !compilerRecognizer {
+					compilerRecognizer := SpeechRecognizer("Compiler", true, this.Language["Original"], false, "Text")
+
+					for name, choices in getMultiMapValues(grammars, "Choices")
+						compilerRecognizer.setChoices(name, choices)
+				}
+
+				if this.Debug[kDebugGrammars] {
+					nextCharIndex := 1
+
+					showMessage("Register command phrase: " . GrammarCompiler(compilerRecognizer).readGrammar(&definition, &nextCharIndex).toString())
+				}
+
+				this.Grammars[grammar] := compilerRecognizer.compileGrammar(definition)
+			}
+
+			if ((mode != "Mixed") || (grammar = "Call"))
+				if spRecognizer {
+					if (mode = "Text") {
+						if (grammar != "Call")
+							throw "Listener grammars are not supported in continuous text recognition..."
+
+						continue
+					}
+
+					if this.Debug[kDebugGrammars] {
+						nextCharIndex := 1
+
+						showMessage("Register command phrase: " . GrammarCompiler(spRecognizer).readGrammar(&definition, &nextCharIndex).toString())
+					}
+
+					if ((grammar != "Call") || (mode = "Grammar"))
+						try {
+							if !spRecognizer.loadGrammar(grammar, spRecognizer.compileGrammar(definition), ObjBindMethod(this, "raisePhraseRecognized"))
+								throw "Recognizer not running..."
+						}
+						catch Any as exception {
+							logError(exception, true)
+
+							logMessage(kLogCritical, translate("Error while registering voice command `"") . definition . translate("`" - please check the configuration"))
+
+							if !kSilentMode
+								showMessage(substituteVariables(translate("Cannot register voice command `"%command%`" - please check the configuration..."), {command: definition})
+										  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+						}
+				}
+				else if (grammar != "Call") {
+					this.Grammars[grammar] := compilerRecognizer.compileGrammar(definition)
+
+					if (mode = "Text")
+						throw "Listener grammars are not supported in continuous text recognition..."
+
+					messageSend(kFileMessage, "Voice", "registerVoiceCommand:" . values2String(";", this.Name, grammar, StrReplace(definition, ";", ","), "remoteCommandRecognized")
+											, this.VoiceServer)
+				}
+		}
+
+		if !spRecognizer
+			messageSend(kFileMessage, "Voice", "registerVoiceCommand:" . values2String(";", this.Name, "Text", "*", "remoteTextRecognized")
+									, this.VoiceServer)
+
+		if (mode = "Grammar") {
+			this.Grammars["?"] := compilerRecognizer.compileGrammar("[Unknown]")
+
+			if spRecognizer {
+				try {
+					spRecognizer.loadGrammar("?", spRecognizer.compileGrammar("[Unknown]"), ObjBindMethod(this, "raisePhraseRecognized"))
+				}
+				catch Any as exception {
+					logError(exception, true)
+				}
+			}
+			else
+				messageSend(kFileMessage, "Voice", "registerVoiceCommand:" . values2String(";", this.Name, "?", "[Unknown]", "remoteCommandRecognized")
+										, this.VoiceServer)
+		}
+	}
+
+	unknownRecognized(text) {
+		this.raiseTextRecognized("Text", text)
+	}
+
+	raisePhraseRecognized(grammar, words) {
+		messageSend(kLocalMessage, "Voice", "localPhraseRecognized:" . values2String(";", grammar, words*))
+	}
+
+	raiseTextRecognized(grammar, text) {
+		messageSend(kLocalMessage, "Voice", "localTextRecognized:" . values2String(";", grammar, text))
+	}
+
+	localPhraseRecognized(grammar, words*) {
+		this.phraseRecognized(grammar, words)
+	}
+
+	localTextRecognized(grammar, text) {
+		if (Trim(text) != "")
+			this.textRecognized(grammar, text)
+	}
+
+	remoteActivationRecognized(words*) {
+		if (words.Length > 0)
+			this.phraseRecognized("Call", words, true)
+	}
+
+	remoteDeactivationRecognized(words*) {
+		; this.clearContinuation()
+	}
+
+	remoteSpeakingStatusUpdate(status) {
+		if (status = "Start")
+			this.Speaking := true
+		else if (status = "Stop")
+			this.Speaking := false
+	}
+
+	remoteCommandRecognized(grammar, command, words*) {
+		this.phraseRecognized(grammar, words, true)
+	}
+
+	remoteTextRecognized(grammar, command, text) {
+		if (Trim(text) != "")
+			this.textRecognized(grammar, text, true)
+	}
+
+	matchCommand(text, &words) {
+		local index, literal, bestRating, bestMatch, ignore, grammar, name
+
+		allMatches(string, minRating, maxRating, strings*) {
+			local ratings := []
+			local index, value, rating
+			local dllFile
+
+			static recognizer := false
+
+			if !recognizer {
+				dllFile := (kBinariesDirectory . "Microsoft\Microsoft.Speech.Recognizer.dll")
+
+				try {
+					if (!FileExist(dllFile)) {
+						logMessage(kLogCritical, translate("Speech.Recognizer.dll not found in ") . kBinariesDirectory)
+
+						throw "Unable to find Speech.Recognizer.dll in " . kBinariesDirectory . "..."
+					}
+
+					recognizer := CLR_LoadLibrary(dllFile).CreateInstance("Speech.MicrosoftSpeechRecognizer")
+				}
+				catch Any as exception {
+					logError(exception, true)
+
+					logMessage(kLogCritical, translate("Error while initializing speech recognition module - please install the speech recognition software"))
+
+					if !kSilentMode
+						showMessage(translate("Error while initializing speech recognition module - please install the speech recognition software") . translate("...")
+											, translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+				}
+			}
+
+			if recognizer
+				for index, value in strings {
+					rating := recognizer.Compare(string, value)
+
+					if (rating > minRating) {
+						ratings.Push({Rating: rating, Target: value})
+
+						if (rating > maxRating)
+							break
+					}
+				}
+
+			if (ratings.Length > 0) {
+				bubbleSort(&ratings, (r1, r2) => r1.Rating < r2.Rating)
+
+				return {BestMatch: ratings[1], Ratings: ratings}
+			}
+			else
+				return {Ratings: []}
+		}
+
+		match(string, grammar, minRating?, maxRating?) {
+			local matches, settings
+
+			static ratingLow := kUndefined
+			static ratingHigh := kUndefined
+
+			if (ratingLow = kUndefined) {
+				settings := readMultiMap(getFileName("Core Settings.ini", kUserConfigDirectory, kConfigDirectory))
+
+				ratingLow := getMultiMapValue(settings, "Voice", "Low Rating", 0.7)
+				ratingHigh := getMultiMapValue(settings, "Voice", "High Rating", 0.85)
+			}
+
+			matches := allMatches(string, isSet(minRating) ? minRating : ratingLow
+										, isSet(maxRating) ? maxRating : ratingHigh
+										, grammar.Phrases*)
+
+			return (matches.HasProp("BestMatch") ? matches.BestMatch.Rating : false)
+		}
+
+		bestRating := 0
+		bestMatch := false
+
+		for name, grammar in this.Grammars {
+			rating := match(text, grammar)
+
+			if (rating > bestRating) {
+				bestRating := rating
+				bestMatch := name
+			}
+		}
+
+		if bestMatch {
+			words := string2Values(A_Space, text)
+
+
+			for index, literal in words
+				words[index] := RegExReplace(literal, "[:!?¿\-;。，！？：；]", "")
+
+			return bestMatch
+		}
+		else
+			return false
+	}
+
+	recognize(text) {
+		if this.VoiceServer
+			messageSend(kFileMessage, "Voice", "recognize:" . values2String(";", this.Name, text), this.VoiceServer)
+		else
+			this.iSpeechRecognizer.recognize(text)
+	}
+
+	phraseRecognized(grammar, words, remote := false) {
+		if (this.Debug[kDebugRecognitions] && !remote)
+			showMessage("Command phrase recognized: " . grammar . " => " . values2String(A_Space, words*))
+
+		protectionOn()
+
+		try {
+			this.handleVoiceCommand(grammar, words)
+		}
+		finally {
+			protectionOff()
+		}
+	}
+
+	textRecognized(grammar, text, remote := false) {
+		local matchText := text
+		local alternateText, words, recognizedGrammar
+
+		if (this.Debug[kDebugRecognitions] && !remote)
+			showMessage("Text recognized: " . text)
+
+		protectionOn()
+
+		try {
+			if (this.iRecognizerMode = "Mixed") {
+				if (this.Booster && (this.Booster.Mode = "Always")) {
+					alternateText := this.Booster.recognize(matchText)
+
+					if (alternateText && (alternateText != ""))
+						matchText := alternateText
+				}
+
+				recognizedGrammar := this.matchCommand(matchText, &words)
+
+				if (this.Booster && !recognizedGrammar && (this.Booster.Mode = "Unknown")) {
+					alternateText := this.Booster.recognize(matchText)
+
+					if (alternateText && (alternateText != ""))
+						matchText := alternateText
+
+					recognizedGrammar := this.matchCommand(matchText, &words)
+				}
+			}
+			else
+				recognizedGrammar := false
+
+			if recognizedGrammar
+				this.handleVoiceCommand(recognizedGrammar, words)
+			else
+				this.handleVoiceText(grammar, text)
+		}
+		finally {
+			protectionOff()
+		}
+	}
+
+	recognizeActivation(grammar, words) {
+		messageSend(kFileMessage, "Voice", "recognizeActivation:" . values2String(";", this.Name, grammar, words*), this.VoiceServer)
+	}
+
+	recognizeCommand(grammar, words) {
+		if this.VoiceServer
+			messageSend(kFileMessage, "Voice", "recognizeCommand:" . values2String(";", grammar, words*), this.VoiceServer)
+		else if this.Grammars.Has(grammar)
+			this.phraseRecognized(grammar, words)
+	}
+
+	setContinuation(continuation) {
+		if continuation
+			this.iActiveContinuation := continuation
+		else
+			this.clearContinuation()
+	}
+
+	clearContinuation() {
+		this.iActiveContinuation := false
+	}
+
+	handleVoiceCommand(grammar, words) {
+		throw "Virtual method VoiceManager.handleVoiceCommand must be implemented in a subclass..."
+	}
+
+	handleVoiceText(grammar, text) {
+		throw "Virtual method VoiceManager.handleVoiceText must be implemented in a subclass..."
+	}
+}

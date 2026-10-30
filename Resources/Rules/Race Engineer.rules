@@ -1,0 +1,1817 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Race Engineer Rules             ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Global Trigger                              ;;;
+;;;                                                                         ;;;
+;;; Entry points for the surrounding script code. Typically, the rule       ;;;
+;;; will be triggered by setting a target fact and call "produce()" on the  ;;;
+;;; KnowledgeBase instance.                                                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;; Each lap, after all the lap data has been copied to the knowledge base, ;;;
+;;; all target data for tyres, fuel, and repair settings will be recomputed ;;;
+;;; upon the data of the last laps, the current weather and track           ;;;
+;;; temperature trend, and so on.                                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Lap] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; This fact is set for each invocation of the rule engine. It can be used ;;;
+;;; to start periodic tasks.                                                ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Update] => ...
+
+priority: -20, [?Update] => (Clear: Update)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; If "Pitstop.Plan" is set, the current data will be used to compute      ;;;
+;;; the settings for the next pitstop. The settings might be changed        ;;;
+;;; afterwards, for example by driver intervention, before they will be     ;;;
+;;; locked in with "Pitstop.Prepare".                                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Pitstop.Plan] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Pitstop.Prepare" opens the Pitstop MFD and adjusts the settings        ;;;
+;;; according to the calculated and negotiated data.                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Pitstop.Prepare] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; If "Pitstop.Update" is set, it indicates that some settings for an      ;;;
+;;; already prepared pitstop had been changed by the user.                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Pitstop.Update] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Pitstop.Lap" must be set to the lap number, where the pitstop has been ;;;
+;;; done. It copies all the data into history memory to be used by the next ;;;
+;;; pitstop preparation.                                                    ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Pitstop.Lap] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Cleanup" can be set to remove unnecessary knowledge from the memory.   ;;;
+;;; Set "Cleanup" to "Laps" to remove all recent laps, that are outside the ;;;
+;;; the statistical window. This is done automatically after a pitstop.     ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Cleanup] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Fuel Target Calculation                         ;;;
+;;;                                                                         ;;;
+;;; Update target fuel amount for the next pit stop after each lap.         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{Any: [?Lap], {None: [?Fuel.Amount.Target]}} => (Prove: updateFuelTarget(?Lap))
+
+updateFuelTarget(?lap) <= lapAvgFuelConsumption(?lap, ?avgConsumption), lapRemainingFuel(?lap, ?remainingFuel),
+						  remainingSessionLaps(?lap, ?sessionLaps), postRaceLaps(?postRaceLaps),
+						  ?remainingLaps = ?sessionLaps + ?postRaceLaps,
+						  ?sessionFuel = ?avgConsumption * ?remainingLaps, safetyFuel(?avgConsumption, ?safetyFuel, false),
+						  ?neededFuel = ?sessionFuel + ?safetyFuel, ?neededFuel > ?remainingFuel, ?refillAmount = ?neededFuel - ?remainingFuel,
+						  min(?refillAmount, !Session.Settings.Fuel.Max, ?temp), max(0, ?temp, ?adjustedRefillAmount),
+						  Set(Fuel.Amount.Target, ?adjustedRefillAmount), !
+updateFuelTarget(?lap) <= Clear(Fuel.Amount.Target)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                     Tyre Compound Target Calculation                    ;;;
+;;;                                                                         ;;;
+;;; Update current and target tyre compound each lap to allow for weather   ;;;
+;;; trend influence.                                                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 20, [?Lap] => (Prove: currentTyreSet()), (ProveAll: currentTyreCompound())
+
+currentTyreCompound() <= currentTyreCompound(?compound, ?color), Set(Tyre.Compound, ?compound), Set(Tyre.Compound.Color, ?color)
+currentTyreCompound() <= currentTyreCompound(FrontLeft, ?compound, ?color),
+						 Set(Tyre.Compound.FrontLeft, ?compound), Set(Tyre.Compound.Color.FrontLeft, ?color),
+						 currentTyreCompound(FrontRight, ?compound, ?color),
+						 Set(Tyre.Compound.FrontRight, ?compound), Set(Tyre.Compound.Color.FrontRight, ?color),
+						 currentTyreCompound(RearLeft, ?compound, ?color),
+						 Set(Tyre.Compound.RearLeft, ?compound), Set(Tyre.Compound.Color.RearLeft, ?color),
+						 currentTyreCompound(RearRight, ?compound, ?color),
+						 Set(Tyre.Compound.RearRight, ?compound), Set(Tyre.Compound.Color.RearRight, ?color)
+currentTyreCompound() <= currentTyreCompound(Front, ?compound, ?color),
+						 Set(Tyre.Compound.Front, ?compound), Set(Tyre.Compound.Color.Front, ?color),
+						 currentTyreCompound(Rear, ?compound, ?color),
+						 Set(Tyre.Compound.Rear, ?compound), Set(Tyre.Compound.Color.Rear, ?color)
+								   
+currentTyreSet() <= currentTyreSet(?tyreSet), Set(Tyre.Set, ?tyreSet)
+
+priority: 5, {All: [?Lap], [?Session.Settings.Tyre.Compound.Change = Temperature]} => (Prove: updateTyreTemperatureWindow(?Lap, !Tyre.Compound))
+
+updateTyreTemperatureWindow(?lap, Immediate) <= updateTyreTemperatureWindow(?lap, Wet)
+updateTyreTemperatureWindow(?lap, ?compound) <=
+		lapTyreTemperature(?lap, ?lapTemperature), Get(Session.Settings.Tyre, ?compound, Temperature.Ideal, ?ideal),
+		?temp = ?ideal - ?lapTemperature, abs(?temp, ?delta),
+		?delta < !Session.Settings.Tyre.Compound.Change.Threshold, Set(Tyre.Temperature.Window, true)
+updateTyreTemperatureWindow(?, ?) <= Set(Tyre.Temperature.Window, false)
+		  
+priority: 5,
+	{All: {None: [?Pitstop.Plan]}, [?Session.Settings.Tyre.Compound.Change = Weather], [?Weather.Tyre.Compound.Target],
+		  {Any: [?Lap], [?Pitstop.Lap], {None: [?Tyre.Compound.Target]}}} =>
+		(Set: Tyre.Compound.Target, ?Weather.Tyre.Compound.Target), (Set: Tyre.Compound.Color.Target, !Weather.Tyre.Compound.Color.Target),
+		(Set: Tyre.Weather.Target, !Weather.Weather.10Min), (Clear: Tyre.Set.Target)
+
+priority: 5,
+	{All: {None: [?Pitstop.Plan]}, [?Session.Settings.Tyre.Compound.Change = Temperature], {Any: [?Lap], [?Pitstop.Lap]},
+		  [?Tyre.Temperature.Window = false], [?Tyre.Compound = Dry]} =>
+		(Set: Tyre.Compound.Target, Wet), (Prove: updateTargetCompoundColor(Wet)),
+		(Set: Tyre.Weather.Target, !Weather.Weather.10Min), (Clear: Tyre.Set.Target)
+
+priority: 5,
+	{All: {None: [?Pitstop.Plan]}, [?Session.Settings.Tyre.Compound.Change = Temperature], {Any: [?Lap], [?Pitstop.Lap]},
+		  [?Tyre.Temperature.Window = true], [?Tyre.Compound = Dry]} =>
+		(Set: Tyre.Compound.Target, Dry), (Prove: updateTargetCompoundColor(Dry)),
+		(Set: Tyre.Weather.Target, !Weather.Weather.10Min), (Clear: Tyre.Set.Target)
+
+priority: 5,
+	{All: {None: [?Pitstop.Plan]}, [?Session.Settings.Tyre.Compound.Change = Temperature], {Any: [?Lap], [?Pitstop.Lap]},
+		  [?Tyre.Temperature.Window = false], [?Tyre.Compound = Wet]} =>
+		(Set: Tyre.Compound.Target, Dry), (Prove: updateTargetCompoundColor(Dry)),
+		(Set: Tyre.Weather.Target, !Weather.Weather.10Min), (Clear: Tyre.Set.Target)
+
+priority: 5,
+	{All: {None: [?Pitstop.Plan]}, [?Session.Settings.Tyre.Compound.Change = Temperature], {Any: [?Lap], [?Pitstop.Lap]},
+		  [?Tyre.Temperature.Window = true], [?Tyre.Compound = Wet]} =>
+		(Set: Tyre.Compound.Target, Wet), (Prove: updateTargetCompoundColor(Wet)),
+		(Set: Tyre.Weather.Target, !Weather.Weather.10Min), (Clear: Tyre.Set.Target)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Axle], [?Tyre.Compound.Target]} =>
+		(Set: Tyre.Compound.Target.Front, ?Tyre.Compound.Target),
+		(Set: Tyre.Compound.Target.Rear, ?Tyre.Compound.Target)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Axle], [?Tyre.Compound.Color.Target]} =>
+		(Set: Tyre.Compound.Color.Target.Front, ?Tyre.Compound.Color.Target),
+		(Set: Tyre.Compound.Color.Target.Rear, ?Tyre.Compound.Color.Target)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Tyre.Compound.Target]} =>
+		(Set: Tyre.Compound.Target.FrontLeft, ?Tyre.Compound.Target),
+		(Set: Tyre.Compound.Target.FrontRight, ?Tyre.Compound.Target),
+		(Set: Tyre.Compound.Target.RearLeft, ?Tyre.Compound.Target),
+		(Set: Tyre.Compound.Target.RearRight, ?Tyre.Compound.Target)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Tyre.Compound.Color.Target]} =>
+		(Set: Tyre.Compound.Color.Target.FrontLeft, ?Tyre.Compound.Color.Target),
+		(Set: Tyre.Compound.Color.Target.FrontRight, ?Tyre.Compound.Color.Target),
+		(Set: Tyre.Compound.Color.Target.RearLeft, ?Tyre.Compound.Color.Target),
+		(Set: Tyre.Compound.Color.Target.RearRight, ?Tyre.Compound.Color.Target)
+
+priority: 5,
+	{All: {None: [?Pitstop.Plan]}, [?Session.Settings.Tyre.Compound.Change = Never],
+		  {Any: [?Lap], [?Pitstop.Lap], {None: [?Tyre.Compound.Target]}}} => (Prove: keepTyreCompound(!Lap)), (Clear: Tyre.Set.Target)
+
+{All: {Any: [?Lap], [?Pitstop.Lap]}, {None: [?Tyre.Compound.Target]}} => (Prove: keepTyreCompound(!Lap)), (Clear: Tyre.Set.Target)
+
+keepTyreCompound(?lap) <= lastPitstopTyreCompound(ANY, ?compound, ?color),
+						  lapWeather(?lap, ?index), weatherSymbol(?index, ?weather), Set(Tyre.Weather.Target, ?weather),
+						  Set(Tyre.Compound.Target, ?compound), Set(Tyre.Compound.Color.Target, ?color), !
+keepTyreCompound(?lap) <= lapWeather(?lap, ?index), weatherSymbol(?index, ?weather), Set(Tyre.Weather.Target, ?weather),
+						  setupTyreCompound(?compound, ?color), Set(Tyre.Compound.Target, ?compound), Set(Tyre.Compound.Color.Target, ?color)
+
+updateTargetCompoundColor(?compound) <= tyreCompoundColor(?compound, ?color), Set(Tyre.Compound.Color.Target, ?color)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Tyre Set Target Calculation                      ;;;
+;;;                                                                         ;;;
+;;; Calculate next dry tire set after performed pitstop.                    ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 5, {All: [?Lap], [?Tyre.Compound.Target = Dry], {None: [?Tyre.Set.Target]}} => (Prove: nextDryTyreSet())
+
+priority: 5, {All: [?Lap], [?Tyre.Compound.Target = Wet], {None: [?Tyre.Set.Target]}} => (Set: Tyre.Set.Target, 0)
+
+nextDryTyreSet() <= lastPitstopTyreSet(?nr), nextDryTyreSet(?nr, ?set), Set(Tyre.Set.Target, ?set), !
+nextDryTyreSet() <= Set(Tyre.Set.Target, !Session.Setup.Tyre.Set.Fresh)
+
+nextDryTyreSet(0, 0)
+nextDryTyreSet(?set, ?nextSet) <= ?nextSet = ?set + 1
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                     Tyre Pressure Target Calculation                    ;;;
+;;;                                                                         ;;;
+;;; Check, whether the actual tyre pressures are out of target range and    ;;;
+;;; adjust for the next pitstop accordingly. The last laps according to     ;;;
+;;; "Session.Settings.Lap.History.Considered" are considered with linear    ;;;
+;;; falling influence on the deviation factor according to					;;;
+;;; "Session.Settings.Lap.History.Damping".                                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Pressure loss calculation                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{All: [?Lap], {None: [?Tyre.Pressure.Reference.Lap]}} => (Prove: clearPressureLossCalibration(?Lap))
+
+clearPressureLossCalibration(?lap) <= ?calibrationLap = ?lap + !Session.Settings.Lap.Learning.Laps,
+									  Set(Tyre.Pressure.Reference.Lap, ?calibrationLap),
+									  Clear(Tyre.Pressure.Reference.FL), Clear(Tyre.Pressure.Reference.FR),
+									  Clear(Tyre.Pressure.Reference.RL), Clear(Tyre.Pressure.Reference.RR)
+
+priority: 10, {All: [?Lap], [?Tyre.Pressure.Loss.FL], {None: [?Tyre.Pressure.Reference.FL]}} => (Clear: Tyre.Pressure.Loss.FL)
+priority: 10, {All: [?Lap], [?Tyre.Pressure.Loss.FR], {None: [?Tyre.Pressure.Reference.FR]}} => (Clear: Tyre.Pressure.Loss.FR)
+priority: 10, {All: [?Lap], [?Tyre.Pressure.Loss.RL], {None: [?Tyre.Pressure.Reference.RL]}} => (Clear: Tyre.Pressure.Loss.RL)
+priority: 10, {All: [?Lap], [?Tyre.Pressure.Loss.RR], {None: [?Tyre.Pressure.Reference.RR]}} => (Clear: Tyre.Pressure.Loss.RR)
+
+[?Lap = ?Tyre.Pressure.Reference.Lap] => (Prove: updatePressureReference(?Lap, [FL, FR, RL, RR]))
+
+updatePressureReference(?, [])
+updatePressureReference(?lap, [?tyreType | ?tyreTypes]) <=
+		lapTyrePressure(?lap, ?tyreType, ?pressure), Set(Tyre.Pressure.Reference, ?tyreType, ?pressure),
+		updatePressureReference(?lap, ?tyreTypes)
+ 
+[?Lap > ?Tyre.Pressure.Reference.Lap] => (Prove: updatePressureLoss(?Lap))
+
+updatePressureLoss(?lap) <=
+		computePressureLoss(?lap, [FL, FR, RL, RR], ?tyrePressureLosses),
+		average(?tyrePressureLosses, ?avg), stdDeviation(?tyrePressureLosses, ?stdDev),
+		updatePressureLoss(?lap, ?avg, ?stdDev, [FL, FR, RL, RR], ?tyrePressureLosses)
+
+updatePressureLoss(?, ?, ?, [], [], ?)
+updatePressureLoss(?lap, ?avg, ?stdDev, [?tyreType | ?tyreTypes], [0 | ?losses]) <=
+		!, Clear(Tyre.Pressure.Loss, ?tyreType), updatePressureLoss(?lap, ?avg, ?stdDev, ?tyreTypes, ?losses)
+updatePressureLoss(?, ?avg, ?stdDev, [?tyreType | ?tyreTypes], [?loss | ?losses]) <=
+		?temp = ?avg + ?stdDev, ?loss > ?temp,	?loss >= !Session.Settings.Tyre.Pressure.Loss.Threshold, !,
+		Set(Tyre.Pressure.Loss, ?tyreType, ?loss), updatePressureLoss(?lap, ?avg, ?stdDev, ?tyreTypes, ?losses)
+updatePressureLoss(?lap, ?avg, ?stdDev, [? | ?tyreTypes], [? | ?losses]) <=
+		Clear(Tyre.Pressure.Loss, ?tyreType), updatePressureLoss(?lap, ?avg, ?stdDev, ?tyreTypes, ?losses)
+
+computePressureLoss(?, [], [])
+computePressureLoss(?lap, [?tyreType | ?tyreTypes], [?loss | ?losses]) <=
+		lapTyrePressure(?lap, ?tyreType, ?curPressure),
+		Get(Tyre.Pressure.Reference, ?tyreType, ?refPressure),
+		?loss = ?refPressure - ?curPressure, ?loss > 0, !,
+		computePressureLoss(?lap, ?tyreTypes, ?losses)
+computePressureLoss(?lap, [? | ?tyreTypes], [0 | ?losses]) <= computePressureLoss(?lap, ?tyreTypes, ?losses)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;            Target pressure calculation without compound change          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{All: [?Lap], [?Tyre.Compound = ?Tyre.Compound.Target]} => (Prove: updateTyrePressureDeviation(?Lap))
+{All: [?Tyre.Update.Pressure = true], [?Tyre.Compound = ?Tyre.Compound.Target]} => (Prove: updateTyrePressureDeviation(!Lap))
+priority: -5, [?Tyre.Update.Pressure = true] => (Clear: Tyre.Update.Pressure)
+
+updateTyrePressureDeviation(?lap) <= tyrePressureDeviation(?lap, [FL, FR, RL, RR], ?deviations),
+									 updateTargetPressures([FL, FR, RL, RR], ?deviations)
+
+tyrePressureDeviation(?lap, [], [])
+tyrePressureDeviation(?lap, [?tyreType | ?tyreTypes], [?deviation | ?deviations]) <=
+		weightedDeviation(?lap, ?tyreType, ?deviation), tyrePressureDeviation(?lap, ?tyreTypes, ?deviations)
+		
+weightedDeviation(?lap, ?tyreType, ?deviation) <= weightedDeviations(?lap, 0, !Tyre.Compound, ?tyreType, ?deviations, ?weights),
+												  sum(?deviations, ?sumDeviations), sum(?weights, ?sumWeights),
+												  ?deviation = ?sumDeviations / ?sumWeights
+
+weightedDeviations(?, !Session.Settings.Lap.History.Considered, ?, ?, [], []) <= !
+weightedDeviations(?lap, ?lap, ?, ?, [], []) <= !
+weightedDeviations(?lap, ?offset, ?compound, ?tyreType, [?deviation | ?deviations], [?weight | ?weights]) <=
+		?tLap = ?lap - ?offset, lapTyrePressure(?tLap, ?tyreType, ?lPressure), tyrePressureTarget(?compound, ?tyreType, ?tPressure),
+		?lDeviation = ?lPressure - ?tPressure, lapWeight(?tLap, ?weight), ?deviation = ?lDeviation * ?weight,
+		?nOffset = ?offset + 1, weightedDeviations(?lap, ?nOffset, ?compound, ?tyreType, ?deviations, ?weights)
+
+updateTargetPressures([], [])
+updateTargetPressures([?tyreType | ?tyreTypes], [?deviation | ?deviations]) <=
+		Set(Tyre.Pressure.Deviation, ?tyreType, ?deviation), updateTargetPressures(?tyreTypes, ?deviations)
+
+{All: [?Tyre.Pressure.Deviation.FL], [?Tyre.Pressure.Target.Correction]}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, FL, ?Tyre.Pressure.Deviation.FL, ?Tyre.Pressure.Target.Correction))
+{All: [?Tyre.Pressure.Deviation.FR], [?Tyre.Pressure.Target.Correction]}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, FR, ?Tyre.Pressure.Deviation.FR, ?Tyre.Pressure.Target.Correction))
+{All: [?Tyre.Pressure.Deviation.RL], [?Tyre.Pressure.Target.Correction]}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, RL, ?Tyre.Pressure.Deviation.RL, ?Tyre.Pressure.Target.Correction))
+{All: [?Tyre.Pressure.Deviation.RR], [?Tyre.Pressure.Target.Correction]}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, RR, ?Tyre.Pressure.Deviation.RR, ?Tyre.Pressure.Target.Correction))
+		
+{All: [?Tyre.Pressure.Deviation.FL], {None: [?Tyre.Pressure.Target.Correction]}}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, FL, ?Tyre.Pressure.Deviation.FL, 0))
+{All: [?Tyre.Pressure.Deviation.FR], {None: [?Tyre.Pressure.Target.Correction]}}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, FR, ?Tyre.Pressure.Deviation.FR, 0))
+{All: [?Tyre.Pressure.Deviation.RL], {None: [?Tyre.Pressure.Target.Correction]}}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, RL, ?Tyre.Pressure.Deviation.RL, 0))
+{All: [?Tyre.Pressure.Deviation.RR], {None: [?Tyre.Pressure.Target.Correction]}}  =>
+		(Prove: updatePressureDelta(!Tyre.Compound.Target, RR, ?Tyre.Pressure.Deviation.RR, 0))
+
+updatePressureDelta(?compound, ?tyreType, ?deviation, ?correction) <=
+		?delta = ?correction - ?deviation, abs(?delta, ?absDelta),
+		Set(Tyre.Pressure.Delta, ?tyreType, ?delta), Set(Tyre.Pressure.Delta, ?tyreType, Abs, ?absDelta)
+		
+[?Tyre.Pressure.Delta.FL.Abs > ?Session.Settings.Tyre.Pressure.Deviation] =>
+		(Prove: updateTargetPressure(!Tyre.Compound.Target, FL, !Tyre.Pressure.Delta.FL))
+[?Tyre.Pressure.Delta.FR.Abs > ?Session.Settings.Tyre.Pressure.Deviation] =>
+		(Prove: updateTargetPressure(!Tyre.Compound.Target, FR, !Tyre.Pressure.Delta.FR))
+[?Tyre.Pressure.Delta.RL.Abs > ?Session.Settings.Tyre.Pressure.Deviation] =>
+		(Prove: updateTargetPressure(!Tyre.Compound.Target, RL, !Tyre.Pressure.Delta.RL))
+[?Tyre.Pressure.Delta.RR.Abs > ?Session.Settings.Tyre.Pressure.Deviation] =>
+		(Prove: updateTargetPressure(!Tyre.Compound.Target, RR, !Tyre.Pressure.Delta.RR))
+		
+[?Tyre.Pressure.Delta.FL.Abs <= ?Session.Settings.Tyre.Pressure.Deviation] => (Prove: updateTargetPressure(!Tyre.Compound.Target, FL, 0))
+[?Tyre.Pressure.Delta.FR.Abs <= ?Session.Settings.Tyre.Pressure.Deviation] => (Prove: updateTargetPressure(!Tyre.Compound.Target, FR, 0))
+[?Tyre.Pressure.Delta.RL.Abs <= ?Session.Settings.Tyre.Pressure.Deviation] => (Prove: updateTargetPressure(!Tyre.Compound.Target, RL, 0))
+[?Tyre.Pressure.Delta.RR.Abs <= ?Session.Settings.Tyre.Pressure.Deviation] => (Prove: updateTargetPressure(!Tyre.Compound.Target, RR, 0))
+
+updateTargetPressure(?compound, ?tyreType, ?delta) <= lastPressure(?compound, ?tyreType, ?pressure),
+													  ?targetPressure = ?pressure + ?delta, Set(Tyre.Pressure.Target, ?tyreType, ?targetPressure)
+
+lastPressure(?compound, ?tyreType, ?pressure) <= !Session.Settings.Pitstop.Service.Tyres = Full,
+												 lastPitstopTyrePressure(?compound, ?tyreType, ?pressure), !
+lastPressure(?compound, ?tyreType, ?pressure) <= setupTyrePressure(?compound, ?tyreType, ?pressure)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;              Target pressure calculation with compound change           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{All: [?Lap], [?Tyre.Compound], [?Tyre.Compound.Target],
+	  {None: [?Tyre.Compound = ?Tyre.Compound.Target]}, {None: [?Tyre.Pressure.Target.Correction]}} =>
+		(Prove: updateTyrePressureDeviation(?Lap, ?Tyre.Compound.Target, 0))
+		
+{All: [?Lap], [?Tyre.Compound], [?Tyre.Compound.Target],
+	  {None: [?Tyre.Compound = ?Tyre.Compound.Target]}, [?Tyre.Pressure.Target.Correction]} =>
+		(Prove: updateTyrePressureDeviation(?Lap, ?Tyre.Compound.Target, ?Tyre.Pressure.Target.Correction))
+
+priority: -5, {All: [?Lap], [?Tyre.Compound], [?Tyre.Compound.Target],
+					{None: [?Tyre.Compound = ?Tyre.Compound.Target]}} =>
+		(Clear: Tyre.Pressure.Deviation.FL), (Clear: Tyre.Pressure.Deviation.FR),
+		(Clear: Tyre.Pressure.Deviation.RL), (Clear: Tyre.Pressure.Deviation.RR),
+		(Clear: Tyre.Pressure.Delta.FL), (Clear: Tyre.Pressure.Delta.FR),
+		(Clear: Tyre.Pressure.Delta.RL), (Clear: Tyre.Pressure.Delta.RR),
+		(Clear: Tyre.Pressure.Delta.FL.Abs), (Clear: Tyre.Pressure.Delta.FR.Abs),
+		(Clear: Tyre.Pressure.Delta.RL.Abs), (Clear: Tyre.Pressure.Delta.RR.Abs)
+
+updateTyrePressureDeviation(?lap, ?compound, ?correction) <=
+		?deviations = [0, 0, 0, 0], setupTyrePressures(?compound, [FL, FR, RL, RR], ?pressures),
+		updateTargetPressures([FL, FR, RL, RR], ?pressures, ?deviations, ?correction, ?targetPressures)
+													
+updateTargetPressures([], [], [], ?, [])
+updateTargetPressures([?tyreType | ?tyreTypes], [?pressure | ?pressures],
+					  [?deviation | ?deviations], ?correction, [?targetPressure | ?targetPressures]) <=
+		?delta = ?correction - ?deviation, ?targetPressure = ?pressure + ?delta, Set(Tyre.Pressure.Target, ?tyreType, ?targetPressure),
+		updateTargetPressures(?tyreTypes, ?pressures, ?deviations, ?correction, ?targetPressures)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Target pressure increment calculation                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Tyre.Pressure.Target.FL] => (Prove: updateTargetPressureIncrement(!Tyre.Compound.Target, FL))
+[?Tyre.Pressure.Target.FR] => (Prove: updateTargetPressureIncrement(!Tyre.Compound.Target, FR))
+[?Tyre.Pressure.Target.RL] => (Prove: updateTargetPressureIncrement(!Tyre.Compound.Target, RL))
+[?Tyre.Pressure.Target.RR] => (Prove: updateTargetPressureIncrement(!Tyre.Compound.Target, RR))
+
+updateTargetPressureIncrement(?compound, ?tyreType) <=
+		setupTyrePressure(?compound, ?tyreType, ?basePressure), Get(Tyre.Pressure.Target, ?tyreType, ?targetPressure),
+		?increment = ?targetPressure - ?basePressure, Set(Tyre.Pressure.Target, ?tyreType, Increment, ?increment)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Repair Target Calculation                        ;;;
+;;;                                                                         ;;;
+;;; These rules check for current damage and suggest repairing based on     ;;;
+;;; general settings (see "Session.Settings.Damage.Repair") or perceived    ;;;
+;;; significant lap time reduction.                                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 5, [?Damage.Update.Suspension] => (Clear: Lap, !Lap, Damage.Suspension)
+priority: 5, [?Damage.Update.Bodywork] => (Clear: Lap, !Lap, Damage.Bodywork)
+priority: 5, [?Damage.Update.Engine] => (Clear: Lap, !Lap, Damage.Engine)
+
+{Any: [?Lap], {None: [?Damage.Repair.Suspension.Target]}, [?Damage.Update.Suspension = ?Lap]} => (Prove: updateSuspensionRepair(!Lap))
+{Any: [?Lap], {None: [?Damage.Repair.Bodywork.Target]}, [?Damage.Update.Bodywork = ?Lap]} => (Prove: updateBodyworkRepair(!Lap))
+{Any: [?Lap], {None: [?Damage.Repair.Engine.Target]}, [?Damage.Update.Engine = ?Lap]} => (Prove: updateEngineRepair(!Lap))
+
+updateSuspensionRepair(?lap) <= lapDamage(?lap, Suspension, ?damage), Set(Damage.Suspension, ?damage)
+updateBodyworkRepair(?lap) <= lapDamage(?lap, Bodywork, ?damage), Set(Damage.Bodywork, ?damage)
+updateEngineRepair(?lap) <= lapDamage(?lap, Engine, ?damage), Set(Damage.Engine, ?damage)
+
+{Any: {All: [?Session.Settings.Damage.Suspension.Repair = Always], [?Damage.Suspension > 0]},
+	  {All: [?Session.Settings.Damage.Suspension.Repair = Threshold],
+			[?Damage.Suspension >= ?Session.Settings.Damage.Suspension.Repair.Threshold]},
+	  {All: [?Session.Settings.Damage.Suspension.Repair = Impact],
+			[?Damage.Suspension.Lap.Delta >= ?Session.Settings.Damage.Suspension.Repair.Threshold]}} => (Set: Damage.Repair.Suspension.Target)
+			
+{Any: [?Session.Settings.Damage.Suspension.Repair = Never], [?Damage.Suspension = 0],
+	  {All: [?Session.Settings.Damage.Suspension.Repair = Threshold],
+			[?Damage.Suspension < ?Session.Settings.Damage.Suspension.Repair.Threshold]},
+	  {All: [?Session.Settings.Damage.Suspension.Repair = Impact],
+			[?Damage.Suspension.Lap.Delta < ?Session.Settings.Damage.Suspension.Repair.Threshold]}} => (Clear: Damage.Repair.Suspension.Target)
+
+{Any: {All: [?Session.Settings.Damage.Bodywork.Repair = Always], [?Damage.Bodywork > 0]},
+	  {All: [?Session.Settings.Damage.Bodywork.Repair = Threshold],
+			[?Damage.Bodywork >= ?Session.Settings.Damage.Bodywork.Repair.Threshold]},
+	  {All: [?Session.Settings.Damage.Bodywork.Repair = Impact],
+			[?Damage.Bodywork.Lap.Delta >= ?Session.Settings.Damage.Bodywork.Repair.Threshold]}} => (Set: Damage.Repair.Bodywork.Target)
+
+{Any: [?Session.Settings.Damage.Bodywork.Repair = Never], [?Damage.Bodywork = 0],
+	  {All: [?Session.Settings.Damage.Bodywork.Repair = Threshold],
+			[?Damage.Bodywork < ?Session.Settings.Damage.Bodywork.Repair.Threshold]},
+	  {All: [?Session.Settings.Damage.Bodywork.Repair = Impact],
+			[?Damage.Bodywork.Lap.Delta < ?Session.Settings.Damage.Bodywork.Repair.Threshold]}} => (Clear: Damage.Repair.Bodywork.Target)
+
+{Any: {All: [?Session.Settings.Damage.Engine.Repair = Always], [?Damage.Engine > 0]},
+	  {All: [?Session.Settings.Damage.Engine.Repair = Threshold],
+			[?Damage.Engine >= ?Session.Settings.Damage.Engine.Repair.Threshold]},
+	  {All: [?Session.Settings.Damage.Engine.Repair = Impact],
+			[?Damage.Engine.Lap.Delta >= ?Session.Settings.Damage.Engine.Repair.Threshold]}} => (Set: Damage.Repair.Engine.Target)
+			
+{Any: [?Session.Settings.Damage.Engine.Repair = Never], [?Damage.Engine = 0],
+	  {All: [?Session.Settings.Damage.Engine.Repair = Threshold],
+			[?Damage.Engine < ?Session.Settings.Damage.Engine.Repair.Threshold]},
+	  {All: [?Session.Settings.Damage.Engine.Repair = Impact],
+			[?Damage.Engine.Lap.Delta < ?Session.Settings.Damage.Engine.Repair.Threshold]}} => (Clear: Damage.Repair.Engine.Target)
+
+{All: [?Lap], [?Damage.Suspension]} => (Set: Lap, ?Lap, Damage.Suspension, ?Damage.Suspension)
+{All: [?Lap], [?Damage.Bodywork]} => (Set: Lap, ?Lap, Damage.Bodywork, ?Damage.Bodywork)
+{All: [?Lap], [?Damage.Engine]} => (Set: Lap, ?Lap, Damage.Engine, ?Damage.Engine)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Pitstop Target Calculation                       ;;;
+;;;                                                                         ;;;
+;;; Computes the time potentially required for an upcoming pitstop.         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: -20, {Any: [?Lap], [?Damage.Update.Bodywork], [?Damage.Update.Suspension], [?Damage.Update.Engine]} => (Prove: updatePitstopTargetTime())
+
+updatePitstopTargetTime() <= bound?(!Fuel.Amount.Target), bound?(!Tyre.Compound.Target), bound?(!Brake.Change.Target), !,
+							 computeTargetDamages(?damages),
+							 pitstopDeltaTime(!Lap, !Fuel.Amount.Target, !Tyre.Compound.Target, !Brake.Change.Target, ?damages,
+											  ?targetServiceTime, ?targetRepairTime, ?pitlaneDelta),
+							 ?targetTime = ?targetServiceTime + ?targetRepairTime,
+							 Set(Target.Time.Box, ?targetTime), Set(Target.Time.Pitlane, ?pitlaneDelta), 
+							 Set(Target.Time.Service, ?targetServiceTime), Set(Target.Time.Repairs, ?targetRepairTime)
+
+updatePitstopTargetTime() <= computeTargetDamages(?damages),
+							 pitstopDeltaTime(!Lap, 0, Dry, false, ?damages, ?, ?targetRepairTime, ?),
+							 Set(Target.Time.Repairs, ?targetRepairTime)
+
+computeTargetDamages(?damages) <= computeDamages([true, true, true], [!Damage.Bodywork, !Damage.Suspension, !Damage.Engine], ?damages)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Damage Impact Analysis                         ;;;
+;;;                                                                         ;;;
+;;; The following rules permanently observes the laptime development with   ;;;
+;;; regards to collected damage.                                            ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 5, {Any: [?Damage.Suspension = 0], {None: [?Damage.Suspension]}} =>
+		(Clear: Damage.Suspension.Lap.Delta), (Clear: Damage.Repair.Suspension.Target)
+priority: 5, {Any: [?Damage.Bodywork = 0], {None: [?Damage.Bodywork]}} =>
+		(Clear: Damage.Bodywork.Lap.Delta), (Clear: Damage.Repair.Bodywork.Target)
+priority: 5, {Any: [?Damage.Engine = 0], {None: [?Damage.Engine]}} =>
+		(Clear: Damage.Engine.Lap.Delta), (Clear: Damage.Repair.Engine.Target)
+
+{All: [?Lap], [?Damage.Suspension > 0]} => (Prove: lapTimeDamageImpact(?Lap, Suspension, !Damage.Supsension))
+{All: [?Lap], [?Damage.Bodywork > 0]} => (Prove: lapTimeDamageImpact(?Lap, Bodywork, !Damage.Bodywork))
+{All: [?Lap], [?Damage.Engine > 0]} => (Prove: lapTimeDamageImpact(?Lap, Engine, !Damage.Engine))
+
+lapTimeDamageImpact(?lap, ?damageType, ?damage) <= recentPitstopLap(?lap), !, fail
+lapTimeDamageImpact(?lap, ?damageType, ?damage) <=
+		lapAvgTime(?lap, ?lTime), preDamageLap(?damageType, ?damage, ?pdLap), lapAvgTime(?pdLap, ?pdTime),
+		?delta = ?pdTime - ?lTime, ?delta < 0, lapTimeStdDeviation(?pdLap, ?stdDeviation),
+		abs(?delta, ?absDelta), ?damageDelta = ?absDelta - ?stdDeviation, ?damageDelta > 0,
+		?deltaSecs = ?absDelta / 1000, updateDamageLapDelta(?lap, ?damageType, ?lTime, ?deltaSecs)
+
+updateDamageLapDelta(?lap, ?damageType, ?lapTime, ?delta) <=
+		?maxDelta = ?lapTime / 30000, min(?delta, ?maxDelta, ?lDelta), Set(Damage, ?damageType, Lap.Delta, ?lDelta)
+
+preDamageLap(?damageType, ?, ?lap) <= Get(Lap, !Lap, Damage, ?damageType, Lap.Reference, ?lap)
+preDamageLap(?damageType, ?, ?lap) <= !Lap > 1, ?tLap = !Lap - 1, Get(Lap, ?tLap, Damage, ?damageType, Lap.Reference, ?lap),
+									  Set(Lap, !Lap, Damage, ?damageType, Lap.Reference, ?lap)
+preDamageLap(?damageType, ?, ?lap) <= unbound?(?lap), preDamageLap(?damageType, 0, !Lap, ?lap),
+									  Set(Lap, !Lap, Damage, ?damageType, Lap.Reference, ?lap)
+preDamageLap(?damageType, ?currentDamage, ?lap) <= unbound?(?lap), !Lap > 1, ?tLap = !Lap - 1,
+												   preDamageLap(?damageType, ?currentDamage, ?tLap, ?lap),
+												   Set(Lap, ?tLap, Damage, ?damageType, Lap.Reference, ?lap)
+preDamageLap(?, ?, 0) <= !, fail
+preDamageLap(?, ?, 1) <= !, fail
+preDamageLap(?damageType, ?, ?lap) <= bound?(?lap), pitstopLap(?lap), !, fail
+preDamageLap(?damageType, ?currentDamage, ?lap) <= Get(Lap, ?lap, Damage, ?damageType, ?prevDamage), =<(?prevDamage, ?currentDamage)
+
+preDamageLap(?, ?, 0, ?) <= !, fail
+preDamageLap(?damageType, ?currentDamage, ?lap, ?lap) <= preDamageLap(?damageType, ?currentDamage, ?lap)
+preDamageLap(?damageType, ?currentDamage, ?candidateLap, ?lap) <= ?nCandidateLap = ?candidateLap - 1,
+																  preDamageLap(?damageType, ?currentDamage, ?nCandidateLap, ?lap)
+
+lapTimeStdDeviation(?lap, ?deviation) <= weightedLapTimes(?lap, ?lapTimes), stdDeviation(?lapTimes, ?deviation)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Damage Repair Recommendation                     ;;;
+;;;                                                                         ;;;
+;;; Periodically check, whether an early pitstop to repair damage would be  ;;;
+;;; worthwile. The driver is informed and may setup an unplanned pitstop.   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 5, {All: {Any: [?Damage.Suspension.Lap.Delta = 0], {None: [?Damage.Suspension.Lap.Delta]},
+						 [?Damage.Suspension = 0], {None: [?Damage.Suspension]}},
+				   {Any: [?Damage.Bodywork.Lap.Delta = 0], {None: [?Damage.Bodywork.Lap.Delta]},
+						 [?Damage.Bodywork = 0], {None: [?Damage.Bodywork]}},
+				   {Any: [?Damage.Engine.Lap.Delta = 0], {None: [?Damage.Engine.Lap.Delta]},
+						 [?Damage.Engine = 0], {None: [?Damage.Engine]}}} => (Clear: Damage.Analysis.Reported),
+																			 (Clear: Damage.Analysis.Reported.Repair),
+																			 (Clear: Damage.Analysis.Updated),
+																			 (Clear: Damage.Reported)
+				   
+priority: -5, {All: [?Lap], [?Damage.Reported],
+					{None: [?Damage.Analysis.Reported > ?Damage.Reported]},
+					{Any: {None: [?Damage.Analysis.Reported]},
+						  {All: [?Damage.Analysis.Reported <= ?Damage.Reported], [?Damage.Analysis.Reported < ?Lap]}},
+					{Any: [?Damage.Suspension.Lap.Delta > 0], [?Damage.Bodywork.Lap.Delta > 0], [?Damage.Engine.Lap.Delta > 0]}} =>
+		(Prove: reportAnalysis(!Damage.Suspension.Lap.Delta, !Damage.Bodywork.Lap.Delta, !Damage.Engine.Lap.Delta))
+				   
+priority: -5, {All: [?Lap], [?Damage.Reported],
+					{None: [?Damage.Analysis.Reported > ?Damage.Reported]},
+					{Any: {None: [?Damage.Analysis.Reported]},
+						  {All: [?Damage.Analysis.Reported <= ?Damage.Reported], [?Damage.Analysis.Reported < ?Lap]}},
+					{None: [?Damage.Suspension.Lap.Delta], [?Damage.Bodywork.Lap.Delta], [?Damage.Engine.Lap.Delta]}} =>
+		(Prove: reportAnalysis(0, 0, 0))
+
+reportAnalysis(?, ?, ?) <= recentPitstopLap(!Lap), !, fail
+
+reportAnalysis(?sDelta, ?bDelta, ?eDelta) <= unbound?(?sDelta), unbound?(?eDelta), reportLapDelta(0, ?bDelta, 0), !
+reportAnalysis(?sDelta, ?bDelta, ?eDelta) <= unbound?(?sDelta), unbound?(?bDelta), reportLapDelta(0, 0, ?eDelta), !
+reportAnalysis(?sDelta, ?bDelta, ?eDelta) <= unbound?(?bDelta), unbound?(?eDelta), reportLapDelta(?sDelta, 0, 0), !
+reportAnalysis(?sDelta, ?bDelta, ?eDelta) <= unbound?(?sDelta), reportLapDelta(0, ?bDelta, ?eDelta), !
+reportAnalysis(?sDelta, ?bDelta, ?eDelta) <= unbound?(?bDelta), reportLapDelta(?sDelta, 0, ?eDelta), !
+reportAnalysis(?sDelta, ?bDelta, ?eDelta) <= unbound?(?eDelta), reportLapDelta(?sDelta, ?bDelta, 0), !
+reportAnalysis(?sDelta, ?bDelta, ?eDelta) <= reportLapDelta(?sDelta, ?bDelta, ?eDelta)
+
+reportLapDelta(?sDelta, ?bDelta, ?eDelta) <=
+		?temp = !Damage.Reported + !Session.Settings.Damage.Analysis.Laps, !Lap > ?temp,
+		max(?sDelta, ?bDelta, ?tDelta), max(?tDelta, ?eDelta, ?delta),
+		remainingStintLaps(!Lap, ?stintLaps), ?lostTime = ?stintLaps * ?delta,
+		reportDamageAnalysis(?lostTime, ?stintLaps, ?delta)
+
+reportDamageAnalysis(?lostTime, ?stintLaps, ?delta) <= >=(?lostTime, !Session.Settings.Pitstop.Delta),
+													   reportTimeLoss(?stintLaps, ?delta),
+													   Set(Damage.Analysis.Reported, !Lap), Set(Damage.Analysis.Reported.Repair, true),
+													   Clear(Damage.Analysis.Updated)
+reportDamageAnalysis(?lostTime, ?stintLaps, ?delta) <= ?lostTime < !Session.Settings.Pitstop.Delta,
+													   Call(reportDamageAnalysis, false, ?stintLaps, ?delta),
+													   Set(Damage.Analysis.Reported, !Lap), Set(Damage.Analysis.Reported.Repair, false),
+													   Clear(Damage.Analysis.Updated)
+													
+reportTimeLoss(?stintLaps, ?delta) <= Call(raiseEvent, TimeLoss, ?stintLaps, ?delta), !
+reportTimeLoss(?stintLaps, ?delta) <= Call(reportDamageAnalysis, true, ?stintLaps, ?delta)
+				   
+priority: -5, {All: [?Lap], [?Damage.Analysis.Reported.Repair = true], {None: [?Damage.Analysis.Updated]}} =>
+		(Prove: reportAnalysisUpdate(!Damage.Suspension.Lap.Delta, !Damage.Bodywork.Lap.Delta, !Damage.Engine.Lap.Delta))
+
+reportAnalysisUpdate(?sDelta, ?bDelta, ?eDelta) <= unbound?(?sDelta), unbound?(?eDelta), reportLapDeltaUpdate(0, ?bDelta, 0), !
+reportAnalysisUpdate(?sDelta, ?bDelta, ?eDelta) <= unbound?(?sDelta), unbound?(?bDelta), reportLapDeltaUpdate(0, 0, ?eDelta), !
+reportAnalysisUpdate(?sDelta, ?bDelta, ?eDelta) <= unbound?(?bDelta), unbound?(?eDelta), reportLapDeltaUpdate(?sDelta, 0, 0), !
+reportAnalysisUpdate(?sDelta, ?bDelta, ?eDelta) <= unbound?(?sDelta), reportLapDeltaUpdate(0, ?bDelta, ?eDelta), !
+reportAnalysisUpdate(?sDelta, ?bDelta, ?eDelta) <= unbound?(?bDelta), reportLapDeltaUpdate(?sDelta, 0, ?eDelta), !
+reportAnalysisUpdate(?sDelta, ?bDelta, ?eDelta) <= unbound?(?eDelta), reportLapDeltaUpdate(?sDelta, ?bDelta, 0), !
+reportAnalysisUpdate(?sDelta, ?bDelta, ?eDelta) <= reportLapDeltaUpdate(?sDelta, ?bDelta, ?eDelta)
+
+reportLapDeltaUpdate(?sDelta, ?bDelta, ?eDelta) <=
+		?temp = !Damage.Reported + !Session.Settings.Damage.Analysis.Laps, !Lap > ?temp,
+		max(?sDelta, ?bDelta, ?tDelta), max(?tDelta, ?eDelta, ?tempDelta), max(0, ?tempDelta, ?delta),
+		remainingStintLaps(!Lap, ?stintLaps), ?lostTime = ?stintLaps * ?delta,
+		?lostTime < !Session.Settings.Pitstop.Delta, reportNoTimeLoss(?stintLaps, ?delta),
+		Set(Damage.Analysis.Updated, true)
+
+reportNoTimeLoss(?stintLaps, ?delta) <= Call(raiseEvent, NoTimeLoss, ?stintLaps, ?delta), !
+reportNoTimeLoss(?stintLaps, ?delta) <= Call(reportDamageAnalysis, false, ?stintLaps, ?delta, true)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                              Damage Warning                             ;;;
+;;;                                                                         ;;;
+;;; These rules actively check for new damage and informs the driver.       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Lap] => (Prove: reportNewDamage(?Lap))
+{Any: {Any: {All: [?Damage.Update.Suspension], {None: [?Damage.Suspension.Reported]}},
+			[?Damage.Update.Suspension > ?Damage.Suspension.Reported]},
+	  {Any: {All: [?Damage.Update.Bodywork], {None: [?Damage.Bodywork.Reported]}},
+			[?Damage.Update.Bodywork > ?Damage.Bodywork.Reported]},
+	  {Any: {All: [?Damage.Update.Engine], {None: [?Damage.Engine.Reported]}},
+			[?Damage.Update.Engine > ?Damage.Engine.Reported]}} => (Prove: reportNewDamage(!Lap))
+priority: -20, {Any: [?Damage.Update.Suspension], [?Damage.Update.Bodywork], [?Damage.Update.Engine]} =>
+		(Clear: Damage.Update.Suspension), (Clear: Damage.Update.Bodywork), (Clear: Damage.Update.Engine)
+
+reportNewDamage(1) <= !, lapDamage(1, Suspension, ?lSDamage), lapDamage(1, Bodywork, ?lBDamage), lapDamage(1, Engine, ?lEDamage),
+					  reportNewDamage(0, ?lSDamage, 0, ?lBDamage, 0, ?lEDamage)
+reportNewDamage(?lap) <= pitstopLap(?pitstopLap), ?pitstopLap = ?lap - 1,
+						 lastPitstopDamageRepair(Suspension, ?suspensionRepaired), lastPitstopDamageRepair(Bodywork, ?bodyworkRepaired),
+						 lastPitstopDamageRepair(Engine, ?engineRepaired),
+						 lapDamage(?lap, Suspension, ?lSDamage), lapDamage(?lap, Bodywork, ?lBDamage), lapDamage(?lap, Engine, ?lEDamage),
+						 newDamageAfterRepair(?lSDamage, ?suspensionRepaired, ?newSDamage),
+						 newDamageAfterRepair(?lBDamage, ?bodyworkRepaired, ?newBDamage),
+						 newDamageAfterRepair(?lEDamage, ?engineRepaired, ?newEDamage),
+						 any?(true, [?newSDamage, ?newBDamage, ?newEDamage]), reportDamage(?newSDamage, ?newBDamage, ?newEDamage),
+						 setDamageReported(Suspension, ?newSDamage), setDamageReported(Bodywork, ?newBDamage),
+						 setDamageReported(Engine, ?newEDamage)
+reportNewDamage(?lap) <= pitstopLap(?pitstopLap), ?pitstopLap = ?lap - 1,
+						 lapDamage(?lap, Suspension, ?lSDamage), lapDamage(?lap, Bodywork, ?lBDamage), lapDamage(?lap, Engine, ?lEDamage),
+						 ?pLap = ?lap - 2, lapDamage(?pLap, Suspension, ?pSDamage), lapDamage(?pLap, Bodywork, ?pBDamage),
+						 lapDamage(?pLap, Engine, ?pEDamage),
+						 reportNewDamage(?pSDamage, ?lSDamage, ?pBDamage, ?lBDamage, ?pEDamage, ?lEDamage)
+reportNewDamage(?lap) <= lapDamage(?lap, Suspension, ?lSDamage), lapDamage(?lap, Bodywork, ?lBDamage), lapDamage(?lap, Engine, ?lEDamage),
+						 ?pLap = ?lap - 1, lapDamage(?pLap, Suspension, ?pSDamage), lapDamage(?pLap, Bodywork, ?pBDamage),
+						 lapDamage(?pLap, Engine, ?pEDamage), reportNewDamage(?pSDamage, ?lSDamage, ?pBDamage, ?lBDamage, ?pEDamage, ?lEDamage)
+						 
+reportNewDamage(?oldSDamage, ?newSDamage, ?oldBDamage, ?newBDamage, ?oldEDamage, ?newEDamage) <=
+						 bound?(!Damage.Reported), !Damage.Reported > !Damage.Analysis.Reported, !,
+						 >(?newSDamage, ?oldSDamage, ?sGreater), >(?newBDamage, ?oldBDamage, ?bGreater), >(?newEDamage, ?oldEDamage, ?eGreater),
+						 any?(true, [?sGreater, ?bGreater, ?eGreater]),
+						 setDamageReported(Suspension, ?sGreater), setDamageReported(Bodywork, ?bGreater),
+						 setDamageReported(Engine, ?eGreater)
+reportNewDamage(?oldSDamage, ?newSDamage, ?oldBDamage, ?newBDamage, ?oldEDamage, ?newEDamage) <=
+						 >(?newSDamage, ?oldSDamage, ?sGreater), >(?newBDamage, ?oldBDamage, ?bGreater), >(?newEDamage, ?oldEDamage, ?eGreater),
+						 any?(true, [?sGreater, ?bGreater, ?eGreater]), reportDamage(?sGreater, ?bGreater, ?eGreater),
+						 setDamageReported(Suspension, ?sGreater), setDamageReported(Bodywork, ?bGreater), setDamageReported(Engine, ?eGreater)
+
+reportDamage(?sDamage, ?bDamage, ?eDamage) <= Call(raiseEvent, Damage, ?sDamage, ?bDamage, ?eDamage), !
+reportDamage(?sDamage, ?bDamage, ?eDamage) <= Call(damageWarning, ?sDamage, ?bDamage, ?eDamage)
+
+newDamageAfterRepair(0, ?, false)
+newDamageAfterRepair(?damage, true, true) <= ?damage > 0
+newDamageAfterRepair(?damage, false, false) <= ?damage > 0
+
+setDamageReported(?, false)
+setDamageReported(?damageType, true) <= Set(Damage.Reported, !Lap), Set(Damage, ?damageType, Reported, !Lap)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Pressure Loss Warning                           ;;;
+;;;                                                                         ;;;
+;;; These rules actively check for new pressure loss and informs            ;;;
+;;; the driver.                                                             ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{None: [?Tyre.Pressure.Reference.FL]} => (Clear: Tyre.Pressure.Loss.Reported.FL)
+{None: [?Tyre.Pressure.Reference.FR]} => (Clear: Tyre.Pressure.Loss.Reported.FR)
+{None: [?Tyre.Pressure.Reference.RL]} => (Clear: Tyre.Pressure.Loss.Reported.RL)
+{None: [?Tyre.Pressure.Reference.RR]} => (Clear: Tyre.Pressure.Loss.Reported.RR)
+
+{All: [?Tyre.Pressure.Loss.FL],
+	  {Any: {None: [?Tyre.Pressure.Loss.Reported.FL]},
+			[?Tyre.Pressure.Loss.FL > ?Tyre.Pressure.Loss.Reported.FL]}} =>
+		(Set: Tyre.Pressure.Loss.Reported.FL, ?Tyre.Pressure.Loss.FL),
+		(Prove: pressureLossWarning(FL, ?Tyre.Pressure.Loss.FL))
+{All: [?Tyre.Pressure.Loss.FR],
+	  {Any: {None: [?Tyre.Pressure.Loss.Reported.FR]},
+			[?Tyre.Pressure.Loss.FR > ?Tyre.Pressure.Loss.Reported.FR]}} =>
+		(Set: Tyre.Pressure.Loss.Reported.FR, ?Tyre.Pressure.Loss.FR),
+		(Prove: pressureLossWarning(FR, ?Tyre.Pressure.Loss.FR))
+{All: [?Tyre.Pressure.Loss.RL],
+	  {Any: {None: [?Tyre.Pressure.Loss.Reported.RL]},
+			[?Tyre.Pressure.Loss.RL > ?Tyre.Pressure.Loss.Reported.RL]}} =>
+		(Set: Tyre.Pressure.Loss.Reported.RL, ?Tyre.Pressure.Loss.RL),
+		(Prove: pressureLossWarning(RL, ?Tyre.Pressure.Loss.RL))
+{All: [?Tyre.Pressure.Loss.RR],
+	  {Any: {None: [?Tyre.Pressure.Loss.Reported.RR]},
+			[?Tyre.Pressure.Loss.RR > ?Tyre.Pressure.Loss.Reported.RR]}} =>
+		(Set: Tyre.Pressure.Loss.Reported.RR, ?Tyre.Pressure.Loss.RR),
+		(Prove: pressureLossWarning(RR, ?Tyre.Pressure.Loss.RR))
+
+pressureLossWarning(?tyre, ?lostPressure) <= Call(raiseEvent, PressureLoss, ?tyre, ?lostPressure), !
+pressureLossWarning(?tyre, ?lostPressure) <= Call(pressureLossWarning, ?tyre, ?lostPressure)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Tyre Wear Warning                            ;;;
+;;;                                                                         ;;;
+;;; Issues a warning to the driver, if the tyre wear gets critical.         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: -15, {All: [?Lap], {None: [?Tyre.Wear.Reported],
+					 [?Lap.Remaining.Session > ?Session.Settings.Pitstop.Service.Last]}} => (Prove: checkTyreWear(?Lap))
+
+checkTyreWear(?lap) <= ?threshold = 100 - !Session.Settings.Tyre.Tread.Minimum,
+					   criticalTyreWear(?lap, [FL, FR, RL, RR], ?threshold, ?tyre, ?wear),
+					   tyreWearWarning(?lap, ?tyre, ?wear), Set(Tyre.Wear.Reported, ?lap)
+
+criticalTyreWear(?, [], ?, ?, ?) <= !, fail
+criticalTyreWear(?lap, [?tyre | ?], ?threshold, ?tyre, ?wear) <= Get(Lap, ?lap, Tyre.Wear, ?tyre, ?wear), ?wear >= ?threshold, !
+criticalTyreWear(?lap, [? | ?tyres], ?threshold, ?tyre, ?wear) <= criticalTyreWear(?lap, ?tyres, ?threshold, ?tyre, ?wear)
+
+tyreWearWarning(?lap, ?tyre, ?wear) <= recentPitstopLap(?lap), !, fail
+tyreWearWarning(?lap, ?tyre, ?wear) <= Call(raiseEvent, TyreWear, ?tyre, ?wear), !
+tyreWearWarning(?lap, ?tyre, ?wear) <= Call(tyreWearWarning, ?tyre, ?wear)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                     Brake Change Target Calculation                     ;;;
+;;;                                                                         ;;;
+;;; Update the brake change target for the next pitstop.                    ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{All: [?Lap], [?Lap.Remaining.Session <= ?Session.Settings.Pitstop.Service.Last]} => (Set: Brake.Change.Target, false)
+
+{All: [?Lap], [?Lap.Remaining.Session > ?Session.Settings.Pitstop.Service.Last]} => (Prove: checkBrakeWear(?Lap))
+
+checkBrakeWear(?lap) <= ?threshold = 100 - !Session.Settings.Brake.Pad.Minimum,
+						criticalBrakeWear(?lap, [FL, FR, RL, RR], ?threshold, ?brake, ?wear), !,
+						Set(Brake.Change.Target, true)
+checkBrakeWear(?lap) <= Set(Brake.Change.Target, false)
+
+criticalBrakeWear(?, [], ?, ?, ?) <= !, fail
+criticalBrakeWear(?lap, [?brake | ?], ?threshold, ?brake, ?wear) <=
+		Get(Lap, ?lap, Brake.Wear, ?brake, ?wear), ?wear >= ?threshold, !
+criticalBrakeWear(?lap, [? | ?brakes], ?threshold, ?brake, ?wear) <= criticalBrakeWear(?lap, ?brakes, ?threshold, ?brake, ?wear)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Brake Wear Warning                           ;;;
+;;;                                                                         ;;;
+;;; Issues a warning to the driver, if the brake wear gets critical.        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: -15, {All: [?Lap], [?Brake.Change.Target = true], {None: [?Brake.Wear.Reported],
+					 [?Lap.Remaining.Session > ?Session.Settings.Pitstop.Service.Last]}} => (Prove: reportBrakeWear(?Lap))
+
+reportBrakeWear(?lap) <= ?threshold = 100 - !Session.Settings.Brake.Pad.Minimum,
+						criticalBrakeWear(?lap, [FL, FR, RL, RR], ?threshold, ?brake, ?wear),
+						brakeWearWarning(?lap, ?brake, ?wear), Set(Brake.Wear.Reported, ?lap)
+
+brakeWearWarning(?lap, ?brake, ?wear) <= recentPitstopLap(?lap), !, fail
+brakeWearWarning(?lap, ?brake, ?wear) <= Call(raiseEvent, BrakeWear, ?brake, ?wear), !
+brakeWearWarning(?lap, ?brake, ?wear) <= Call(brakeWearWarning, ?brake, ?wear)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Lap Calculation & Low Fuel Warning                    ;;;
+;;;                                                                         ;;;
+;;; Updates the remaining laps with the current amount of fuel and issues   ;;;
+;;; a warning when falling below a given threshold. Beside that remaining   ;;;
+;;; stint time for the current driver is calculated as well.                ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 20, [?Lap] => (ProveAll: updateRemainingLaps(?Lap))
+
+updateRemainingLaps(?lap) <= remainingStintLaps(?lap, Fuel, ?fuelLaps), Set(Lap.Remaining.Fuel, ?fuelLaps)
+updateRemainingLaps(?lap) <= Clear(Lap.Remaining.Energy), remainingStintLaps(?lap, Energy, ?energyLaps), Set(Lap.Remaining.Energy, ?energyLaps)
+updateRemainingLaps(?lap) <= remainingStintLaps(?lap, Driver, ?driverLaps), Set(Lap.Remaining.Stint, ?driverLaps)
+updateRemainingLaps(?lap) <= remainingSessionLaps(?lap, ?sessionLaps), Set(Lap.Remaining.Session, ?sessionLaps)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Fuel, Set(Lap.Remaining.Stint, !Lap.Remaining.Fuel)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Energy, Set(Lap.Remaining.Stint, !Lap.Remaining.Energy)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Session, Set(Lap.Remaining.Stint, !Lap.Remaining.Session)
+
+priority: -50, {All: {Any: [?Lap.Remaining.Fuel < ?Lap.Remaining.Session], [?Lap.Remaining.Energy < ?Lap.Remaining.Session]},
+					 {Any: [?Lap.Remaining.Fuel <= ?Session.Settings.Lap.PitstopWarning],
+						   [?Lap.Remaining.Energy <= ?Session.Settings.Lap.PitstopWarning]},
+					 [?Lap.Remaining.Session > 0]} =>
+		(Prove: lowFuelWarning(!Lap))
+
+lowFuelWarning(?lap) <= recentPitstopLap(?lap), !, fail
+lowFuelWarning(?lap) <= !Lap.Remaining.Fuel > !Lap.Remaining.Energy,
+						floor(!Lap.Remaining.Energy, ?remainingLaps), !, lowEnergyWarning(?lap, ?remainingLaps)
+lowFuelWarning(?lap) <= floor(!Lap.Remaining.Fuel, ?remainingLaps), lowFuelWarning(!Lap, ?remainingLaps)
+
+lowFuelWarning(?lap, ?remainingLaps) <= lapRemainingFuel(?lap, ?remainingFuel), Call(raiseEvent, FuelLow, ?remainingFuel, ?remainingLaps), !
+lowFuelWarning(?lap, ?remainingLaps) <= lapRemainingFuel(?lap, ?remainingFuel), Call(lowFuelWarning, ?remainingFuel, ?remainingLaps)
+
+lowEnergyWarning(?lap, ?remainingLaps) <= lapRemainingEnergy(?lap, ?remainingEnergy), Call(raiseEvent, EnergyLow, ?remainingEnergy, ?remainingLaps), !
+lowEnergyWarning(?lap, ?remainingLaps) <= lapRemainingEnergy(?lap, ?remainingEnergy), Call(lowEnergyWarning, ?remainingEnergy, ?remainingLaps)
+
+priority: 20, {All: [?Lap.Remaining.Stint <= ?Lap.Remaining.Session]} => (Set: Lap.Remaining, ?Lap.Remaining.Stint)
+priority: 20, {All: [?Lap.Remaining.Session <= ?Lap.Remaining.Stint]} => (Set: Lap.Remaining, ?Lap.Remaining.Session)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Low Grip Warning                             ;;;
+;;;                                                                         ;;;
+;;; These rules periodically check, whether the currently mounted tyres     ;;;
+;;; are suitable for the current weather and track grip conditions. If a    ;;;
+;;; pitstop has already been planned, the driver is called to the pit in    ;;;
+;;; time.                                                                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{All: [?Session.Settings.Tyre.Service = All],
+	  {Any: [?Lap > ?Pitstop.Planned], [?Lap > ?Pitstop.Prepared]},
+	  {None: [?Grip.Low.Reported]},
+	  [?Pitstop.Planned.Tyre.Compound != false],
+	  [?Pitstop.Planned.Tyre.Compound != !Tyre.Compound],
+	  {Prove: optimalTyreCompound(!Track.Grip, ?Pitstop.Planned.Tyre.Compound)}} =>
+		(Set: Grip.Low.Reported, !Lap),
+		(Prove: lowGripWarning(!Lap, ?Pitstop.Planned.Tyre.Compound))
+
+{All: [?Session.Settings.Tyre.Service = Axle],
+	  {Any: [?Lap > ?Pitstop.Planned], [?Lap > ?Pitstop.Prepared]},
+	  {None: [?Grip.Low.Reported]},
+	  {Any: [?Pitstop.Planned.Tyre.Compound.Front != false], [?Pitstop.Planned.Tyre.Compound.Rear != false]},
+	  {All: {Any: [?Pitstop.Planned.Tyre.Compound.Front = false],
+				  {All: [?Pitstop.Planned.Tyre.Compound.Front != !Tyre.Compound.Front],
+						{Prove: optimalTyreCompound(!Track.Grip, ?Pitstop.Planned.Tyre.Compound.Front)}}},
+			{Any: [?Pitstop.Planned.Tyre.Compound.Rear = false],
+				  {All: [?Pitstop.Planned.Tyre.Compound.Rear != !Tyre.Compound.Rear],
+						{Prove: optimalTyreCompound(!Track.Grip, ?Pitstop.Planned.Tyre.Compound.Rear)}}}}} =>
+		(Set: Grip.Low.Reported, !Lap),
+		(Prove: lowGripWarning(!Lap, ?Pitstop.Planned.Tyre.Compound.Front, ?Pitstop.Planned.Tyre.Compound.Rear))
+
+{All: [?Session.Settings.Tyre.Service = Wheel],
+	  {Any: [?Lap > ?Pitstop.Planned], [?Lap > ?Pitstop.Prepared]},
+	  {None: [?Grip.Low.Reported]},
+	  {Any: [?Pitstop.Planned.Tyre.Compound.FrontLeft != false], [?Pitstop.Planned.Tyre.Compound.FrontRight != false],
+			[?Pitstop.Planned.Tyre.Compound.RearLeft != false], [?Pitstop.Planned.Tyre.Compound.RearRight != false]},
+	  {All: {Any: [?Pitstop.Planned.Tyre.Compound.FrontLeft = false],
+				  {All: [?Pitstop.Planned.Tyre.Compound.FrontLeft != !Tyre.Compound.FrontLeft],
+						{Prove: optimalTyreCompound(!Track.Grip, ?Pitstop.Planned.Tyre.Compound.FrontLeft)}}},
+			{Any: [?Pitstop.Planned.Tyre.Compound.FrontRight = false],
+				  {All: [?Pitstop.Planned.Tyre.Compound.FrontRight != !Tyre.Compound.FrontRight],
+						{Prove: optimalTyreCompound(!Track.Grip, ?Pitstop.Planned.Tyre.Compound.FrontRight)}}},
+			{Any: [?Pitstop.Planned.Tyre.Compound.RearLeft = false],
+				  {All: [?Pitstop.Planned.Tyre.Compound.RearLeft != !Tyre.Compound.RearLeft],
+						{Prove: optimalTyreCompound(!Track.Grip, ?Pitstop.Planned.Tyre.Compound.RearLeft)}}},
+			{Any: [?Pitstop.Planned.Tyre.Compound.RearRight = false],
+				  {All: [?Pitstop.Planned.Tyre.Compound.RearRight != !Tyre.Compound.RearRight],
+						{Prove: optimalTyreCompound(!Track.Grip, ?Pitstop.Planned.Tyre.Compound.RearRight)}}}}} =>
+		(Set: Grip.Low.Reported, !Lap),
+		(Prove: lowGripWarning(!Lap, ?Pitstop.Planned.Tyre.Compound.FrontLeft, ?Pitstop.Planned.Tyre.Compound.FrontRight,
+									 ?Pitstop.Planned.Tyre.Compound.RearLeft, ?Pitstop.Planned.Tyre.Compound.RearRight))
+
+lowGripWarning(?lap, ?compound) <= Call(raiseEvent, GripLow, ?compound), !
+lowGripWarning(?lap, ?compound) <= Call(lowGripWarning, ?compound)
+
+lowGripWarning(?lap, ?frontCompound, ?rearCompound) <= Call(raiseEvent, GripLow, ?frontCompound, ?rearCompound), !
+lowGripWarning(?lap, ?frontCompound, ?rearCompound) <= Call(lowGripWarning, ?frontCompound, ?rearCompound)
+
+lowGripWarning(?lap, ?frontLeftCompound, ?frontRightCompound, ?rearLeftCompound, ?rearRightCompound) <=
+		Call(raiseEvent, GripLow, ?frontLeftCompound, ?frontRightCompound, ?rearLeftCompound, ?rearRightCompound), !
+lowGripWarning(?lap, ?frontLeftCompound, ?frontRightCompound, ?rearLeftCompound, ?rearRightCompound) <=
+		Call(lowGripWarning, ?frontLeftCompound, ?frontRightCompound, ?rearLeftCompound, ?rearRightCompound)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                Weather & Tyre Temperature Trend Projection              ;;;
+;;;                                                                         ;;;
+;;; The rules in this section try to derive future weather data on past     ;;;
+;;; weather trends and weather forecast information (as far as available).  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Lap > 5] => (Prove: updateWeatherTrend(?Lap))
+
+updateWeatherTrend(?lap) <= firstStintLap(?startlap), ?deltaLaps = ?lap - ?startlap,
+							lapAirTemperature(?startlap, ?startAirTemperature), projectedAirTemperature(?lap, ?curAirTemperature),
+							lapTrackTemperature(?startlap, ?startTrackTemperature), projectedTrackTemperature(?lap, ?curTrackTemperature),
+							lapWeather(?startlap, ?startWeather), projectedWeather(?lap, ?curWeather),
+							lapTyreTemperature(?startlap, ?startTyreTemperature), projectedTyreTemperature(?lap, ?curTyreTemperature),
+							?tempAir = ?curAirTemperature - ?startAirTemperature, ?tempTrack = ?curTrackTemperature - ?startTrackTemperature,
+							?deltaAirTemperature = ?tempAir / ?deltaLaps, ?deltaTrackTemperature = ?tempTrack / ?deltaLaps,
+							?tempWeather = ?curWeather - ?startWeather, ?deltaWeather = ?tempWeather / ?deltaLaps,
+							?tempTyreTemperature = ?curTyreTemperature - ?startTyreTemperature,
+							?deltaTyreTemperature = ?tempTyreTemperature / ?deltaLaps,
+							Set(Weather.Temperature.Air.Delta, ?deltaAirTemperature),
+							Set(Weather.Temperature.Track.Delta, ?deltaTrackTemperature), Set(Weather.Weather.Delta, ?deltaWeather),
+							Set(Weather.Temperature.Tyre.Delta, ?deltaTyreTemperature)
+
+projectedWeather(?lap, ?weather) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapWeathers(?firstlap, !Lap, ?weathers),
+		linRegression(?indices, ?weathers, ?a, ?b), ?temp = ?b * ?lap, ?weather = ?a + ?temp
+
+projectedAirTemperature(?lap, ?temperature) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapAirTemperatures(?firstlap, !Lap, ?temperatures),
+		linRegression(?indices, ?temperatures, ?a, ?b), ?temp = ?b * ?lap, ?temperature = ?a + ?temp
+
+projectedTrackTemperature(?lap, ?temperature) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapTrackTemperatures(?firstlap, !Lap, ?temperatures),
+		linRegression(?indices, ?temperatures, ?a, ?b), ?temp = ?b * ?lap, ?temperature = ?a + ?temp
+
+projectedTyreTemperature(?lap, ?temperature) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapTyreTemperatures(?firstlap, !Lap, ?temperatures),
+		linRegression(?indices, ?temperatures, ?a, ?b), ?temp = ?b * ?lap, ?temperature = ?a + ?temp
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                 Temperature Based Tyre Pressure Correction              ;;;
+;;;                                                                         ;;;
+;;; When the temperatures are changing in evening or morning sessions or    ;;;
+;;; due to incoming weather changes, a pressure correction factor is		;;;
+;;; derived for the next stint.                                             ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 5, {All: [?Lap > 5], [?Session.Settings.Tyre.Pressure.Correction.Temperature = true]} => (Prove: updateTyrePressureCorrection(?Lap))
+
+updateTyrePressureCorrection(?lap) <=
+		firstStintLap(?startlap), ?firstLap = ?startLap + 1, ?numLaps = ?lap - ?firstLap, ?numLaps > 5,
+		sequence(?firstlap, ?lap, ?indices), lapAirTemperatures(?firstLap, ?lap, ?temperatures), linRegression(?indices, ?temperatures, ?a, ?b),
+		nextStintLaps(?nextStintLaps), ?halfStintLaps = ?nextStintLaps / 2,
+		average(?temperatures, ?averagetemperature), ?middleStintLap = ?lap + ?halfStintLaps, ?temp = ?b * ?middleStintLap,
+		?projectedTemperature = ?a + ?temp, ?temperatureDelta = ?projectedTemperature - ?averageTemperature,
+		?pressureCorrection = ?temperatureDelta * !Session.Settings.Tyre.Pressure.Correction.Temperature.Air,
+		Set(Tyre.Pressure.Target.Correction, ?pressureCorrection)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                    Upcoming Weather Change Notification                 ;;;
+;;;                                                                         ;;;
+;;; These rules will check wether a significant weather change is ahead and ;;;
+;;; will notify the driver accordingly. If the weather change is only a few ;;;
+;;; minutes ahead, a recommendation to use different tyre compound is		;;;
+;;; made.                                                                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Weather Notifications.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Pitstop Planning                            ;;;
+;;;                                                                         ;;;
+;;; Creates a plan for an upcoming pitstop. A copy of all current values    ;;;
+;;; from the working memory is made. Therefore, a pitstop plan will become  ;;;
+;;; obsolete quit fast, when these values change, for example due to a      ;;;
+;;; crash.                                                                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 20, {All: [?Pitstop.Plan = true], [?Tyre.Compound.Target],
+					[?Session.Settings.Tyre.Pressure.Correction.Pressure = true]} => (Prove: updateTyrePressureTarget(!Lap, Pressure))
+
+updateTyrePressureTarget(?lap, Pressure) <=
+		computePressureCorrections([FL, FR, RL, RR], Pressure, ?corrections), adjustTargetPressures([FL, FR, RL, RR], ?corrections)
+								  
+computePressureCorrections([], Pressure, [])
+computePressureCorrections([?tyreType | ?tyreTypes], Pressure, [?correction | ?corrections]) <=
+		Get(Tyre.Pressure.Loss, ?tyreType, ?temp), !, ?correction = ?temp * -1,
+		computePressureCorrections(?tyreTypes, Pressure, ?corrections)
+computePressureCorrections([? | ?tyreTypes], Pressure, [0 | ?corrections]) <= computePressureCorrections(?tyreTypes, Pressure, ?corrections)
+
+priority: 20, {All: [?Pitstop.Plan = true], [?Tyre.Compound.Target],
+					[?Session.Settings.Tyre.Pressure.Correction.Setup = true]} => (Prove: updateTyrePressureTarget(!Lap, Setup))
+
+updateTyrePressureTarget(?lap, Setup) <=
+		Get(Tyre.Weather.Target, ?weather), lapAirTemperature(?lap, ?airTemp), lapTrackTemperature(?lap, ?trackTemp),
+		Call(setupTyrePressures, ?weather, ?airTemp, ?trackTemp, !Tyre.Compound.Target, !Tyre.Compound.Color.Target),
+		Set(Tyre.Compound.Target, !Tyre.Setup.Compound), Set(Tyre.Compound.Color.Target, !Tyre.Setup.Compound.Color),
+		computePressureCorrections([FL, FR, RL, RR], Setup, ?corrections), adjustTargetPressures([FL, FR, RL, RR], ?corrections)
+
+computePressureCorrections(?tyreTypes, Setup, ?corrections) <= tyrePressureCorrections(?tyreTypes, !Tyre.Setup.Certainty, ?corrections)
+
+tyrePressureCorrections([], ?, [])
+tyrePressureCorrections([?tyreType | ?tyreTypes], ?factor, [?correction | ?corrections]) <=
+		Get(Tyre.Pressure.Target, ?tyreType, ?pressure), Get(Tyre.Setup.Pressure, ?tyreType, ?setupPressure),
+		?temp = ?setupPressure - ?pressure, ?correction = ?temp * ?factor,
+		tyrePressureCorrections(?tyreTypes, ?factor, ?corrections)
+
+adjustTargetPressures([], [])
+adjustTargetPressures([?tyreType | ?tyreTypes], [?correction | ?corrections]) <=
+		Get(Tyre.Pressure.Target, ?tyreType, ?pressure), ?newPressure = ?pressure + ?correction,
+		Set(Tyre.Pressure.Target, ?tyreType, ?newPressure), Get(Tyre.Pressure.Target, ?tyreType, Increment, ?increment),
+		?newIncrement = ?increment + ?correction, Set(Tyre.Pressure.Target, ?tyreType, Increment, ?newIncrement),
+		adjustTargetPressures(?tyreTypes, ?corrections)
+
+priority: 20, [?Pitstop.Plan = true] =>
+		(Clear: Pitstop.Planned.Nr), (Clear: Pitstop.Planned.Lap), (Clear: Pitstop.Planned.Planned),
+		(Clear: Pitstop.Planned.Fuel), (Clear: Pitstop.Planned.Laps.Remaining),
+		(Clear: Pitstop.Planned.Tyre.Compound), (Clear: Pitstop.Planned.Tyre.Compound.Color),
+		(Clear: Pitstop.Planned.Tyre.Compound.Front), (Clear: Pitstop.Planned.Tyre.Compound.Color.Front),
+		(Clear: Pitstop.Planned.Tyre.Compound.FrontLeft), (Clear: Pitstop.Planned.Tyre.Compound.Color.FrontLeft),
+		(Clear: Pitstop.Planned.Tyre.Compound.FrontRight), (Clear: Pitstop.Planned.Tyre.Compound.Color.FrontRight),
+		(Clear: Pitstop.Planned.Tyre.Compound.Rear), (Clear: Pitstop.Planned.Tyre.Compound.Color.Rear),
+		(Clear: Pitstop.Planned.Tyre.Compound.RearLeft), (Clear: Pitstop.Planned.Tyre.Compound.Color.RearLeft),
+		(Clear: Pitstop.Planned.Tyre.Compound.RearRight), (Clear: Pitstop.Planned.Tyre.Compound.Color.RearRight),
+		(Clear: Pitstop.Planned.Tyre.Set),
+		(Clear: Pitstop.Planned.Tyre.Pressure.FL), (Clear: Pitstop.Planned.Tyre.Pressure.FR),
+		(Clear: Pitstop.Planned.Tyre.Pressure.RL), (Clear: Pitstop.Planned.Tyre.Pressure.RR),
+		(Clear: Pitstop.Planned.Tyre.Pressure.FL.Increment), (Clear: Pitstop.Planned.Tyre.Pressure.FR.Increment),
+		(Clear: Pitstop.Planned.Tyre.Pressure.RL.Increment), (Clear: Pitstop.Planned.Tyre.Pressure.RR.Increment),
+		(Clear: Pitstop.Planned.Tyre.Pressure.Correction),
+		(Clear: Pitstop.Planned.Tyre.Pressure.Lost.FL), (Clear: Pitstop.Planned.Tyre.Pressure.Lost.FR),
+		(Clear: Pitstop.Planned.Tyre.Pressure.Lost.RL), (Clear: Pitstop.Planned.Tyre.Pressure.Lost.RR),
+		(Clear: Pitstop.Planned.Brake.Change),
+		(Clear: Pitstop.Planned.Driver.Request),
+		(Clear: Pitstop.Planned.Repair.Suspension), (Clear: Pitstop.Planned.Repair.Bodywork), (Clear: Pitstop.Planned.Repair.Engine),
+		(Clear: Pitstop.Planned.Time.Pitlane), (Clear: Pitstop.Planned.Time.Box),
+		(Clear: Pitstop.Planned.Time.Service), (Clear: Pitstop.Planned.Time.Repairs),
+		(Clear: Pitstop.Prepared), (Clear: Grip.Low.Reported)
+priority: 10, [?Pitstop.Plan] => (Prove: planPitstop())
+
+planPitstop() <= lastPitstop(?last), ?nr = ?last + 1, Set(Pitstop.Planned.Nr, ?nr)
+planPitstop() <= Set(Pitstop.Planned.Nr, 1)
+
+{All: [?Pitstop.Plan],
+	  [?Session.Settings.Pitstop.Service.Refuel = false]} => (Set: Pitstop.Planned.Fuel, 0)
+{All: [?Pitstop.Plan],
+	  [?Session.Settings.Pitstop.Service.Tyres = Off]} => (Set: Pitstop.Planned.Tyre.Compound, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Color, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Front, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Color.Front, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.FrontLeft, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.FrontRight, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Rear, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Color.Rear, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.RearLeft, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.RearRight, false),
+														  (Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.FL, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.FR, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.RL, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.RR, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.FL.Increment, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.FR.Increment, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.RL.Increment, false),
+														  (Set: Pitstop.Planned.Tyre.Pressure.RR.Increment, false)
+{All: [?Pitstop.Plan],
+	  [?Session.Settings.Pitstop.Service.Tyres = Change]} => (Set: Pitstop.Planned.Tyre.Pressure.FL, false),
+															 (Set: Pitstop.Planned.Tyre.Pressure.FR, false),
+															 (Set: Pitstop.Planned.Tyre.Pressure.RL, false),
+															 (Set: Pitstop.Planned.Tyre.Pressure.RR, false),
+															 (Set: Pitstop.Planned.Tyre.Pressure.FL.Increment, false),
+															 (Set: Pitstop.Planned.Tyre.Pressure.FR.Increment, false),
+															 (Set: Pitstop.Planned.Tyre.Pressure.RL.Increment, false),
+															 (Set: Pitstop.Planned.Tyre.Pressure.RR.Increment, false)
+{All: [?Pitstop.Plan],
+	  [?Session.Settings.Pitstop.Service.Brakes = Off]} => (Set: Pitstop.Planned.Brake.Change, false)
+{All: [?Pitstop.Plan],
+	  [?Session.Settings.Pitstop.Service.Repairs = false]} => (Set: Pitstop.Planned.Repair.Suspension, false),
+															  (Set: Pitstop.Planned.Repair.Bodywork, false),
+															  (Set: Pitstop.Planned.Repair.Engine, false)
+
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Lap],
+	  {None: [?Pitstop.Planned.Lap]}} => (Set: Pitstop.Planned.Lap, ?Pitstop.Plan.Lap)
+
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Fuel.Amount],
+	  {None: [?Pitstop.Planned.Fuel]}} => (Set: Pitstop.Planned.Fuel, ?Pitstop.Plan.Fuel.Amount)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Fuel.Amount]},
+	  [?Fuel.Amount.Target], {None: [?Pitstop.Planned.Fuel]}} => (Set: Pitstop.Planned.Fuel, ?Fuel.Amount.Target)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Change = false]} => (Set: Pitstop.Planned.Tyre.Compound, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Color, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Front, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Color.Front, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.FrontLeft, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.FrontRight, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Rear, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Color.Rear, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.RearLeft, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.RearRight, false),
+															   (Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, false)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Brake.Change = false]} => (Set: Pitstop.Planned.Brake.Change, false)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Set], {None: [?Pitstop.Planned.Tyre.Set]}} =>
+		(Set: Pitstop.Planned.Tyre.Set, ?Pitstop.Plan.Tyre.Set)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound], {None: [?Pitstop.Planned.Tyre.Compound]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound, ?Pitstop.Plan.Tyre.Compound)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Color], {None: [?Pitstop.Planned.Tyre.Compound.Color]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color, ?Pitstop.Plan.Tyre.Compound.Color)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.FrontLeft], {None: [?Pitstop.Planned.Tyre.Compound.FrontLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontLeft, ?Pitstop.Plan.Tyre.Compound.FrontLeft)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.FrontRight], {None: [?Pitstop.Planned.Tyre.Compound.FrontRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontRight, ?Pitstop.Plan.Tyre.Compound.FrontRight)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.RearLeft], {None: [?Pitstop.Planned.Tyre.Compound.RearLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearLeft, ?Pitstop.Plan.Tyre.Compound.RearLeft)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.RearRight], {None: [?Pitstop.Planned.Tyre.Compound.RearRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearRight, ?Pitstop.Plan.Tyre.Compound.RearRight)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Front], {None: [?Pitstop.Planned.Tyre.Compound.Front]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Front, ?Pitstop.Plan.Tyre.Compound.Front)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Rear], {None: [?Pitstop.Planned.Tyre.Compound.Rear]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Rear, ?Pitstop.Plan.Tyre.Compound.Rear)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Color.FrontLeft], {None: [?Pitstop.Planned.Tyre.Compound.Color.FrontLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, ?Pitstop.Plan.Tyre.Compound.Color.FrontLeft)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Color.FrontRight], {None: [?Pitstop.Planned.Tyre.Compound.Color.FrontRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, ?Pitstop.Plan.Tyre.Compound.Color.FrontRight)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Color.RearLeft], {None: [?Pitstop.Planned.Tyre.Compound.Color.RearLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, ?Pitstop.Plan.Tyre.Compound.Color.RearLeft)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Color.RearRight], {None: [?Pitstop.Planned.Tyre.Compound.Color.RearRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, ?Pitstop.Plan.Tyre.Compound.Color.RearRight)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Color.Front], {None: [?Pitstop.Planned.Tyre.Compound.Color.Front]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Front, ?Pitstop.Plan.Tyre.Compound.Color.Front)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Compound.Color.Rear], {None: [?Pitstop.Planned.Tyre.Compound.Color.Rear]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Rear, ?Pitstop.Plan.Tyre.Compound.Color.Rear)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Pressure.FL], {None: [?Pitstop.Planned.Tyre.Pressure.FL]}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FL, ?Pitstop.Plan.Tyre.Pressure.FL)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Pressure.FR], {None: [?Pitstop.Planned.Tyre.Pressure.FR]}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FR, ?Pitstop.Plan.Tyre.Pressure.FR)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Pressure.RL], {None: [?Pitstop.Planned.Tyre.Pressure.RL]}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RL, ?Pitstop.Plan.Tyre.Pressure.RL)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Tyre.Pressure.RR], {None: [?Pitstop.Planned.Tyre.Pressure.RR]}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RR, ?Pitstop.Plan.Tyre.Pressure.RR)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Repair.Suspension], {None: [?Pitstop.Planned.Repair.Suspension]}} =>
+		(Set: Pitstop.Planned.Repair.Suspension, ?Pitstop.Plan.Repair.Suspension)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Repair.Bodywork], {None: [?Pitstop.Planned.Repair.Bodywork]}} =>
+		(Set: Pitstop.Planned.Repair.Bodywork, ?Pitstop.Plan.Repair.Bodywork)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Repair.Engine], {None: [?Pitstop.Planned.Repair.Engine]}} =>
+		(Set: Pitstop.Planned.Repair.Engine, ?Pitstop.Plan.Repair.Engine)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Brake.Change], {None: [?Pitstop.Planned.Brake.Change]}} =>
+		(Set: Pitstop.Planned.Brake.Change, ?Pitstop.Plan.Brake.Change)
+{All: [?Pitstop.Plan], [?Pitstop.Plan.Driver.Request], {None: [?Pitstop.Planned.Driver.Request]}} =>
+		(Set: Pitstop.Planned.Driver.Request, ?Pitstop.Plan.Driver.Request)
+
+{All: [?Pitstop.Plan], {None: [?Fuel.Amount.Target]}, {None: [?Pitstop.Plan.Fuel.Amount]}} => (Set: Pitstop.Planned.Fuel, 0)
+
+{All: [?Pitstop.Plan], [?Pitstop.Planned.Lap > 0]} =>
+		(Let: ?lapsToGo = ?Pitstop.Planned.Lap - !Lap), (Prove: updatePitstopRemainingLaps(!Lap, ?lapsToGo, !Pitstop.Planned.Fuel))
+{All: [?Pitstop.Plan], {Any: {None: [?Pitstop.Planned.Lap]}, [?Pitstop.Planned.Lap = 0]}} =>
+		(Prove: updatePitstopRemainingLaps(!Lap, 0, !Pitstop.Planned.Fuel))
+
+updatePitstopRemainingLaps(?lap, ?lapsToGo, ?refuel) <=
+		lapRemainingFuel(?lap, ?remainingFuel), lapAvgFuelConsumption(?lap, ?avgConsumption),
+		?consumedFuel = ?lapsToGo * ?avgConsumption, ?fuel = ?remainingFuel - ?consumedFuel,
+		?availableFuel = ?fuel + ?refuel, ?laps = ?availableFuel / ?avgConsumption,
+		?remainingLaps = ?laps + ?lapsToGo, Set(Pitstop.Planned.Laps.Remaining, ?remainingLaps)
+	  
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Loss.FL], [?Session.Settings.Tyre.Pressure.Correction.Pressure = true],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.Lost.FL]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.FL, ?Tyre.Pressure.Loss.FL)
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Loss.FR], [?Session.Settings.Tyre.Pressure.Correction.Pressure = true],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.Lost.FR]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.FR, ?Tyre.Pressure.Loss.FR)
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Loss.RL], [?Session.Settings.Tyre.Pressure.Correction.Pressure = true],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.Lost.RL]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.RL, ?Tyre.Pressure.Loss.RL)
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Loss.RR], [?Session.Settings.Tyre.Pressure.Correction.Pressure = true],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.Lost.RR]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.RR, ?Tyre.Pressure.Loss.RR)
+	  
+{All: [?Pitstop.Plan], [?Tyre.Compound.Target], [?Session.Settings.Tyre.Service = All],
+	  {None: [?Pitstop.Planned.Tyre.Compound], [?Pitstop.Planned.Tyre.Compound = false]},
+	  {Prove: tyreChange(All, !Pitstop.Planned.Laps.Remaining, ?tyreCompound, ?tyreCompoundColor)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound, ?tyreCompound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color, ?tyreCompoundColor)
+
+tyreChange(All, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Wear,
+		!Tyre.Compound.Target = !Tyre.Compound,
+		!Tyre.Compound.Color.Target = !Tyre.Compound.Color,
+		lapAvgTyreWears(!Lap, ?wears), tyreChange(All, [FL, FR, RL, RR], ?wears, ?remainingLaps), !
+tyreChange(All, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Laps,
+		!Tyre.Compound.Target = !Tyre.Compound,
+		!Tyre.Compound.Color.Target = !Tyre.Compound.Color,
+		tyreChange(All, [FL, FR, RL, RR], ?remainingLaps), !
+tyreChange(All, ?, !Tyre.Compound.Target, !Tyre.Compound.Color.Target)
+
+tyreChange(All, [], [], ?)
+tyreChange(All, [?tyre | ?tyres], [?avgWear | ?avgWears], ?remainingLaps) <=
+		lapTyreWear(!Lap, FULL, ?tyre, ?wear), ?remainingWear = ?remainingLaps * ?avgWear,
+		?targetWear = ?wear + ?remainingWear, ?threshold = 100 - !Session.Settings.Tyre.Tread.Minimum, ?targetWear =< ?threshold,
+		tyreChange(All, ?tyres, ?avgWears, ?remainingLaps)
+		
+tyreChange(All, [], ?)
+tyreChange(All, [?tyre | ?tyres], ?remainingLaps) <=
+		Get(Tyre, ?tyre, Laps, ?curLaps), tyreMaxLaps(All, ?tyre, ?maxLaps), 
+		?laps = ?curLaps + ?remainingLaps, ?laps =< ?maxLaps, tyreChange(All, ?tyres, ?remainingLaps)
+
+tyreMaxLaps(All, ?tyre, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound, !Tyre.Compound.Color, Laps.Max, ?maxLaps)
+		
+{All: [?Pitstop.Plan], [?Tyre.Compound.Target.Front], [?Session.Settings.Tyre.Service = Axle],
+	  {None: [?Pitstop.Planned.Tyre.Compound.Front], [?Pitstop.Planned.Tyre.Compound.Front = false]},
+	  {Prove: tyreChange(Axle, Front, !Pitstop.Planned.Laps.Remaining, ?tyreCompound, ?tyreCompoundColor)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Front, ?tyreCompound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Front, ?tyreCompoundColor)
+{All: [?Pitstop.Plan], [?Tyre.Compound.Target.Rear], [?Session.Settings.Tyre.Service = Axle],
+	  {None: [?Pitstop.Planned.Tyre.Compound.Rear], [?Pitstop.Planned.Tyre.Compound.Rear = false]},
+	  {Prove: tyreChange(Axle, Rear, !Pitstop.Planned.Laps.Remaining, ?tyreCompound, ?tyreCompoundColor)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Rear, ?tyreCompound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Rear, ?tyreCompoundColor)
+
+tyreChange(Axle, Front, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Wear,
+		!Tyre.Compound.Target.Front = !Tyre.Compound.Front,
+		!Tyre.Compound.Color.Target.Front = !Tyre.Compound.Color.Front,
+		tyreChange(Axle, FL, ?remainingLaps), tyreChange(Axle, FR, ?remainingLaps), !
+tyreChange(Axle, Front, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Laps,
+		!Tyre.Compound.Target.Front = !Tyre.Compound.Front,
+		!Tyre.Compound.Color.Target.Front = !Tyre.Compound.Color.Front,
+		tyreChange(Axle, [FL, FR], ?remainingLaps), !
+tyreChange(Axle, Front, ?, !Tyre.Compound.Target.Front, !Tyre.Compound.Color.Target.Front)
+
+tyreChange(Axle, Rear, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Wear,
+		!Tyre.Compound.Target.Rear = !Tyre.Compound.Rear,
+		!Tyre.Compound.Color.Target.Rear = !Tyre.Compound.Color.Rear,
+		tyreChange(Axle, RL, ?remainingLaps), tyreChange(Axle, RR, ?remainingLaps), !
+tyreChange(Axle, Rear, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Laps,
+		!Tyre.Compound.Target.Rear = !Tyre.Compound.Rear,
+		!Tyre.Compound.Color.Target.Rear = !Tyre.Compound.Color.Rear, !
+		tyreChange(Axle, [RL, RR], ?remainingLaps), !
+tyreChange(Axle, Rear, ?, !Tyre.Compound.Target.Rear, !Tyre.Compound.Color.Target.Rear)
+
+tyreChange(Axle, ?tyre, ?remainingLaps) <=
+		lapAvgTyreWear(!Lap, ?tyre, ?avgWear), lapTyreWear(!Lap, FULL, ?tyre, ?wear), ?remainingWear = ?remainingLaps * ?avgWear,
+		?targetWear = ?wear + ?remainingWear, ?threshold = 100 - !Session.Settings.Tyre.Tread.Minimum, ?targetWear =< ?threshold
+
+tyreChange(Axle, [], ?)
+tyreChange(Axle, [?tyre | ?tyres], ?remainingLaps) <=
+		Get(Tyre, ?tyre, Laps, ?curLaps), tyreMaxLaps(Axle, ?tyre, ?maxLaps), 
+		?laps = ?curLaps + ?remainingLaps, ?laps =< ?maxLaps, tyreChange(Axle, ?tyres, ?remainingLaps)
+
+tyreMaxLaps(Axle, FL, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.Front, !Tyre.Compound.Color.Front, Laps.Max, ?maxLaps)
+tyreMaxLaps(Axle, FR, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.Front, !Tyre.Compound.Color.Front, Laps.Max, ?maxLaps)
+tyreMaxLaps(Axle, RL, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.Rear, !Tyre.Compound.Color.Rear, Laps.Max, ?maxLaps)
+tyreMaxLaps(Axle, RR, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.Rear, !Tyre.Compound.Color.Rear, Laps.Max, ?maxLaps)
+
+{All: [?Pitstop.Plan], [?Tyre.Compound.Target.FrontLeft], [?Session.Settings.Tyre.Service = Wheel],
+	  {None: [?Pitstop.Planned.Tyre.Compound.FrontLeft], [?Pitstop.Planned.Tyre.Compound.FrontLeft = false]},
+	  {Prove: tyreChange(Wheel, FrontLeft, !Pitstop.Planned.Laps.Remaining, ?tyreCompound, ?tyreCompoundColor)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontLeft, ?tyreCompound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, ?tyreCompoundColor)
+{All: [?Pitstop.Plan], [?Tyre.Compound.Target.FrontRight], [?Session.Settings.Tyre.Service = Wheel],
+	  {None: [?Pitstop.Planned.Tyre.Compound.FrontRight], [?Pitstop.Planned.Tyre.Compound.FrontRight = false]},
+	  {Prove: tyreChange(Wheel, FrontRight, !Pitstop.Planned.Laps.Remaining, ?tyreCompound, ?tyreCompoundColor)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontRight, ?tyreCompound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, ?tyreCompoundColor)
+
+tyreChange(Wheel, FrontLeft, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Wear,
+		!Tyre.Compound.Target.FrontLeft = !Tyre.Compound.FrontLeft,
+		!Tyre.Compound.Color.Target.FrontLeft = !Tyre.Compound.Color.FrontLeft,
+		lapAvgTyreWear(!Lap, FL, ?avgWear), lapTyreWear(!Lap, FULL, FL, ?wear), ?remainingWear = ?remainingLaps * ?avgWear,
+		?targetWear = ?wear + ?remainingWear, ?threshold = 100 - !Session.Settings.Tyre.Tread.Minimum, ?targetWear =< ?threshold, !
+tyreChange(Wheel, FrontLeft, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Laps,
+		!Tyre.Compound.Target.FrontLeft = !Tyre.Compound.FrontLeft,
+		!Tyre.Compound.Color.Target.FrontLeft = !Tyre.Compound.Color.FrontLeft,
+		tyreChange(Wheel, [FL], ?remainingLaps), !
+tyreChange(Wheel, FrontLeft, ?, !Tyre.Compound.Target.FrontLeft, !Tyre.Compound.Color.Target.FrontLeft)
+
+tyreChange(Wheel, FrontRight, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Wear,
+		!Tyre.Compound.Target.FrontRight = !Tyre.Compound.FrontRight,
+		!Tyre.Compound.Color.Target.FrontRight = !Tyre.Compound.Color.FrontRight,
+		lapAvgTyreWear(!Lap, FR, ?avgWear), lapTyreWear(!Lap, FULL, FR, ?wear), ?remainingWear = ?remainingLaps * ?avgWear,
+		?targetWear = ?wear + ?remainingWear, ?threshold = 100 - !Session.Settings.Tyre.Tread.Minimum, ?targetWear =< ?threshold, !
+tyreChange(Wheel, FrontRight, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Laps,
+		!Tyre.Compound.Target.FrontRight = !Tyre.Compound.FrontRight,
+		!Tyre.Compound.Color.Target.FrontRight = !Tyre.Compound.Color.FrontRight,
+		tyreChange(Wheel, [FR], ?remainingLaps), !
+tyreChange(Wheel, FrontRight, ?, !Tyre.Compound.Target.FrontRight, !Tyre.Compound.Color.Target.FrontRight)
+
+{All: [?Pitstop.Plan], [?Tyre.Compound.Target.RearLeft], [?Session.Settings.Tyre.Service = Wheel],
+	  {None: [?Pitstop.Planned.Tyre.Compound.RearLeft], [?Pitstop.Planned.Tyre.Compound.RearLeft = false]},
+	  {Prove: tyreChange(Wheel, RearLeft, !Pitstop.Planned.Laps.Remaining, ?tyreCompound, ?tyreCompoundColor)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearLeft, ?tyreCompound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, ?tyreCompoundColor)
+{All: [?Pitstop.Plan], [?Tyre.Compound.Target.RearRight], [?Session.Settings.Tyre.Service = Wheel],
+	  {None: [?Pitstop.Planned.Tyre.Compound.RearRight], [?Pitstop.Planned.Tyre.Compound.RearRight = false]},
+	  {Prove: tyreChange(Wheel, RearRight, !Pitstop.Planned.Laps.Remaining, ?tyreCompound, ?tyreCompoundColor)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearRight, ?tyreCompound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, ?tyreCompoundColor)
+
+tyreChange(Wheel, RearLeft, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Wear,
+		!Tyre.Compound.Target.RearLeft = !Tyre.Compound.RearLeft,
+		!Tyre.Compound.Color.Target.RearLeft = !Tyre.Compound.Color.RearLeft,
+		lapAvgTyreWear(!Lap, RL, ?avgWear), lapTyreWear(!Lap, FULL, RL, ?wear), ?remainingWear = ?remainingLaps * ?avgWear,
+		?targetWear = ?wear + ?remainingWear, ?threshold = 100 - !Session.Settings.Tyre.Tread.Minimum, ?targetWear =< ?threshold, !
+tyreChange(Wheel, RearLeft, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Laps,
+		!Tyre.Compound.Target.RearLeft = !Tyre.Compound.RearLeft,
+		!Tyre.Compound.Color.Target.RearLeft = !Tyre.Compound.Color.RearLeft,
+		tyreChange(Wheel, [RL], ?remainingLaps), !
+tyreChange(Wheel, RearLeft, ?, !Tyre.Compound.Target.RearLeft, !Tyre.Compound.Color.Target.RearLeft)
+
+tyreChange(Wheel, RearRight, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Wear,
+		!Tyre.Compound.Target.RearRight = !Tyre.Compound.RearRight,
+		!Tyre.Compound.Color.Target.RearRight = !Tyre.Compound.Color.RearRight,
+		lapAvgTyreWear(!Lap, RR, ?avgWear), lapTyreWear(!Lap, FULL, RR, ?wear), ?remainingWear = ?remainingLaps * ?avgWear,
+		?targetWear = ?wear + ?remainingWear, ?threshold = 100 - !Session.Settings.Tyre.Tread.Minimum, ?targetWear =< ?threshold, !
+tyreChange(Wheel, RearRight, ?remainingLaps, false, false) <=
+		!Session.Settings.Tyre.Change = Laps,
+		!Tyre.Compound.Target.RearRight = !Tyre.Compound.RearRight,
+		!Tyre.Compound.Color.Target.RearRight = !Tyre.Compound.Color.RearRight,
+		tyreChange(Wheel, [RR], ?remainingLaps), !
+tyreChange(Wheel, RearRight, ?, !Tyre.Compound.Target.RearRight, !Tyre.Compound.Color.Target.RearRight)
+
+tyreChange(Wheel, [], ?)
+tyreChange(Wheel, [?tyre | ?tyres], ?remainingLaps) <=
+		Get(Tyre, ?tyre, Laps, ?curLaps), tyreMaxLaps(Wheel, ?tyre, ?maxLaps),
+		?laps = ?curLaps + ?remainingLaps, ?laps =< ?maxLaps, tyreChange(Wheel, ?tyres, ?remainingLaps)
+
+tyreMaxLaps(Wheel, FL, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.FrontLeft, !Tyre.Compound.Color.FrontLeft, Laps.Max, ?maxLaps)
+tyreMaxLaps(Wheel, FR, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.FrontRight, !Tyre.Compound.Color.FrontRight, Laps.Max, ?maxLaps)
+tyreMaxLaps(Wheel, RL, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.RearLeft, !Tyre.Compound.Color.RearLeft, Laps.Max, ?maxLaps)
+tyreMaxLaps(Wheel, RR, ?maxLaps) <= Get(Session.Settings.Tyre, !Tyre.Compound.RearRight, !Tyre.Compound.Color.RearRight, Laps.Max, ?maxLaps)
+
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Tyre.Change = false], [?Session.Settings.Pitstop.Service.Tyres = Off]},
+	  {Prove: unevenTyreWear(!Session.Settings.Tyre.Service, Front)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontLeft, !Tyre.Compound.Target.FrontLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, !Tyre.Compound.Color.Target.FrontLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.FrontRight, !Tyre.Compound.Target.FrontRight),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, !Tyre.Compound.Color.Target.FrontRight)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Tyre.Change = false], [?Session.Settings.Pitstop.Service.Tyres = Off]},
+	  {Prove: wheelWearDifference(!Session.Settings.Tyre.Service, Rear)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearLeft, !Tyre.Compound.Target.RearLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, !Tyre.Compound.Color.Target.RearLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.RearRight, !Tyre.Compound.Target.RearRight),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, !Tyre.Compound.Color.Target.RearRight)
+
+unevenTyreWear(Wheel, Front) <= pitstopTyreWear(Wheel, FrontLeft, ?flWear), pitstopTyreWear(Wheel, FrontRight, ?frWear),
+								?difference = ?flWear - ?frWear, abs(?difference, ?absDifference),
+								?absDifference > !Session.Settings.Tyre.Change.Wear.Wheel.Difference
+unevenTyreWear(Wheel, Rear) <= pitstopTyreWear(Wheel, RearLeft, ?rlWear), pitstopTyreWear(Wheel, RearRight, ?rrWear),
+							   ?difference = ?rlWear - ?rrWear, abs(?difference, ?absDifference),
+							   ?absDifference > !Session.Settings.Tyre.Change.Wear.Wheel.Difference
+
+pitstopTyreWear(Wheel, FrontLeft, 0) <= !Pitstop.Planned.Tyre.Compound.FrontLeft != false, !
+pitstopTyreWear(Axle, FrontLeft, 0) <= !Pitstop.Planned.Tyre.Compound.Front != false, !
+pitstopTyreWear(All, FrontLeft, 0) <= !Pitstop.Planned.Tyre.Compound != false, !
+pitstopTyreWear(?, FrontLeft, ?wear) <= lapTyreWear(!Lap, FULL, FL, ?wear)
+pitstopTyreWear(Wheel, FrontRight, 0) <= !Pitstop.Planned.Tyre.Compound.FrontRight != false, !
+pitstopTyreWear(Axle, FrontRight, 0) <= !Pitstop.Planned.Tyre.Compound.Front != false, !
+pitstopTyreWear(All, FrontRight, 0) <= !Pitstop.Planned.Tyre.Compound != false, !
+pitstopTyreWear(?, FrontRight, ?wear) <= lapTyreWear(!Lap, FULL, FR, ?wear)
+pitstopTyreWear(Wheel, RearLeft, 0) <= !Pitstop.Planned.Tyre.Compound.RearLeft != false, !
+pitstopTyreWear(Axle, RearLeft, 0) <= !Pitstop.Planned.Tyre.Compound.Rear != false, !
+pitstopTyreWear(All, RearLeft, 0) <= !Pitstop.Planned.Tyre.Compound != false, !
+pitstopTyreWear(?, RearLeft, ?wear) <= lapTyreWear(!Lap, FULL, RL, ?wear)
+pitstopTyreWear(Wheel, RearRight, 0) <= !Pitstop.Planned.Tyre.Compound.RearRight != false, !
+pitstopTyreWear(Axle, RearRight, 0) <= !Pitstop.Planned.Tyre.Compound.Rear != false, !
+pitstopTyreWear(All, RearRight, 0) <= !Pitstop.Planned.Tyre.Compound != false, !
+pitstopTyreWear(?, RearRight, ?wear) <= lapTyreWear(!Lap, FULL, RR, ?wear)
+
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Tyre.Change = false], [?Session.Settings.Pitstop.Service.Tyres = Off]},
+	  {Prove: unevenTyreWear(Axle, Front, !Session.Settings.Tyre.Service)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontLeft, !Tyre.Compound.Target.FrontLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, !Tyre.Compound.Color.Target.FrontLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.FrontRight, !Tyre.Compound.Target.FrontRight),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, !Tyre.Compound.Color.Target.FrontRight)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Tyre.Change = false], [?Session.Settings.Pitstop.Service.Tyres = Off]},
+	  {Prove: unevenTyreWear(Axle, Rear, !Session.Settings.Tyre.Service)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearLeft, !Tyre.Compound.Target.RearLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, !Tyre.Compound.Color.Target.RearLeft),
+		(Set: Pitstop.Planned.Tyre.Compound.RearRight, !Tyre.Compound.Target.RearRight),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, !Tyre.Compound.Color.Target.RearRight)
+
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Tyre.Change = false], [?Session.Settings.Pitstop.Service.Tyres = Off]},
+	  {Prove: unevenTyreWear(Axle, Front, !Session.Settings.Tyre.Service)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Front, !Tyre.Compound.Target.Front),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Front, !Tyre.Compound.Color.Target.Front)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Tyre.Change = false], [?Session.Settings.Pitstop.Service.Tyres = Off]},
+	  {Prove: unevenTyreWear(Axle, Rear, !Session.Settings.Tyre.Service)}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Rear, !Tyre.Compound.Target.Rear),
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Rear, !Tyre.Compound.Color.Target.Rear)
+		
+unevenTyreWear(Axle, Front, Wheel) <= pitstopTyreWear(Wheel, Front, ?fWear), pitstopTyreWear(Wheel, Rear, ?rWear),
+									  ?difference = ?fWear - ?rWear, ?difference > !Session.Settings.Tyre.Change.Wear.Axle.Difference
+unevenTyreWear(Axle, Rear, Wheel) <= pitstopTyreWear(Wheel, Front, ?fWear), pitstopTyreWear(Wheel, Rear, ?rWear),
+									 ?difference = ?rWear - ?fWear, ?difference > !Session.Settings.Tyre.Change.Wear.Axle.Difference
+
+unevenTyreWear(Axle, Front, Axle) <= pitstopTyreWear(Axle, Front, ?fWear), pitstopTyreWear(Axle, Rear, ?rWear),
+									 ?difference = ?fWear - ?rWear, ?difference > !Session.Settings.Tyre.Change.Wear.Axle.Difference
+unevenTyreWear(Axle, Rear, Axle) <= pitstopTyreWear(Axle, Front, ?fWear), pitstopTyreWear(Axle, Rear, ?rWear),
+									?difference = ?rWear - ?fWear, ?difference > !Session.Settings.Tyre.Change.Wear.Axle.Difference
+
+pitstopTyreWear(?service, Front, ?wear) <= pitstopTyreWear(?service, FrontLeft, ?flWear),
+										   pitstopTyreWear(?service, FrontRight, ?frWear), max(?flWear, ?frWear, ?wear)
+pitstopTyreWear(?service, Rear, ?wear) <= pitstopTyreWear(?service, RearLeft, ?rlWear),
+										  pitstopTyreWear(?service, RearRight, ?rrWear), max(?rlWear, ?rrWear, ?wear)
+										  
+{All: [?Pitstop.Plan], [?Session.Settings.Tyre.Service = Wheel],
+	  [?Pitstop.Planned.Tyre.Compound.FrontLeft != false]} =>
+		(Prove: updateTyreCompoundColor(!Lap, !Pitstop.Planned.Laps.Remaining, FrontLeft))
+{All: [?Pitstop.Plan], [?Session.Settings.Tyre.Service = Wheel],
+	  [?Pitstop.Planned.Tyre.Compound.FrontRight != false]} =>
+		(Prove: updateTyreCompoundColor(!Lap, !Pitstop.Planned.Laps.Remaining, FrontRight))
+{All: [?Pitstop.Plan], [?Session.Settings.Tyre.Service = Wheel],
+	  [?Pitstop.Planned.Tyre.Compound.RearLeft != false]} =>
+		(Prove: updateTyreCompoundColor(!Lap, !Pitstop.Planned.Laps.Remaining, RearLeft))
+{All: [?Pitstop.Plan], [?Session.Settings.Tyre.Service = Wheel],
+	  [?Pitstop.Planned.Tyre.Compound.RearRight != false]} =>
+		(Prove: updateTyreCompoundColor(!Lap, !Pitstop.Planned.Laps.Remaining, RearRight))
+
+{All: [?Pitstop.Plan], [?Session.Settings.Tyre.Service = Axle],
+	  [?Pitstop.Planned.Tyre.Compound.Front != false]} =>
+		(Prove: updateTyreCompoundColor(!Lap, !Pitstop.Planned.Laps.Remaining, Front))
+{All: [?Pitstop.Plan], [?Session.Settings.Tyre.Service = Axle],
+	  [?Pitstop.Planned.Tyre.Compound.Rear != false]} =>
+		(Prove: updateTyreCompoundColor(!Lap, !Pitstop.Planned.Laps.Remaining, Rear))
+
+{All: [?Pitstop.Plan], [?Session.Settings.Tyre.Service = All],
+	  [?Pitstop.Planned.Tyre.Compound != false]} =>
+		(Prove: updateTyreCompoundColor(!Lap, !Pitstop.Planned.Laps.Remaining))
+
+updateTyreCompoundColor(?lap, ?remainingLaps, ?position) <=
+		Get(Pitstop.Planned.Tyre.Compound, ?position, ?compound), Get(Pitstop.Planned.Tyre.Compound.Color, ?position, ?compoundColor),
+		:%RaceEngineer.Instance.pitstopTyreCompoundColor%=(?remainingLaps,
+														   !Tyre.Weather.Target, !Weather.Temperature, !Track.Temperature,
+														   ?compound, ?compoundColor, ?newCompoundColor),
+		?compoundColor != ?newCompoundColor, Set(Pitstop.Planned.Tyre.Compound.Color, ?position, ?newCompoundColor)
+		
+updateTyreCompoundColor(?lap, ?remainingLaps) <=
+		:%RaceEngineer.Instance.pitstopTyreCompoundColor%=(?remainingLaps,
+														   !Tyre.Weather.Target, !Weather.Temperature, !Track.Temperature,
+														   !Pitstop.Planned.Tyre.Compound, !Pitstop.Planned.Tyre.Compound.Color, 
+														   ?newCompoundColor),
+		!Pitstop.Planned.Tyre.Compound.Color != ?newCompoundColor, Set(Pitstop.Planned.Tyre.Compound.Color, ?newCompoundColor)
+
+{All: [?Pitstop.Plan], [?Tyre.Set.Target], {None: [?Pitstop.Planned.Tyre.Set], [?Pitstop.Planned.Tyre.Compound = false]}} =>
+		(Set: Pitstop.Planned.Tyre.Set, ?Tyre.Set.Target)
+
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Target.FL],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.FL],
+			 {Any: [?Pitstop.Planned.Tyre.Compound = false], [?Pitstop.Planned.Tyre.Compound.Front = false],
+				   [?Pitstop.Planned.Tyre.Compound.FrontLeft = false]}}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FL, ?Tyre.Pressure.Target.FL),
+		(Set: Pitstop.Planned.Tyre.Pressure.FL.Increment, !Tyre.Pressure.Target.FL.Increment)
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Target.FR],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.FR],
+			 {Any: [?Pitstop.Planned.Tyre.Compound = false], [?Pitstop.Planned.Tyre.Compound.Front = false],
+				   [?Pitstop.Planned.Tyre.Compound.FrontRight = false]}}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FR, ?Tyre.Pressure.Target.FR),
+		(Set: Pitstop.Planned.Tyre.Pressure.FR.Increment, !Tyre.Pressure.Target.FR.Increment)
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Target.RL],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.RL],
+			 {Any: [?Pitstop.Planned.Tyre.Compound = false], [?Pitstop.Planned.Tyre.Compound.Rear = false],
+				   [?Pitstop.Planned.Tyre.Compound.RearLeft = false]}}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RL, ?Tyre.Pressure.Target.RL),
+		(Set: Pitstop.Planned.Tyre.Pressure.RL.Increment, !Tyre.Pressure.Target.RL.Increment)
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Target.RR],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.RR],
+			 {Any: [?Pitstop.Planned.Tyre.Compound = false], [?Pitstop.Planned.Tyre.Compound.Rear = false],
+				   [?Pitstop.Planned.Tyre.Compound.RearRight = false]}}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RR, ?Tyre.Pressure.Target.RR),
+		(Set: Pitstop.Planned.Tyre.Pressure.RR.Increment, !Tyre.Pressure.Target.RR.Increment)
+{All: [?Pitstop.Plan], [?Tyre.Pressure.Target.Correction],
+	  {None: [?Pitstop.Planned.Tyre.Pressure.Correction], [?Pitstop.Planned.Tyre.Compound = false]}} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.Correction, ?Tyre.Pressure.Target.Correction)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Tyre.Change = false], [?Tyre.Compound.Target], [?Pitstop.Plan.Tyre.Compound]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound, !Session.Setup.Tyre.Compound),
+		(Set: Pitstop.Planned.Tyre.Compound.Color, !Session.Setup.Tyre.Compound.Color)	
+
+{All: [?Pitstop.Plan], [?Brake.Change.Target], {None: [?Pitstop.Planned.Brake.Change]}} =>
+		(Set: Pitstop.Planned.Brake.Change, ?Brake.Change.Target)
+		
+{All: [?Pitstop.Plan], [?Damage.Repair.Suspension.Target], {None: [?Pitstop.Planned.Repair.Suspension]}} =>
+		(Set: Pitstop.Planned.Repair.Suspension, ?Damage.Repair.Suspension.Target)
+{All: [?Pitstop.Plan], [?Damage.Repair.Bodywork.Target], {None: [?Pitstop.Planned.Repair.Bodywork]}} =>
+		(Set: Pitstop.Planned.Repair.Bodywork, ?Damage.Repair.Bodywork.Target)
+{All: [?Pitstop.Plan], [?Damage.Repair.Engine.Target], {None: [?Pitstop.Planned.Repair.Engine]}} =>
+		(Set: Pitstop.Planned.Repair.Engine, ?Damage.Repair.Engine.Target)
+		
+{All: [?Pitstop.Plan], {None: [?Tyre.Set.Target], [?Pitstop.Plan.Tyre.Set]}} => (Set: Pitstop.Planned.Tyre.Set, !Session.Setup.Tyre.Set.Fresh)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.FL]}, [?Pitstop.Plan.Tyre.Pressure.FL], [?Pitstop.Planned.Tyre.Compound = Dry]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FL, !Session.Setup.Tyre.Dry.Pressure.FL), (Set: Pitstop.Planned.Tyre.Pressure.FL.Increment, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.FR]}, [?Pitstop.Plan.Tyre.Pressure.FR], [?Pitstop.Planned.Tyre.Compound = Dry]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FR, !Session.Setup.Tyre.Dry.Pressure.FR), (Set: Pitstop.Planned.Tyre.Pressure.FR.Increment, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.RL]}, [?Pitstop.Plan.Tyre.Pressure.RL], [?Pitstop.Planned.Tyre.Compound = Dry]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RL, !Session.Setup.Tyre.Dry.Pressure.RL), (Set: Pitstop.Planned.Tyre.Pressure.RL.Increment, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.RR]}, [?Pitstop.Plan.Tyre.Pressure.RR], [?Pitstop.Planned.Tyre.Compound = Dry]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RR, !Session.Setup.Tyre.Dry.Pressure.RR), (Set: Pitstop.Planned.Tyre.Pressure.RR.Increment, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.FL]}, [?Pitstop.Plan.Tyre.Pressure.FL], [?Pitstop.Planned.Tyre.Compound = Wet]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FL, !Session.Setup.Tyre.Wet.Pressure.FL), (Set: Pitstop.Planned.Tyre.Pressure.FL.Increment, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.FR]}, [?Pitstop.Plan.Tyre.Pressure.FR], [?Pitstop.Planned.Tyre.Compound = Wet]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.FR, !Session.Setup.Tyre.Wet.Pressure.FR), (Set: Pitstop.Planned.Tyre.Pressure.FR.Increment, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.RL]}, [?Pitstop.Plan.Tyre.Pressure.RL], [?Pitstop.Planned.Tyre.Compound = Wet]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RL, !Session.Setup.Tyre.Wet.Pressure.RL), (Set: Pitstop.Planned.Tyre.Pressure.RL.Increment, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Target.RR]}, [?Pitstop.Plan.Tyre.Pressure.RR], [?Pitstop.Planned.Tyre.Compound = Wet]} =>
+		(Set: Pitstop.Planned.Tyre.Pressure.RR, !Session.Setup.Tyre.Wet.Pressure.RR), (Set: Pitstop.Planned.Tyre.Pressure.RR.Increment, 0)
+		
+{All: [?Pitstop.Plan], {None: [?Pitstop.Planned.Repair.Suspension]}} => (Set: Pitstop.Planned.Repair.Suspension, false)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Planned.Repair.Bodywork]}} => (Set: Pitstop.Planned.Repair.Bodywork, false)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Planned.Repair.Engine]}} => (Set: Pitstop.Planned.Repair.Engine, false)
+{All: [?Pitstop.Plan], {None: [?Pitstop.Plan.Driver.Request]}} => (Set: Pitstop.Planned.Driver.Request, false)
+
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Loss.FL]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.FL, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Loss.FR]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.FR, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Loss.RL]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.RL, 0)
+{All: [?Pitstop.Plan], {None: [?Tyre.Pressure.Loss.RR]}} => (Set: Pitstop.Planned.Tyre.Pressure.Lost.RR, 0)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Axle], [?Pitstop.Planned.Tyre.Compound],
+				   {None: [Pitstop.Planned.Tyre.Compound.Front]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Front, ?Pitstop.Planned.Tyre.Compound)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Axle], [?Pitstop.Planned.Tyre.Compound],
+				   {None: [Pitstop.Planned.Tyre.Compound.Rear]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Rear, ?Pitstop.Planned.Tyre.Compound)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Axle], [?Pitstop.Planned.Tyre.Compound.Color],
+				   {None: [Pitstop.Planned.Tyre.Compound.Color.Front]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Front, ?Pitstop.Planned.Tyre.Compound.Color)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Axle], [?Pitstop.Planned.Tyre.Compound.Color],
+				   {None: [Pitstop.Planned.Tyre.Compound.Color.Rear]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.Rear, ?Pitstop.Planned.Tyre.Compound.Color)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound],
+				   {None: [Pitstop.Planned.Tyre.Compound.FrontLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontLeft, ?Pitstop.Planned.Tyre.Compound)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound],
+				   {None: [Pitstop.Planned.Tyre.Compound.FrontRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.FrontRight, ?Pitstop.Planned.Tyre.Compound)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound],
+				   {None: [Pitstop.Planned.Tyre.Compound.RearLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearLeft, ?Pitstop.Planned.Tyre.Compound)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound],
+				   {None: [Pitstop.Planned.Tyre.Compound.RearRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.RearRight, ?Pitstop.Planned.Tyre.Compound)
+
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound.Color],
+				   {None: [Pitstop.Planned.Tyre.Compound.Color.FrontLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, ?Pitstop.Planned.Tyre.Compound.Color)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound.Color],
+				   {None: [Pitstop.Planned.Tyre.Compound.Color.FrontRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, ?Pitstop.Planned.Tyre.Compound.Color)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound.Color],
+				   {None: [Pitstop.Planned.Tyre.Compound.Color.RearLeft]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, ?Pitstop.Planned.Tyre.Compound.Color)
+priority: 5, {All: [?Session.Settings.Tyre.Service = Wheel], [?Pitstop.Planned.Tyre.Compound.Color],
+				   {None: [Pitstop.Planned.Tyre.Compound.Color.RearRight]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, ?Pitstop.Planned.Tyre.Compound.Color)
+
+priority: -5, {All: [?Pitstop.Plan],
+					[?Lap.Remaining.Session <= ?Session.Settings.Pitstop.Service.Last],
+					{None: [?Pitstop.Plan.Tyre.Change = true]}} =>
+		(Set: Pitstop.Planned.Tyre.Compound, false), (Set: Pitstop.Planned.Tyre.Compound.Color, false),
+		(Set: Pitstop.Planned.Tyre.Compound.Front, false), (Set: Pitstop.Planned.Tyre.Compound.Color.Front, false),
+		(Set: Pitstop.Planned.Tyre.Compound.Rear, false), (Set: Pitstop.Planned.Tyre.Compound.Color.Rear, false),
+		(Set: Pitstop.Planned.Tyre.Compound.FrontLeft, false), (Set: Pitstop.Planned.Tyre.Compound.Color.FrontLeft, false),
+		(Set: Pitstop.Planned.Tyre.Compound.FrontRight, false), (Set: Pitstop.Planned.Tyre.Compound.Color.FrontRight, false),
+		(Set: Pitstop.Planned.Tyre.Compound.RearLeft, false), (Set: Pitstop.Planned.Tyre.Compound.Color.RearLeft, false),
+		(Set: Pitstop.Planned.Tyre.Compound.RearRight, false), (Set: Pitstop.Planned.Tyre.Compound.Color.RearRight, false),
+		(Set: Pitstop.Planned.Tyre.Set, false)
+
+{All: [?Pitstop.Plan], {None: [?Pitstop.Planned.Tyre.Set]}} => (Set: Pitstop.Planned.Tyre.Set, false)
+
+priority: -5, [?Pitstop.Plan] => (Prove: updatePitstopTime())
+
+updatePitstopTime() <= computePitstopDamages(?damages),
+					   pitstopDeltaTime(!Lap, !Pitstop.Planned.Fuel, !Pitstop.Planned.Tyre.Compound,
+											  !Pitstop.Planned.Brake.Change, ?damages, ?pitstopServiceTime, ?pitstopRepairTime, ?pitlaneDelta),
+					   ?pitstopTime = ?pitstopServiceTime + ?pitstopRepairTime,
+					   Set(Pitstop.Planned.Time.Box, ?pitstopTime), Set(Pitstop.Planned.Time.Pitlane, ?pitlaneDelta), 
+					   Set(Pitstop.Planned.Time.Service, ?pitstopServiceTime), Set(Pitstop.Planned.Time.Repairs, ?pitstopRepairTime)
+
+computePitstopDamages(?damages) <=
+		computeDamages([!Pitstop.Planned.Repair.Bodywork, !Pitstop.Planned.Repair.Suspension, !Pitstop.Planned.Repair.Engine],
+					   [!Damage.Bodywork, !Damage.Suspension, !Damage.Engine], ?damages)
+
+priority: -20, [?Pitstop.Plan] => (Set: Pitstop.Planned, !Lap),
+								  (Clear: Pitstop.Plan), (Clear: Pitstop.Plan.Lap),
+								  (Clear: Pitstop.Plan.Fuel.Amount), (Clear: Pitstop.Plan.Tyre.Change), (Clear: Pitstop.Plan.Tyre.Set),
+								  (Clear: Pitstop.Plan.Tyre.Compound), (Clear: Pitstop.Plan.Tyre.Compound.Color),
+								  (Clear: Pitstop.Plan.Tyre.Compound.Front), (Clear: Pitstop.Plan.Tyre.Compound.Color.Front),
+								  (Clear: Pitstop.Plan.Tyre.Compound.FrontLeft), (Clear: Pitstop.Plan.Tyre.Compound.Color.FrontLeft),
+								  (Clear: Pitstop.Plan.Tyre.Compound.FrontRight), (Clear: Pitstop.Plan.Tyre.Compound.Color.FrontRight),
+								  (Clear: Pitstop.Plan.Tyre.Compound.Rear), (Clear: Pitstop.Plan.Tyre.Compound.Color.Rear),
+								  (Clear: Pitstop.Plan.Tyre.Compound.RearLeft), (Clear: Pitstop.Plan.Tyre.Compound.Color.RearLeft),
+								  (Clear: Pitstop.Plan.Tyre.Compound.RearRight), (Clear: Pitstop.Plan.Tyre.Compound.Color.RearRight),
+								  (Clear: Pitstop.Plan.Tyre.Pressure.FL), (Clear: Pitstop.Plan.Tyre.Pressure.FR),
+								  (Clear: Pitstop.Plan.Tyre.Pressure.RL), (Clear: Pitstop.Plan.Tyre.Pressure.RR),
+								  (Clear: Pitstop.Plan.Repair.Bodywork), (Clear: Pitstop.Plan.Repair.Suspension),
+								  (Clear: Pitstop.Plan.Repair.Engine),
+								  (Clear: Pitstop.Plan.Brake.Change), (Clear: Pitstop.Plan.Driver.Request)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Pitstop Preparation                          ;;;
+;;;                                                                         ;;;
+;;; Transfers the previously planned pitstop settings to the simulation.    ;;;
+;;;-------------------------------------------------------------------------;;;
+
+{All: [?Pitstop.Planned], [?Pitstop.Planned.Lap > 0], [?Pitstop.Planned.Lap <= ?Lap]} => (Set: Pitstop.Prepare)
+
+{All: [?Pitstop.Planned], [?Pitstop.Prepare],
+	  {None: [?InPitlane = true], [?InPit = true]}} => (Set: Pitstop.Set), (ProveAll: preparePitstop(!Pitstop.Planned.Nr))
+priority: -20, [?Pitstop.Set] => (Clear: Pitstop.Planned), (Clear: Pitstop.Planned.Adjusted),
+								 (Clear: Pitstop.Prepare), (Clear: Pitstop.Set), (Set: Pitstop.Prepared, !Lap)
+
+preparePitstop(?pitstopNumber) <= Call(startPitstopSetup, ?pitstopNumber)
+preparePitstop(?pitstopNumber) <= setRefuelAmount(?pitstopNumber),
+								  setTyreCompound(?pitstopNumber), setTyrePressures(?pitstopNumber),
+								  setBrakeChange(?pitstopNumber),
+								  requestRepairs(?pitstopNumber), requestDriver(?pitstopNumber)
+preparePitstop(?pitstopNumber) <= Call(finishPitstopSetup, ?pitstopNumber)
+
+setRefuelAmount(?pitstopNumber) <= !Session.Settings.Pitstop.Service.Refuel = true, !,
+								   Call(setPitstopRefuelAmount, ?pitstopNumber, !Pitstop.Planned.Fuel)
+setRefuelAmount(?)
+
+setTyreCompound(?pitstopNumber) <= !Session.Settings.Tyre.Service = Axle, !Session.Settings.Pitstop.Service.Tyres != Off, !,
+								   Append(!Pitstop.Planned.Tyre.Compound.Front, ",", !Pitstop.Planned.Tyre.Compound.Rear, ?compound),
+								   Append(!Pitstop.Planned.Tyre.Compound.Color.Front, ",", !Pitstop.Planned.Tyre.Compound.Color.Rear, ?color),
+								   Call(setPitstopTyreCompound, ?pitstopNumber, ?compound, ?color, !Pitstop.Planned.Tyre.Set)
+setTyreCompound(?pitstopNumber) <= !Session.Settings.Tyre.Service = Wheel, !Session.Settings.Pitstop.Service.Tyres != Off, !,
+								   Append(!Pitstop.Planned.Tyre.Compound.FrontLeft, ",", !Pitstop.Planned.Tyre.Compound.FrontRight, ",",
+										  !Pitstop.Planned.Tyre.Compound.RearLeft, ",", !Pitstop.Planned.Tyre.Compound.RearRight, ?compound),
+								   Append(!Pitstop.Planned.Tyre.Compound.Color.FrontLeft, ",",
+										  !Pitstop.Planned.Tyre.Compound.Color.FrontRight, ",",
+										  !Pitstop.Planned.Tyre.Compound.Color.RearLeft, ",",
+										  !Pitstop.Planned.Tyre.Compound.Color.RearRight, ?color),
+								   Call(setPitstopTyreCompound, ?pitstopNumber, ?compound, ?color, !Pitstop.Planned.Tyre.Set)
+setTyreCompound(?pitstopNumber) <= !Session.Settings.Pitstop.Service.Tyres != Off, !,
+								   Call(setPitstopTyreCompound, ?pitstopNumber,
+										!Pitstop.Planned.Tyre.Compound, !Pitstop.Planned.Tyre.Compound.Color, !Pitstop.Planned.Tyre.Set)
+setTyreCompound(?)
+
+setTyrePressures(?pitstopNumber) <= !Session.Settings.Pitstop.Service.Tyres = Full, !Pitstop.Planned.Tyre.Compound = false, !
+setTyrePressures(?pitstopNumber) <=
+		!Session.Settings.Pitstop.Service.Tyres = Full, !,
+		Call(setPitstopTyrePressures, ?pitstopNumber,
+									  !Pitstop.Planned.Tyre.Pressure.FL, !Pitstop.Planned.Tyre.Pressure.FR,
+									  !Pitstop.Planned.Tyre.Pressure.RL, !Pitstop.Planned.Tyre.Pressure.RR)
+setTyrePressures(?)
+
+setBrakeChange(?pitstopNumber) <= !Session.Settings.Pitstop.Service.Brakes != Off, !,
+								  Call(setPitstopBrakeChange, ?pitstopNumber, !Pitstop.Planned.Brake.Change)
+setBrakeChange(?)
+
+requestRepairs(?pitstopNumber) <= !Session.Settings.Pitstop.Service.Repairs = true, !,
+								  Call(requestPitstopRepairs, ?pitstopNumber,
+															  !Pitstop.Planned.Repair.Suspension,
+															  !Pitstop.Planned.Repair.Bodywork,
+															  !Pitstop.Planned.Repair.Engine)
+requestRepairs(?)
+
+requestDriver(?pitstopNumber) <= Call(requestPitstopDriver, ?pitstopNumber, !Pitstop.Planned.Driver.Request)
+
+[?Pitstop.Update = true] => (Prove: updatePitstopTime()), (Clear: Pitstop.Update)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Pitstop Performed                           ;;;
+;;;                                                                         ;;;
+;;; After a pitstop has been performed, the pitstop plan is copied to the   ;;;
+;;; history memory as a reference for future calculations.                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Pitstop.Lap] => (ProveAll: pitstopPerformed(?Pitstop.Lap))
+
+pitstopPerformed(?lap) <= unbound?(!Pitstop.Prepared), !, unpreparedPitstopPerformed(?lap), fail
+
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Lap, ?lap)
+pitstopPerformed(?lap) <= Get(Lap, ?lap, Time.End, ?time), Set(Pitstop, !Pitstop.Planned.Nr, Time, ?time)
+pitstopPerformed(?lap) <= Get(Lap, ?lap, Temperature.Air, ?temp), Set(Pitstop, !Pitstop.Planned.Nr, Temperature.Air, ?temp)
+pitstopPerformed(?lap) <= Get(Lap, ?lap, Temperature.Track, ?temp), Set(Pitstop, !Pitstop.Planned.Nr, Temperature.Track, ?temp)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Fuel, !Pitstop.Planned.Fuel)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound, !Pitstop.Planned.Tyre.Compound),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Color, !Pitstop.Planned.Tyre.Compound.Color),
+						  Set(Tyre.Compound, !Pitstop.Planned.Tyre.Compound), Set(Tyre.Compound.Color, !Pitstop.Planned.Tyre.Compound.Color)
+pitstopPerformed(?lap) <= !Session.Settings.Tyre.Service = Axle,
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Front, !Pitstop.Planned.Tyre.Compound.Front),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Rear, !Pitstop.Planned.Tyre.Compound.Rear),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Color.Front, !Pitstop.Planned.Tyre.Compound.Color.Front),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Color.Rear, !Pitstop.Planned.Tyre.Compound.Color.Rear),
+						  Set(Tyre.Compound.Front, !Pitstop.Planned.Tyre.Compound.Front),
+						  Set(Tyre.Compound.Rear, !Pitstop.Planned.Tyre.Compound.Rear),
+						  Set(Tyre.Compound.Color.Front, !Pitstop.Planned.Tyre.Compound.Color.Front),
+						  Set(Tyre.Compound.Color.Rear, !Pitstop.Planned.Tyre.Compound.Color.Rear)
+pitstopPerformed(?lap) <= !Session.Settings.Tyre.Service = Wheel,
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.FrontLeft, !Pitstop.Planned.Tyre.Compound.FrontLeft),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.FrontRight, !Pitstop.Planned.Tyre.Compound.FrontRight),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.RearLeft, !Pitstop.Planned.Tyre.Compound.RearLeft),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.RearRight, !Pitstop.Planned.Tyre.Compound.RearRight),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Color.FrontLeft, !Pitstop.Planned.Tyre.Compound.Color.FrontLeft),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Color.FrontRight, !Pitstop.Planned.Tyre.Compound.Color.FrontRight),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Color.RearLeft, !Pitstop.Planned.Tyre.Compound.Color.RearLeft),
+						  Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Compound.Color.RearRight, !Pitstop.Planned.Tyre.Compound.Color.RearRight),
+						  Set(Tyre.Compound.FrontLeft, !Pitstop.Planned.Tyre.Compound.FrontLeft),
+						  Set(Tyre.Compound.FrontRight, !Pitstop.Planned.Tyre.Compound.FrontRight),
+						  Set(Tyre.Compound.RearLeft, !Pitstop.Planned.Tyre.Compound.RearLeft),
+						  Set(Tyre.Compound.RearRight, !Pitstop.Planned.Tyre.Compound.RearRight),
+						  Set(Tyre.Compound.Color.FrontLeft, !Pitstop.Planned.Tyre.Compound.Color.FrontLeft),
+						  Set(Tyre.Compound.Color.FrontRight, !Pitstop.Planned.Tyre.Compound.Color.FrontRight),
+						  Set(Tyre.Compound.Color.RearLeft, !Pitstop.Planned.Tyre.Compound.Color.RearLeft),
+						  Set(Tyre.Compound.Color.RearRight, !Pitstop.Planned.Tyre.Compound.Color.RearRight)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Set, !Pitstop.Planned.Tyre.Set)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Pressure.FL, !Pitstop.Planned.Tyre.Pressure.FL)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Pressure.FR, !Pitstop.Planned.Tyre.Pressure.FR)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Pressure.RL, !Pitstop.Planned.Tyre.Pressure.RL)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Pressure.RR, !Pitstop.Planned.Tyre.Pressure.RR)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Tyre.Pressure.Correction, !Pitstop.Planned.Tyre.Pressure.Correction)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Brake.Change, !Pitstop.Planned.Brake.Change)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Driver.Request, !Pitstop.Planned.Driver.Request)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Repair.Suspension, !Pitstop.Planned.Repair.Suspension)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Repair.Bodywork, !Pitstop.Planned.Repair.Bodywork)
+pitstopPerformed(?lap) <= Set(Pitstop, !Pitstop.Planned.Nr, Repair.Engine, !Pitstop.Planned.Repair.Engine)
+
+unpreparedPitstopPerformed(?lap) <= lastPitstop(?last), ?nr = ?last + 1, !, unpreparedPitstopPerformed(?nr, ?lap), Set(Pitstop.Last, ?nr)
+unpreparedPitstopPerformed(?lap) <= unpreparedPitstopPerformed(1, ?lap), Set(Pitstop.Last, 1)
+
+unpreparedPitstopPerformed(?nr, ?lap) <= Set(Pitstop, ?nr, Lap, ?lap)
+unpreparedPitstopPerformed(?nr, ?lap) <= Get(Lap, ?lap, Time.End, ?time), Set(Pitstop, ?nr, Time, ?time)
+unpreparedPitstopPerformed(?nr, ?lap) <= Get(Lap, ?lap, Temperature.Air, ?temp), Set(Pitstop, ?nr, Temperature.Air, ?temp)
+unpreparedPitstopPerformed(?nr, ?lap) <= Get(Lap, ?lap, Temperature.Track, ?temp), Set(Pitstop, ?nr, Temperature.Track, ?temp)
+
+updateDamageReported(?lap) <= ?lastLap = ?lap - 1, Set(Damage.Reported, ?lastLap), Set(Damage.Analysis.Reported, ?lap)
+
+priority: -10, {All: [?Pitstop.Lap], [?Pitstop.Prepared], [?Pitstop.Planned.Nr]} => (Set: Pitstop.Last, ?Pitstop.Planned.Nr)
+priority: -10, [?Pitstop.Lap] => (Set: Pitstop.Clear, ?Pitstop.Lap)
+
+[?Pitstop.Clear] => (Set: Cleanup, Laps),
+					(Prove: clearPressureLossCalibration(?Pitstop.Clear)),
+					(Prove: updateDamageReported(?Pitstop.Clear)),
+					(Set: Damage.Suspension.Reported, ?Pitstop.Clear), (Set: Damage.Bodywork.Reported, ?Pitstop.Clear),
+					(Set: Damage.Engine.Reported, ?Pitstop.Clear),
+					(Clear: Tyre.Wear.Reported), (Clear: Brake.Wear.Reported),
+					(Clear: Pitstop.Planned.Lap),
+					(Clear: Pitstop.Planned.Fuel), (Clear: Pitstop.Planned.Laps.Remaining),
+					(Clear: Pitstop.Planned.Tyre.Compound), (Clear: Pitstop.Planned.Tyre.Compound.Color),
+					(Clear: Pitstop.Planned.Tyre.Compound.Front), (Clear: Pitstop.Planned.Tyre.Compound.Color.Front),
+					(Clear: Pitstop.Planned.Tyre.Compound.FrontLeft), (Clear: Pitstop.Planned.Tyre.Compound.Color.FrontLeft),
+					(Clear: Pitstop.Planned.Tyre.Compound.FrontRight), (Clear: Pitstop.Planned.Tyre.Compound.Color.FrontRight),
+					(Clear: Pitstop.Planned.Tyre.Compound.Rear), (Clear: Pitstop.Planned.Tyre.Compound.Color.Rear),
+					(Clear: Pitstop.Planned.Tyre.Compound.RearLeft), (Clear: Pitstop.Planned.Tyre.Compound.Color.RearLeft),
+					(Clear: Pitstop.Planned.Tyre.Compound.RearRight), (Clear: Pitstop.Planned.Tyre.Compound.Color.RearRight),
+					(Clear: Pitstop.Planned.Tyre.Set),
+					(Clear: Pitstop.Planned.Tyre.Pressure.FL), (Clear: Pitstop.Planned.Tyre.Pressure.FR),
+					(Clear: Pitstop.Planned.Tyre.Pressure.RL), (Clear: Pitstop.Planned.Tyre.Pressure.RR),
+					(Clear: Pitstop.Planned.Tyre.Pressure.FL.Increment), (Clear: Pitstop.Planned.Tyre.Pressure.FR.Increment),
+					(Clear: Pitstop.Planned.Tyre.Pressure.RL.Increment), (Clear: Pitstop.Planned.Tyre.Pressure.RR.Increment),
+					(Clear: Pitstop.Planned.Tyre.Pressure.Correction),
+					(Clear: Pitstop.Planned.Tyre.Pressure.Lost.FL), (Clear: Pitstop.Planned.Tyre.Pressure.Lost.FR),
+					(Clear: Pitstop.Planned.Tyre.Pressure.Lost.RL), (Clear: Pitstop.Planned.Tyre.Pressure.Lost.RR),
+					(Clear: Pitstop.Planned.Brake.Change),
+					(Clear: Pitstop.Planned.Driver.Request),
+					(Clear: Pitstop.Planned.Repair.Suspension), (Clear: Pitstop.Planned.Repair.Bodywork),
+					(Clear: Pitstop.Planned.Repair.Engine),
+					(Clear: Pitstop.Planned.Time.Pitlane), (Clear: Pitstop.Planned.Time.Box),
+					(Clear: Pitstop.Planned.Time.Service), (Clear: Pitstop.Planned.Time.Repairs),
+					(Clear: Pitstop.Lap), (Clear: Pitstop.Planned), (Clear: Pitstop.Prepared),
+					(Clear: Grip.Low.Reported),
+					(Clear: Pitstop.Planned.Nr), (Clear: Pitstop.Planned.Adjusted)
+
+priority: -20, [?Pitstop.Clear] => (Clear: Pitstop.Clear)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Lap Memory Cleanup                           ;;;
+;;;                                                                         ;;;
+;;; These rules remove knowledge that is no longer needed.					;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: -40, [?Cleanup = Laps] => (Prove: clearLaps()), (Clear: Cleanup)
+
+clearLaps() <= ?lap = !Lap - 1, ?clearLap = ?lap - !Session.Settings.Lap.History.Considered, clearLaps(?clearLap)
+
+clearLaps(0) <= !
+clearLaps(?lap) <= ?lap < 0, !
+clearLaps(?lap) <= clearLap(?lap), ?pLap = ?lap - 1, clearLaps(?pLap)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Tyre Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Tyre Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Lap Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Lap Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Pitstop Information Retrieval                     ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Pitstop Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Pitstop Computations                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Pitstop Computations.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Weather Information Retrieval                     ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Weather Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Session & Stint Information Retrieval                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Session Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Statistical Computations                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Statistical Computations.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                               Utilities                                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Utilities.rules

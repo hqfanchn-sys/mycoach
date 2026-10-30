@@ -1,0 +1,18 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Automobilista 2                 ;;;
+;;;                                         MetalMoro AJR Gen2 Nissan       ;;;
+;;;                                         Setup Rules                     ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO) / inthebagbud UK                   ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Initialization                               ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Initialize] => (Prove: removeSettings("Automobilista 2", "MetalMoro AJR Gen2 Nissan",
+										[Electronics.Engine.Brake, Electronics.Turbo,	
+										 Damper.Compression.Slow.Front.Heave, Damper.Compression.Fast.Front.Heave,
+										 Damper.Rebound.Slow.Front.Heave, Damper.Rebound.Fast.Front.Heave,
+										 Spring.Rate.Front.Heave]))

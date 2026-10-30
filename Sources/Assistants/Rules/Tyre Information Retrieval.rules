@@ -1,0 +1,82 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Tyre Information Retrieval      ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Rule Include Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Pitstop Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Public Rules Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+currentTyreCompound(?compound, ?color) <= Get(Lap, !Lap, Tyre.Compound, ?compound), Get(Lap, !Lap, Tyre.Compound.Color, ?color), !
+currentTyreCompound(?compound, ?color) <= lastPitstopTyreCompound(ANY, ?compound, ?color), !
+currentTyreCompound(?compound, ?color) <= setupTyreCompound(?compound, ?color)
+
+currentTyreCompound(?position, ?compound, ?color) <= Get(Lap, !Lap, Tyre.Compound, ?position, ?compound),
+													 Get(Lap, !Lap, Tyre.Compound.Color, ?position, ?color), !
+currentTyreCompound(?position, ?compound, ?color) <= lastPitstopTyreCompound(?position, ?compound, ?color), !
+currentTyreCompound(?position, ?compound, ?color) <= setupTyreCompound(?position, ?compound, ?color), !
+
+currentTyreCompound(FrontLeft, ?compound, ?color) <= currentTyreCompound(Front, ?compound, ?color)
+currentTyreCompound(FrontRight, ?compound, ?color) <= currentTyreCompound(Front, ?compound, ?color)
+currentTyreCompound(RearLeft, ?compound, ?color) <= currentTyreCompound(Rear, ?compound, ?color)
+currentTyreCompound(RearRight, ?compound, ?color) <= currentTyreCompound(Rear, ?compound, ?color)
+
+currentTyreCompound(Front, ?compound, ?color) <= currentTyreCompound(?compound, ?color)
+currentTyreCompound(Rear, ?compound, ?color) <= currentTyreCompound(?compound, ?color)
+
+currentTyreSet(?tyreSet) <= Get(Lap, !Lap, Tyre.Set, ?tyreSet), !
+currentTyreSet(?tyreSet) <= lastPitstopTyreSet(?tyreSet), !
+currentTyreSet(?tyreSet) <= setupTyreSet(?tyreSet)
+currentTyreSet(false)
+
+tyreCompoundColor(Dry, ?color) <= Get(Lap, !Lap, Tyre.Compound, Dry), Get(Lap, !Lap, Tyre.Compound.Color, ?color)
+tyreCompoundColor(Dry, ?color) <= pitstopTyreCompound(Dry, ?color)
+tyreCompoundColor(Dry, ?color) <= setupTyreCompound(Dry, ?color)
+tyreCompoundColor(Wet, ?color) <= Get(Lap, !Lap, Tyre.Compound, Wet), Get(Lap, !Lap, Tyre.Compound.Color, ?color)
+tyreCompoundColor(Wet, ?color) <= pitstopTyreCompound(Wet, ?color)
+tyreCompoundColor(Wet, ?color) <= setupTyreCompound(Wet, ?color)
+tyreCompoundColor(Intermediate, ?color) <= Get(Lap, !Lap, Tyre.Compound, Intermediate), Get(Lap, !Lap, Tyre.Compound.Color, ?color)
+tyreCompoundColor(Intermediate, ?color) <= pitstopTyreCompound(Intermediate, ?color)
+tyreCompoundColor(Intermediate, ?color) <= setupTyreCompound(Intermediate, ?color)
+tyreCompoundColor(?compound, ?compoundColor) <= availableTyreCompound(?compound, ?compoundColor)
+
+setupTyreCompound(?compound, ?color) <= Get(Session.Setup.Tyre.Compound, ?compound), Get(Session.Setup.Tyre.Compound.Color, ?color)
+
+setupTyreCompound(?position, ?compound, ?color) <= Get(Session.Setup.Tyre.Compound, ?position, ?compound),
+												   Get(Session.Setup.Tyre.Compound.Color, ?position, ?color)
+
+setupTyreSet(?tyreSet) <= Get(Session.Setup.Tyre.Set, ?tyreSet)
+
+setupTyrePressure(?compound, ?tyreType, ?pressure) <= Get(Session.Setup.Tyre, ?compound, Pressure, ?tyreType, ?pressure)
+
+setupTyrePressures(?compound, [], [])
+setupTyrePressures(?compound, [?tyreType | ?tyreTypes], [?pressure | ?pressures]) <=
+		setupTyrePressure(?compound, ?tyreType, ?pressure), setupTyrePressures(?compound, ?tyreTypes, ?pressures)
+
+tyrePressureTarget(?compound, ?tyreType, ?pressure) <= Get(Session.Settings.Tyre, ?compound, Pressure.Target, ?tyreType, ?pressure)
+
+gripIndex(?grip, ?index) <= index([Optimum, Fast, Green, Greasy, Damp, Wet, Flooded], ?grip, ?index)
+
+gripSymbol(?index, ?grip) <= gripIndex(?grip, ?index)
+
+optimalTyreCompound(?grip, Dry) <= availableTyreCompound(Intermediate, ?), !, any?(?grip, [Optimum, Fast, Green])
+optimalTyreCompound(?grip, Dry) <= availableTyreCompound(Wet, ?), !, any?(?grip, [Optimum, Fast, Green, Greasy])
+optimalTyreCompound(?, Dry)
+
+optimalTyreCompound(?grip, Intermediate) <= availableTyreCompound(Dry, ?), availableTyreCompound(Wet, ?), !, any?(?grip, [Damp, Greasy])
+optimalTyreCompound(?grip, Intermediate) <= availableTyreCompound(Dry, ?), !, any?(?grip, [Greasy, Damp, Wet, Flooded])
+optimalTyreCompound(?grip, Intermediate) <= availableTyreCompound(Wet, ?), !, any?(?grip, [Optimum, Fast, Green, Greasy, Damp, Greasy])
+optimalTyreCompound(?, Intermediate)
+
+optimalTyreCompound(?grip, Wet) <= availableTyreCompound(Intermediate, ?), !, any?(?grip, [Wet, Flooded])
+optimalTyreCompound(?grip, Wet) <= availableTyreCompound(Dry, ?), !, any?(?grip, [Damp, Wet, Flooded])
+optimalTyreCompound(?, Wet)

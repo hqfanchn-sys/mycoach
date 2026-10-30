@@ -1,0 +1,567 @@
+{
+  "IncludeOutputSettingsInProfile": false,
+  "UnmuteEffectsAfterSimhubRestart": true,
+  "EffectsContainers": [
+    {
+      "EffectsContainers": [
+        {
+          "Filter": null,
+          "PitchOffset": 0,
+          "CutOff": 120.0,
+          "LoadSensitivity": 50.0,
+          "ContainerId": "8f1522f8-f87c-4af6-89db-83e21dbf55ac",
+          "ContainerType": "RPMSoundEffectContainer",
+          "Description": "Simulates engine vibration",
+          "AggregationMode": null,
+          "Gain": 14.6666666666668,
+          "IsEnabled": false,
+          "Output": {
+            "EngineMode": 1,
+            "UseBank1": true,
+            "UseBank3": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Front Engine Vibration",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "RpmBankOutput"
+          }
+        },
+        {
+          "Filter": {
+            "ControlPoints": [
+              "5;88",
+              "18;92",
+              "33.491124260355;21.3602142753728",
+              "93;43",
+              "100;58",
+              "88.2840236686391;17.7793060180493",
+              "42.7218934911243;10.1059311809276",
+              "56.094674556213;8.31547705226582",
+              "82.603550295858;8.57125621350322"
+            ],
+            "CurveFitting": 0,
+            "FilterType": "SplineFilter"
+          },
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseFrontChassisRPMSVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseFrontChassisRPMSVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "2f068d4b-9213-480d-bf2d-5e2bd7611268",
+          "ContainerType": "RPMContainer",
+          "Description": "Simulates engine RPMS with a full customizable RPM/response curve",
+          "AggregationMode": null,
+          "Gain": 50.0,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": false,
+            "Frequency": 40,
+            "UseHighFrequency": true,
+            "HighFrequency": 50,
+            "WhiteNoise": 40,
+            "UseWhiteNoise": true,
+            "EnableDurationModulation": true,
+            "DurationModulationValue": 34,
+            "FrequencyBasedOnPreFilter": true,
+            "Harmonics": 0,
+            "HoldMode": 1,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Front RPMS",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "ToneOutput"
+          }
+        },
+        {
+          "ModulateGainUsingRpms": false,
+          "MaxFeedbackRpmPercent": 90,
+          "MinFeedbackRpmPercent": 50,
+          "GearMode": 2,
+          "AlwaysIgnoreNeutral": false,
+          "IgnoreNeutral": true,
+          "NeutralDebouningTime": 200.0,
+          "EngagingDebouningTime": 1000.0,
+          "Filter": {
+            "Duration": 80,
+            "FilterType": "PulseFilter"
+          },
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseFrontChassisGearShiftVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseFrontChassisGearShiftVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "265217f9-cc3b-45ec-b1fe-adb9e0eaa048",
+          "ContainerType": "GearEffectContainer",
+          "Description": "Provides a pulse effect for gear shifting",
+          "AggregationMode": null,
+          "Gain": 64.999999999999886,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": true,
+            "Frequency": 35,
+            "Harmonics": 0,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Front Gear Shift",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "SingleToneOutput"
+          }
+        },
+        {
+          "IsLock": true,
+          "LockSensibility": 50.0,
+          "BrakeFilter": 20,
+          "Filter": {
+            "GammaValue": 1.5000000000000004,
+            "InputGain": 50.0,
+            "MinimumForce": 0,
+            "Threshold": 0,
+            "FilterType": "GammaFilter"
+          },
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseFrontChassisWheelsLockVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseFrontChassisWheelsLockVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "266b1272-1b6b-452d-9e96-ba577085c2fe",
+          "ContainerType": "WheelsLockContainer",
+          "Description": "Provide localized wheel slip and lock feedback under braking",
+          "AggregationMode": "Corners",
+          "Gain": 45.3333333333332,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": true,
+            "Frequency": 45,
+            "UseHighFrequency": true,
+            "HighFrequency": 50,
+            "WhiteNoise": 10,
+            "UseWhiteNoise": false,
+            "EnableDurationModulation": true,
+            "DurationModulationValue": 35,
+            "FrequencyBasedOnPreFilter": false,
+            "Harmonics": 0,
+            "HoldMode": 1,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Front Wheels Lock",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "ToneOutput"
+          }
+        },
+        {
+          "BrakeFilter": 10,
+          "Filter": {
+            "GammaValue": 1.2000000000000002,
+            "InputGain": 100.0,
+            "MinimumForce": 0,
+            "Threshold": 20,
+            "FilterType": "GammaFilter"
+          },
+          "MuteWhenLockEffectIsActive": true,
+          "ThrottleFilter": 20,
+          "UseBrakeFilter": false,
+          "UseThrottleFilter": false,
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseFrontChassisWheelsSlipVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseFrontChassisWheelsSlipVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "98de00a5-a889-42f1-875c-8a70173e5800",
+          "ContainerType": "WheelsSlipContainer",
+          "Description": "Provide localized wheel slip feedback",
+          "AggregationMode": "Corners",
+          "Gain": 80.0,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": true,
+            "Frequency": 50,
+            "UseHighFrequency": true,
+            "HighFrequency": 65,
+            "WhiteNoise": 15,
+            "UseWhiteNoise": false,
+            "EnableDurationModulation": false,
+            "DurationModulationValue": 34,
+            "FrequencyBasedOnPreFilter": true,
+            "Harmonics": 0,
+            "HoldMode": 1,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Front Wheels Slip",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "ToneOutput"
+          }
+        }
+      ],
+      "Filter": null,
+      "ToggleMute": {
+        "Triggers": [
+          {
+            "Trigger": "CLI.toggleFrontChassisVibration",
+            "PressType": 4
+          }
+        ]
+      },
+      "IncrementGainAction": {
+        "Triggers": [
+          {
+            "Trigger": "CLI.increaseFrontChassisVibration",
+            "PressType": 4
+          }
+        ]
+      },
+      "DecrementGainAction": {
+        "Triggers": [
+          {
+            "Trigger": "CLI.decreaseFrontChassisVibration",
+            "PressType": 4
+          }
+        ]
+      },
+      "ContainerId": "d0639161-5dd7-46a7-9b85-faf17840162f",
+      "ContainerType": "GroupContainer",
+      "Description": "Front Chassis Vibration",
+      "AggregationMode": null,
+      "Gain": 64.999999999999659,
+      "IsEnabled": true,
+      "Output": null
+    },
+    {
+      "EffectsContainers": [
+        {
+          "Filter": null,
+          "PitchOffset": 0,
+          "CutOff": 120.0,
+          "LoadSensitivity": 50.0,
+          "ContainerId": "fc050f2e-1fcf-488f-bb69-3e6670af6df6",
+          "ContainerType": "RPMSoundEffectContainer",
+          "Description": "Simulates engine vibration copy",
+          "AggregationMode": null,
+          "Gain": 30.000000000000057,
+          "IsEnabled": false,
+          "Output": {
+            "EngineMode": 1,
+            "UseBank1": true,
+            "UseBank3": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Rear Engine Vibration",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "RpmBankOutput"
+          }
+        },
+        {
+          "Filter": {
+            "ControlPoints": [
+              "5;88",
+              "18;92",
+              "33.491124260355;21.3602142753728",
+              "93;43",
+              "100;58",
+              "88.2840236686391;17.7793060180493",
+              "42.7218934911243;10.1059311809276",
+              "56.094674556213;8.31547705226582",
+              "82.603550295858;8.57125621350322"
+            ],
+            "CurveFitting": 0,
+            "FilterType": "SplineFilter"
+          },
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseRearChassisRPMSVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseRearChassisRPMSVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "aa324646-220d-4bcf-a2a7-7aebe2bf4af6",
+          "ContainerType": "RPMContainer",
+          "Description": "Simulates engine RPMS with a full customizable RPM/response curve copy",
+          "AggregationMode": null,
+          "Gain": 50.0,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": false,
+            "Frequency": 40,
+            "UseHighFrequency": true,
+            "HighFrequency": 50,
+            "WhiteNoise": 40,
+            "UseWhiteNoise": true,
+            "EnableDurationModulation": true,
+            "DurationModulationValue": 34,
+            "FrequencyBasedOnPreFilter": true,
+            "Harmonics": 0,
+            "HoldMode": 1,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Rear RPMS",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "ToneOutput"
+          }
+        },
+        {
+          "ModulateGainUsingRpms": false,
+          "MaxFeedbackRpmPercent": 90,
+          "MinFeedbackRpmPercent": 50,
+          "GearMode": 2,
+          "AlwaysIgnoreNeutral": false,
+          "IgnoreNeutral": true,
+          "NeutralDebouningTime": 200.0,
+          "EngagingDebouningTime": 1000.0,
+          "Filter": {
+            "Duration": 80,
+            "FilterType": "PulseFilter"
+          },
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseRearChassisGearShiftVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseRearChassisGearShiftVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "55b19024-9c0f-485d-95a5-a7a658d2043c",
+          "ContainerType": "GearEffectContainer",
+          "Description": "Provides a pulse effect for gear shifting copy",
+          "AggregationMode": null,
+          "Gain": 65.333333333333258,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": true,
+            "Frequency": 35,
+            "Harmonics": 0,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Rear Gear Shift",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "SingleToneOutput"
+          }
+        },
+        {
+          "IsLock": true,
+          "LockSensibility": 50.0,
+          "BrakeFilter": 20,
+          "Filter": {
+            "GammaValue": 1.5000000000000004,
+            "InputGain": 50.0,
+            "MinimumForce": 0,
+            "Threshold": 0,
+            "FilterType": "GammaFilter"
+          },
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseRearChassisWheelsLockVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseRearChassisWheelsLockVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "7107f766-36dd-4d38-9d61-0ebbe53f2d23",
+          "ContainerType": "WheelsLockContainer",
+          "Description": "Provide localized wheel slip and lock feedback under braking copy",
+          "AggregationMode": "Corners",
+          "Gain": 45.333333333333371,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": true,
+            "Frequency": 45,
+            "UseHighFrequency": true,
+            "HighFrequency": 50,
+            "WhiteNoise": 10,
+            "UseWhiteNoise": false,
+            "EnableDurationModulation": true,
+            "DurationModulationValue": 35,
+            "FrequencyBasedOnPreFilter": true,
+            "Harmonics": 0,
+            "HoldMode": 1,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Rear Wheels Lock",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "ToneOutput"
+          }
+        },
+        {
+          "BrakeFilter": 10,
+          "Filter": {
+            "GammaValue": 1.3000000000000003,
+            "InputGain": 100.0,
+            "MinimumForce": 0,
+            "Threshold": 15,
+            "FilterType": "GammaFilter"
+          },
+          "MuteWhenLockEffectIsActive": true,
+          "ThrottleFilter": 20,
+          "UseBrakeFilter": false,
+          "UseThrottleFilter": false,
+          "IncrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.increaseRearChassisWheelsSlipVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "DecrementGainAction": {
+            "Triggers": [
+              {
+                "Trigger": "CLI.decreaseRearChassisWheelsSlipVibration",
+                "PressType": 4
+              }
+            ]
+          },
+          "ContainerId": "bae128cf-fe68-40f0-995d-27435d8d9de0",
+          "ContainerType": "WheelsSlipContainer",
+          "Description": "Provide localized wheel slip feedback copy",
+          "AggregationMode": "Corners",
+          "Gain": 89.999999999999886,
+          "IsEnabled": true,
+          "Output": {
+            "UsePrehemptiveMode": true,
+            "Frequency": 50,
+            "UseHighFrequency": true,
+            "HighFrequency": 65,
+            "WhiteNoise": 15,
+            "UseWhiteNoise": true,
+            "EnableDurationModulation": false,
+            "DurationModulationValue": 34,
+            "FrequencyBasedOnPreFilter": true,
+            "Harmonics": 0,
+            "HoldMode": 1,
+            "DelayEnabled": false,
+            "AssignToChannelGroup": true,
+            "ChannelGroupName": "Rear Wheels Slip",
+            "PropertyName": null,
+            "ExportProperty": false,
+            "DisableOutput": false,
+            "OutputType": "ToneOutput"
+          }
+        }
+      ],
+      "Filter": null,
+      "ToggleMute": {
+        "Triggers": [
+          {
+            "Trigger": "CLI.toggleRearChassisVibration",
+            "PressType": 4
+          }
+        ]
+      },
+      "IncrementGainAction": {
+        "Triggers": [
+          {
+            "Trigger": "CLI.increaseRearChassisVibration",
+            "PressType": 4
+          }
+        ]
+      },
+      "DecrementGainAction": {
+        "Triggers": [
+          {
+            "Trigger": "CLI.decreaseRearChassisVibration",
+            "PressType": 4
+          }
+        ]
+      },
+      "ContainerId": "6a9758d9-79bf-4973-a18d-b05bc6edbe7c",
+      "ContainerType": "GroupContainer",
+      "Description": "Rear Chassis Vibration",
+      "AggregationMode": null,
+      "Gain": 69.999999999999773,
+      "IsEnabled": true,
+      "Output": null
+    }
+  ],
+  "AutoCalibrationRatio2": 100,
+  "OutputMode": 1,
+  "GlobalGain": 50.0,
+  "UseProfileGain": false,
+  "Error": "",
+  "LastLoaded": "2023-11-26T17:40:06.0118729+01:00",
+  "Name": "ACC Standard",
+  "ProfileId": "d6e38da6-f3dc-4be0-88c3-8bf40fd019c8",
+  "GameCode": "AssettoCorsaCompetizione"
+}

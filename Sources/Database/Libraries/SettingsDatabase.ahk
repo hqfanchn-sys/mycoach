@@ -1,0 +1,607 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Settings Database               ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Framework.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Local Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Extensions\Database.ahk"
+#Include "SessionDatabase.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Public Constant Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kSettingsSchemas := CaseInsenseMap("Settings", ["Owner", "Car", "Track", "Weather", "Section", "Key", "Value", "Mode"])
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class SettingsDatabase extends SessionDatabase {
+	iLastSimulator := false
+	iUserDatabase := false
+	iCommunityDatabase := false
+
+	getSettingsDatabase(simulator, type := "User") {
+		if (this.iLastSimulator != simulator) {
+			this.iLastSimulator := simulator
+
+			this.iUserDatabase := Database(this.DatabasePath . "User\" . this.getSimulatorCode(simulator) . "\", kSettingsSchemas)
+			this.iCommunityDatabase := Database(this.DatabasePath . "Community\" . this.getSimulatorCode(simulator) . "\", kSettingsSchemas)
+		}
+
+		return ((type = "User") ? this.iUserDatabase : this.iCommunityDatabase)
+	}
+
+	querySettings(simulator, car, track, mode, weather, &userSettings, &communitySettings) {
+		local database
+		local id := this.ID
+		local result, ignore, setting
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		if userSettings {
+			result := CaseInsenseMap()
+
+			readSettings(this, simulator, result, id, true, false, "*", "*", "*", "*")
+
+			readSettings(this, simulator, result, id, true, false, car, "*", "*", "*")
+			readSettings(this, simulator, result, id, true, false, "*", track, "*", "*")
+			readSettings(this, simulator, result, id, true, false, "*", "*", mode, "*")
+			readSettings(this, simulator, result, id, true, false, "*", "*", "*", weather)
+
+			readSettings(this, simulator, result, id, true, false, car, track, "*", "*")
+			readSettings(this, simulator, result, id, true, false, car, "*", mode, "*")
+			readSettings(this, simulator, result, id, true, false, car, "*", "*", weather)
+			readSettings(this, simulator, result, id, true, false, "*", track, mode, "*")
+			readSettings(this, simulator, result, id, true, false, "*", track, "*", weather)
+			readSettings(this, simulator, result, id, true, false, "*", "*", mode, weather)
+
+			readSettings(this, simulator, result, id, true, false, car, track, mode, "*")
+			readSettings(this, simulator, result, id, true, false, car, track, "*", weather)
+			readSettings(this, simulator, result, id, true, false, car, "*", mode, weather)
+			readSettings(this, simulator, result, id, true, false, "*", track, mode, weather)
+
+			readSettings(this, simulator, result, id, true, false, car, track, mode, weather)
+
+			userSettings := []
+
+			for ignore, setting in result
+				userSettings.Push(setting)
+		}
+
+		if communitySettings {
+			result := CaseInsenseMap()
+
+			readSettings(this, simulator, result, id, false, true, "*", "*", "*", "*")
+
+			readSettings(this, simulator, result, id, false, true, car, "*", "*", "*")
+			readSettings(this, simulator, result, id, false, true, "*", track, "*", "*")
+			readSettings(this, simulator, result, id, false, true, "*", "*", mode, "*")
+			readSettings(this, simulator, result, id, false, true, "*", "*", "*", weather)
+
+			readSettings(this, simulator, result, id, false, true, car, track, "*", "*")
+			readSettings(this, simulator, result, id, false, true, car, "*", mode, "*")
+			readSettings(this, simulator, result, id, false, true, car, "*", "*", weather)
+			readSettings(this, simulator, result, id, false, true, "*", track, mode, "*")
+			readSettings(this, simulator, result, id, false, true, "*", track, "*", weather)
+			readSettings(this, simulator, result, id, false, true, "*", "*", mode, weather)
+
+			readSettings(this, simulator, result, id, false, true, car, track, mode, "*")
+			readSettings(this, simulator, result, id, false, true, car, track, "*", weather)
+			readSettings(this, simulator, result, id, false, true, car, "*", mode, weather)
+			readSettings(this, simulator, result, id, false, true, "*", track, mode, weather)
+
+			readSettings(this, simulator, result, id, false, true, car, track, mode, weather)
+
+			communitySettings := []
+
+			for ignore, setting in result
+				communitySettings.Push(setting)
+		}
+	}
+
+	doSettings(simulator, car, track, mode, weather, function, userSettings := true, communitySettings := true) {
+		local ignore, setting
+
+		this.querySettings(simulator, car, track, mode, weather, &userSettings, &communitySettings)
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		if userSettings
+			for ignore, setting in userSettings
+				function.Call(simulator, car, track, mode, weather, setting)
+
+		if communitySettings
+			for ignore, setting in communitySettings
+				function.Call(simulator, car, track, mode, weather, setting)
+	}
+
+	loadSettings(simulator, car, track, mode, weather, community := kUndefined) {
+		local settings := newMultiMap()
+		local id := this.ID
+		local dryPressure, wetPressure, ignore, tyre
+
+		if (community = kUndefined)
+			community := this.UseCommunity
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		dryPressure := this.optimalTyrePressure(simulator, car, "Dry")
+		wetPressure := this.optimalTyrePressure(simulator, car, "Wet")
+
+		if dryPressure
+			for ignore, tyre in ["FL", "FR", "RL", "RR"]
+				setMultiMapValue(settings, "Session Settings", "Tyre.Dry.Pressure.Target." . tyre, dryPressure)
+
+		if wetPressure
+			for ignore, tyre in ["FL", "FR", "RL", "RR"]
+				setMultiMapValue(settings, "Session Settings", "Tyre.Wet.Pressure.Target." . tyre, wetPressure)
+
+		loadSettings(this, simulator, settings, id, true, community, "*", "*", "*", "*")
+
+		loadSettings(this, simulator, settings, id, true, community, car, "*", "*", "*")
+		loadSettings(this, simulator, settings, id, true, community, "*", track, "*", "*")
+		loadSettings(this, simulator, settings, id, true, community, "*", "*", mode, "*")
+		loadSettings(this, simulator, settings, id, true, community, "*", "*", "*", weather)
+
+		loadSettings(this, simulator, settings, id, true, community, car, track, "*", "*")
+		loadSettings(this, simulator, settings, id, true, community, car, "*", mode, "*")
+		loadSettings(this, simulator, settings, id, true, community, car, "*", "*", weather)
+		loadSettings(this, simulator, settings, id, true, community, "*", track, mode, "*")
+		loadSettings(this, simulator, settings, id, true, community, "*", track, "*", weather)
+		loadSettings(this, simulator, settings, id, true, community, "*", "*", mode, weather)
+
+		loadSettings(this, simulator, settings, id, true, community, car, track, mode, "*")
+		loadSettings(this, simulator, settings, id, true, community, car, track, "*", weather)
+		loadSettings(this, simulator, settings, id, true, community, car, "*", mode, weather)
+		loadSettings(this, simulator, settings, id, true, community, "*", track, mode, weather)
+
+		loadSettings(this, simulator, settings, id, true, community, car, track, mode, weather)
+
+		return settings
+	}
+
+	readSettings(simulator, car, track, mode, weather, inherited := true, community := kUndefined) {
+		local result := CaseInsenseMap()
+		local id := this.ID
+		local settings := []
+		local ignore, setting
+
+		if (community = kUndefined)
+			community := this.UseCommunity
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		if inherited {
+			readSettings(this, simulator, result, id, true, community, "*", "*", "*", "*")
+
+			readSettings(this, simulator, result, id, true, community, car, "*", "*", "*")
+			readSettings(this, simulator, result, id, true, community, "*", track, "*", "*")
+			readSettings(this, simulator, result, id, true, community, "*", "*", mode, "*")
+			readSettings(this, simulator, result, id, true, community, "*", "*", "*", weather)
+
+			readSettings(this, simulator, result, id, true, community, car, track, "*", "*")
+			readSettings(this, simulator, result, id, true, community, car, "*", mode, "*")
+			readSettings(this, simulator, result, id, true, community, car, "*", "*", weather)
+			readSettings(this, simulator, result, id, true, community, "*", track, mode, "*")
+			readSettings(this, simulator, result, id, true, community, "*", track, "*", weather)
+			readSettings(this, simulator, result, id, true, community, "*", "*", mode, weather)
+
+			readSettings(this, simulator, result, id, true, community, car, track, mode, "*")
+			readSettings(this, simulator, result, id, true, community, car, track, "*", weather)
+			readSettings(this, simulator, result, id, true, community, car, "*", mode, weather)
+			readSettings(this, simulator, result, id, true, community, "*", track, mode, weather)
+		}
+
+		readSettings(this, simulator, result, id, true, community, car, track, mode, weather)
+
+		for ignore, setting in result
+			settings.Push(setting)
+
+		return settings
+	}
+
+	readSettingValue(simulator, car, track, mode, weather, section, key
+				   , default := false, inherited := true, community := kUndefined) {
+		local id := this.ID
+		local value
+
+		if (community = kUndefined)
+			community := this.UseCommunity
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		value := readSetting(this, simulator, id, true, community
+						   , car, track, mode, weather, section, key, kUndefined)
+
+		if inherited {
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", track, mode, weather, section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , car, "*", mode, weather, section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , car, track, "*", weather, section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , car, track, mode, "*", section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", "*", mode, weather, section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", track, "*", weather, section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", track, mode, "*", section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , car, "*", "*", weather, weather section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , car, "*", mode, "*", section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , car, track, "*", "*", section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", "*", "*", weather, section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", "*", mode, "*", section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", track, "*", "*", section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , car, "*", "*", "*", section, key, kUndefined)
+
+			if (value == kUndefined)
+				value := readSetting(this, simulator, id, true, community
+								   , "*", "*", "*", "*", section, key, kUndefined)
+		}
+
+		return ((value == kUndefined) ? default : value)
+	}
+
+	getSettingValue(simulator, car, track, mode, weather, section, key, default := false) {
+		local tries := 5
+		local database, rows
+
+		if (!simulator || (simulator = "0"))
+			return default
+
+		database := this.getSettingsDatabase(simulator, "User")
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		while (tries-- > 0) {
+			if database.lock("Settings", false)
+				try {
+					rows := database.query("Settings", {Where: {Owner: this.ID
+															  , Car: car, Track: track
+															  , Mode: mode, Weather: weather
+															  , Section: section, Key: key}})
+
+					return ((rows.Length > 0) ? rows[1]["Value"] : default)
+				}
+				catch Any as exception {
+					logError(exception)
+
+					if isDevelopment()
+						logMessage(kLogWarn, "Waiting for file `"Settings.CSV`"...")
+
+					return default
+				}
+				finally {
+					database.unlock("Settings")
+				}
+
+			Sleep(200)
+		}
+
+		if isDevelopment()
+			logMessage(kLogWarn, "Waiting for file `"Settings.CSV`"...")
+
+		return default
+	}
+
+	setSettingValue(simulator, car, track, mode, weather, section, key, value) {
+		local cValue := value
+		local tries := 5
+		local database, entry
+
+		if (!simulator || (simulator = "0"))
+			return
+
+		database := this.getSettingsDatabase(simulator, "User")
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		if ((simulator = "Unknown") || (car = "Unknown") || (track = "Unknown"))
+			return
+
+		while (tries-- > 0) {
+			if database.lock("Settings", false)
+				try {
+					entry := database.query("Settings", {Where: {Owner: this.ID, Car: car, Track: track
+															   , Mode: mode, Weather: weather
+															   , Section: section, Key: key}})
+
+					if (entry.Length > 0) {
+						if (entry[1]["Value"] != cValue) {
+							entry[1]["Value"] := value
+
+							database.changed("Settings")
+						}
+					}
+					else
+						database.add("Settings", {Owner: this.ID, Car: car, Track: track
+												, Mode: mode, Weather: weather
+												, Section: section, Key: key, Value: value})
+
+					return
+				}
+				catch Any as exception {
+					logError(exception)
+
+					if isDevelopment()
+						logMessage(kLogWarn, "Waiting for file `"Settings.CSV`"...")
+
+					return
+				}
+				finally {
+					database.unlock("Settings", true)
+				}
+
+			Sleep(200)
+		}
+
+		if isDevelopment()
+			logMessage(kLogWarn, "Waiting for file `"Settings.CSV`"...")
+	}
+
+	removeSettingValue(simulator, car, track, mode, weather, section, key) {
+		local tries := 5
+		local database
+
+		if (!simulator || (simulator = "0"))
+			return
+
+		database := this.getSettingsDatabase(simulator, "User")
+
+		if (car != "*")
+			car := this.getCarCode(simulator, car)
+
+		if (track != "*")
+			track := this.getTrackCode(simulator, track)
+
+		if ((simulator = "Unknown") || (car = "Unknown") || (track = "Unknown"))
+			return
+
+		while (tries-- > 0) {
+			if database.lock("Settings", false)
+				try {
+					database.remove("Settings", {Owner: this.ID, Car: car, Track: track
+											   , Mode: mode, Weather: weather
+											   , Section: section, Key: key}
+											  , always.Bind(true), true)
+
+					return
+				}
+				catch Any as exception {
+					return
+				}
+				finally {
+					database.unlock("Settings", true)
+				}
+
+			Sleep(200)
+		}
+	}
+}
+
+;;;-------------------------------------------------------------------------;;;
+;;;                    Private Function Declaration Section                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+constraintSettings(constraints, row) {
+	local column, value
+
+	for column, value in constraints
+		if (row[column] != value)
+			return false
+
+	return true
+}
+
+readSetting(database, simulator, owner, user, community, car, track, mode, weather
+		  , section, key, default := false) {
+	local tries := 5
+	local success := false
+	local rows, ignore, row, settingsDB
+
+	if (!simulator || (simulator = "0"))
+		return default
+
+	try {
+		if user {
+			settingsDB := database.getSettingsDatabase(simulator, "User")
+
+			while (tries-- > 0) {
+				if settingsDB.lock("Settings", false)
+					try {
+						rows := settingsDB.query("Settings", {Where: {Car: car, Track: track
+																	, Mode: mode, Weather: weather
+																	, Section: section, Key: key
+																	, Owner: owner}})
+
+						success := true
+
+						if (rows.Length > 0)
+							return rows[1]["Value"]
+						else
+							break
+					}
+					catch Any as exception {
+						logError(exception)
+					}
+					finally {
+						settingsDB.unlock("Settings")
+					}
+
+				Sleep(200)
+			}
+
+			if (!success && isDevelopment())
+				logMessage(kLogWarn, "Waiting for file `"Settings.CSV`"...")
+		}
+
+		if community
+			for ignore, row in database.getSettingsDatabase(simulator
+														  , "Community").query("Settings"
+																			 , {Where: {Car: car, Track: track
+																					  , Mode: mode, Weather: weather
+																					  , Section: section, Key: key}})
+				if (row["Owner"] != owner)
+					return rows[1]["Value"]
+	}
+	catch Any as exception {
+		logError(exception, true)
+	}
+
+	return default
+}
+
+readSettings(database, simulator, settings, owner, user, community, car, track, mode, weather) {
+	local result := []
+	local tries := 5
+	local success := false
+	local ignore, row, filtered, visited, key
+	local settingsDB
+
+	if (!simulator || (simulator = "0"))
+		return
+
+	if community
+		for ignore, row in database.getSettingsDatabase(simulator
+													  , "Community").query("Settings"
+																		 , {Where: {Car: car, Track: track
+																				  , Mode: mode, Weather: weather}})
+			if (row["Owner"] != owner)
+				result.Push(row)
+
+	if user {
+		settingsDB := database.getSettingsDatabase(simulator, "User")
+
+		while (tries-- > 0) {
+			if settingsDB.lock("Settings", false)
+				try {
+					for ignore, row in settingsDB.query("Settings", {Where: {Car: car, Track: track
+																		   , Mode: mode, Weather: weather
+																		   , Owner: owner}})
+						result.Push(row)
+
+					success := true
+
+					break
+				}
+				catch Any as exception {
+					logError(exception)
+				}
+				finally {
+					settingsDB.unlock("Settings")
+				}
+
+			Sleep(200)
+		}
+
+		if (!success && isDevelopment())
+			logMessage(kLogWarn, "Waiting for file `"Settings.CSV`"...")
+	}
+
+	filtered := []
+
+	visited := CaseInsenseMap()
+
+	for ignore, row in reverse(result) {
+		key := (row["Section"] . "." . row["Key"])
+
+		if !visited.Has(key) {
+			visited[key] := true
+
+			filtered.Push(row)
+		}
+	}
+
+	for ignore, row in reverse(filtered)
+		settings[row["Section"] . "." . row["Key"]] := row
+}
+
+loadSettings(database, simulator, settings, owner, user, community, car, track, mode, weather) {
+	local values := CaseInsenseMap()
+	local ignore, setting
+
+	readSettings(database, simulator, values, owner, user, community, car, track, mode, weather)
+
+	for ignore, setting in values
+		setMultiMapValue(settings, setting["Section"], setting["Key"], setting["Value"])
+}

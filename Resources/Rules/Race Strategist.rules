@@ -1,0 +1,554 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Race Strategist Rules           ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Global Trigger                              ;;;
+;;;                                                                         ;;;
+;;; Entry points for the surrounding script code. Typically, the rule       ;;;
+;;; will be triggered by setting a target fact and call "produce()" on the  ;;;
+;;; KnowledgeBase instance.                                                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;; Each lap, after all the lap data has been copied to the knowledge base, ;;;
+;;; all target data for race positions, lap times and strategy will be      ;;;
+;;; recomputed upon the data of the last laps, and so on.                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Lap] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; This fact is set for each invocation of the rule engine. It can be used ;;;
+;;; to start periodic tasks.                                                ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Update] => ...
+
+priority: -20, [?Update] => (Clear: Update)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; Each sector, after all the lap data has been copied to the knowledge    ;;;
+;;; base, all target data for race positions and lap times will             ;;;
+;;; be recomputed.                                                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Sector] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; The race positions and lap times will be recomputed.                    ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Standings] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; You can set this fact to a future lap number to request a standings     ;;;
+;;; projection for this future lap.                                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Standings.Extrapolate] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Pitstop.Strategy.Plan" can be set, if you want to run an analysis for  ;;;
+;;; the best lap for the next pitstop. If this fact is set to true, the     ;;;
+;;; analysis searches for a lap using the remaining fuel as a hint for the  ;;;
+;;; window of laps to analyze. But you can also set "Pitstop.Strategy.Plan" ;;;
+;;; to a specific lap, if you want to search for the best pitstop option in ;;;
+;;; a lap close to this given lap.                                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Pitstop.Strategy.Plan] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Pitstop.Lap" must be set to the lap number, where the pitstop has been ;;;
+;;; done.                                                                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Pitstop.Lap] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Cleanup" can be set to remove unnecessary knowledge from the memory.   ;;;
+;;; Set "Cleanup" to "Laps" to remove all recent laps, that are outside the ;;;
+;;; the statistical window. This is done automatically after a pitstop.     ;;;
+;;; You can also set it to "Standings", which will remove all standings     ;;;
+;;; from the memory, which are "older" than									;;;
+;;; "Session.Settings.Lap.History.Considered".								;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Cleanup] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Lap & Fuel Calculation                         ;;;
+;;;                                                                         ;;;
+;;; Updates the remaining laps with the current amount of fuel and the      ;;;
+;;; remaining stint time for the current driver.                            ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 20, [?Lap] => (ProveAll: updateRemainingLaps(?Lap))
+
+updateRemainingLaps(?lap) <= remainingStintLaps(?lap, Fuel, ?fuelLaps), Set(Lap.Remaining.Fuel, ?fuelLaps)
+updateRemainingLaps(?lap) <= Clear(Lap.Remaining.Energy), remainingStintLaps(?lap, Energy, ?energyLaps), Set(Lap.Remaining.Energy, ?energyLaps)
+updateRemainingLaps(?lap) <= remainingStintLaps(?lap, Driver, ?driverLaps), Set(Lap.Remaining.Stint, ?driverLaps)
+updateRemainingLaps(?lap) <= remainingSessionLaps(?lap, ?sessionLaps), Set(Lap.Remaining.Session, ?sessionLaps)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Fuel, Set(Lap.Remaining.Stint, !Lap.Remaining.Fuel)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Energy, Set(Lap.Remaining.Stint, !Lap.Remaining.Energy)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Session, Set(Lap.Remaining.Stint, !Lap.Remaining.Session)
+
+priority: 20, {All: [?Lap.Remaining.Stint <= ?Lap.Remaining.Session]} => (Set: Lap.Remaining, ?Lap.Remaining.Stint)
+priority: 20, {All: [?Lap.Remaining.Session <= ?Lap.Remaining.Stint]} => (Set: Lap.Remaining, ?Lap.Remaining.Session)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                Weather & Tyre Temperature Trend Calculation             ;;;
+;;;                                                                         ;;;
+;;; The rules in this section try to derive future weather data on past     ;;;
+;;; weather trends and weather forecast information (as far as available).  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Lap > 5] => (Prove: updateWeatherTrend(?Lap))
+
+updateWeatherTrend(?lap) <= firstStintLap(?startlap), ?deltaLaps = ?lap - ?startlap,
+							lapAirTemperature(?startlap, ?startAirTemperature), projectedAirTemperature(?lap, ?curAirTemperature),
+							lapTrackTemperature(?startlap, ?startTrackTemperature), projectedTrackTemperature(?lap, ?curTrackTemperature),
+							lapWeather(?startlap, ?startWeather), projectedWeather(?lap, ?curWeather),
+							lapTyreTemperature(?startlap, ?startTyreTemperature), projectedTyreTemperature(?lap, ?curTyreTemperature),
+							?tempAir = ?curAirTemperature - ?startAirTemperature, ?tempTrack = ?curTrackTemperature - ?startTrackTemperature,
+							?deltaAirTemperature = ?tempAir / ?deltaLaps, ?deltaTrackTemperature = ?tempTrack / ?deltaLaps,
+							?tempWeather = ?curWeather - ?startWeather, ?deltaWeather = ?tempWeather / ?deltaLaps,
+							?tempTyreTemperature = ?curTyreTemperature - ?startTyreTemperature,
+							?deltaTyreTemperature = ?tempTyreTemperature / ?deltaLaps,
+							Set(Weather.Temperature.Air.Delta, ?deltaAirTemperature),
+							Set(Weather.Temperature.Track.Delta, ?deltaTrackTemperature), Set(Weather.Weather.Delta, ?deltaWeather),
+							Set(Weather.Temperature.Tyre.Delta, ?deltaTyreTemperature)
+
+projectedWeather(?lap, ?weather) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapWeathers(?firstlap, !Lap, ?weathers),
+		linRegression(?indices, ?weathers, ?a, ?b), ?temp = ?b * ?lap, ?weather = ?a + ?temp
+
+projectedAirTemperature(?lap, ?temperature) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapAirTemperatures(?firstlap, !Lap, ?temperatures),
+		linRegression(?indices, ?temperatures, ?a, ?b), ?temp = ?b * ?lap, ?temperature = ?a + ?temp
+
+projectedTrackTemperature(?lap, ?temperature) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapTrackTemperatures(?firstlap, !Lap, ?temperatures),
+		linRegression(?indices, ?temperatures, ?a, ?b), ?temp = ?b * ?lap, ?temperature = ?a + ?temp
+
+projectedTyreTemperature(?lap, ?temperature) <=
+		firstStintLap(?firstlap), sequence(?firstlap, !Lap, ?indices), lapTyreTemperatures(?firstlap, !Lap, ?temperatures),
+		linRegression(?indices, ?temperatures, ?a, ?b), ?temp = ?b * ?lap, ?temperature = ?a + ?temp
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                      Position & Lap Delta Calculation                   ;;;
+;;;                                                                         ;;;
+;;; Updates the gaps and lap time deltas for various cars each lap.         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Standings Computations.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Position Projection                          ;;;
+;;;                                                                         ;;;
+;;; This rule set will extrapolate the race positions into the future.      ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Standings.Extrapolate] => (Prove: extrapolateLap(!Lap, ?Standings.Extrapolate)), (Clear: Standings.Extrapolate)
+
+extrapolateLap(?lap, ?futureLap) <= ?futureLap < ?lap, !, fail
+extrapolateLap(?lap, ?futureLap) <= extrapolateLap(?lap, ?futureLap, 0)
+
+extrapolateLap(?lap, ?futureLap, ?pitDelta) <=
+		carAvgLapTime(?lap, !Driver.Car, ?avgLapTime), ?lapDelta = ?futureLap - ?lap,
+		?deltaTime = ?lapDelta * ?avgLapTime, extrapolatePositions(?lap, !Car.Count, ?futureLap, ?deltaTime, ?pitDelta),
+		Call(updatePositions, ?futureLap),
+		correctPositions(?lap, !Car.Count, !Session.Settings.Standings.Extrapolation.Overtake.Delta, ?futureLap),
+		Call(updatePositions, ?futureLap)
+		
+extrapolateLaps(?lap, ?lapDelta) <= =<(?lapDelta, 0), !
+extrapolateLaps(?lap, ?lapDelta) <= ?futureLap = ?lap + ?lapDelta, extrapolateLap(?lap, ?futureLap),
+									?nextLapDelta = ?lapDelta - 1, extrapolateLaps(?lap, ?nextLapDelta)
+
+priority: -20, [?Lap] => (Prove: clearExtrapolatedLap(?Lap, !Car.Count))
+
+clearExtrapolatedLap(?, ?car) <= =<(?car, 0), !
+clearExtrapolatedLap(?lap, ?car)  <= Clear(Standings.Extrapolated, ?lap, Car, ?car, Position),
+									 Clear(Standings.Extrapolated, ?lap, Car, ?car, Sequence),
+									 Clear(Standings.Extrapolated, ?lap, Car, ?car, Laps),
+									 ?nextCar = ?car - 1, clearExtrapolatedLap(?lap, ?nextCar)
+
+;priority: -20, {All: [?Lap], [?Session.Settings.Standings.Extrapolation.Laps]} =>
+;		(Prove: extrapolatePositions(?Lap, ?Session.Settings.Standings.Extrapolation.Laps)),
+;		(Prove: updatePositions(?Lap, ?Session.Settings.Standings.Extrapolation.Laps)),
+;		(Prove: correctPositions(?Lap, !Session.Settings.Standings.Extrapolation.Overtake.Delta,
+;									   ?Session.Settings.Standings.Extrapolation.Laps)),
+;		(Prove: updatePositions(?Lap, ?Session.Settings.Standings.Extrapolation.Laps))
+		
+extrapolatePositions(?, ?lapDelta) <= =<(?lapDelta, 0), !
+extrapolatePositions(?lap, ?lapDelta) <= carAvgLapTime(?lap, !Driver.Car, 0),
+										 ?nextLapDelta = ?lapDelta - 1, extrapolatePositions(?lap, ?nextLapDelta)
+extrapolatePositions(?lap, ?lapDelta) <= carAvgLapTime(?lap, !Driver.Car, ?avgLapTime), ?deltaTime = ?lapDelta * ?avgLapTime,
+										 ?futureLap = ?lap + ?lapDelta, extrapolatePositions(?lap, !Car.Count, ?futureLap, ?deltaTime, 0),
+										 ?nextLapDelta = ?lapDelta - 1, extrapolatePositions(?lap, ?nextLapDelta)
+
+updatePositions(?, ?lapDelta) <= =<(?lapDelta, 0), !
+updatePositions(?lap, ?lapDelta) <= ?futureLap = ?lap + ?lapDelta, Call(updatePositions, ?futureLap),
+									?nextLapDelta = ?lapDelta - 1, updatePositions(?lap, ?nextLapDelta)
+
+extrapolatePositions(?, ?car, ?, ?, ?) <= =<(?car, 0), !
+extrapolatePositions(?, ?, ?, 0, ?) <= !, fail
+extrapolatePositions(?lap, !Driver.Car, ?futureLap, ?deltaTime, ?deltaPitTime) <=
+		?deltaPitTime != 0, !, extrapolatePosition(?lap, !Driver.Car, ?futureLap, ?deltaTime, 0),
+		?nextCar = !Driver.Car - 1, extrapolatePositions(?lap, ?nextCar, ?futureLap, ?deltaTime, ?deltaPitTime)
+extrapolatePositions(?lap, ?car, ?futureLap, ?deltaTime, ?deltaPitTime) <=
+		extrapolatePosition(?lap, ?car, ?futureLap, ?deltaTime, ?deltaPitTime),
+		?nextCar = ?car - 1, extrapolatePositions(?lap, ?nextCar, ?futureLap, ?deltaTime, ?deltaPitTime)
+extrapolatePositions(?lap, ?car, ?futureLap, ?deltaTime, ?deltaPitTime) <=
+		?nextCar = ?car - 1, extrapolatePositions(?lap, ?nextCar, ?futureLap, ?deltaTime, ?deltaPitTime)
+
+extrapolatePosition(?lap, ?car, ?futureLap, ?deltaTime, ?deltaPitTime) <=
+		?sumDeltaTime = ?deltaTime + ?deltaPitTime,
+		carAvgLapTime(?lap, ?car, ?carLapTime), ?carLapTime > 0, ?deltaLaps = ?sumDeltaTime / ?carLapTime,
+		Get(Standings.Lap, ?lap, Car, ?car, Laps, ?carLaps), ?futureLaps = ?carLaps + ?deltaLaps,
+		Set(Standings.Extrapolated, ?futureLap, Car, ?car, Laps, ?futureLaps)
+extrapolatePosition(?lap, ?car, ?futureLap, ?deltaTime, ?deltaPitTime)
+
+correctPositions(?, ?, ?lapDelta) <= =<(?lapDelta, 0), !
+correctPositions(?lap, ?overtakeDelta, ?lapDelta) <= ?futureLap = ?lap + ?lapDelta,
+													 correctPositions(?lap, !Car.Count, ?overtakeDelta, ?futureLap),
+													 ?nextLapDelta = ?lapDelta - 1, correctPositions(?lap, ?overtakeDelta, ?nextLapDelta)
+
+correctPositions(?, ?car, ?, ?) <= =<(?car, 0), !
+correctPositions(?lap, ?car, ?overtakeDelta, ?futureLap) <= Get(Standings.Lap, ?lap, Car, ?car, Position, ?currentPosition),
+															Get(Standings.Extrapolated, ?futureLap, Car, ?car, Position, ?futurePosition),
+															?deltaPosition = ?futurePosition - ?currentPosition,
+															?temp = ?overtakeDelta * ?deltaPosition, abs(?temp, ?correction),
+															correctPosition(?lap, ?car, ?correction, ?futureLap),
+															?nextCar = ?car - 1, correctPositions(?lap, ?nextCar, ?overtakeDelta, ?futureLap), !
+correctPositions(?lap, ?car, ?overtakeDelta, ?futureLap) <= ?nextCar = ?car - 1, correctPositions(?lap, ?nextCar, ?overtakeDelta, ?futureLap)
+
+correctPosition(?, ?, 0, ?) <= !
+correctPosition(?lap, ?car, ?timeCorrection, ?futureLap) <= carAvgLapTime(?lap, ?car, 0), !  
+correctPosition(?lap, ?car, ?timeCorrection, ?futureLap) <= carAvgLapTime(?lap, ?car, ?carLapTime), ?deltaLaps = ?timeCorrection / ?carLapTime,
+															Get(Standings.Extrapolated, ?futureLap, Car, ?car, Laps, ?fullLaps),
+															?correctedLaps = ?fullLaps - ?deltaLaps,
+															Set(Standings.Extrapolated, ?futureLap, Car, ?car, Laps, ?correctedLaps)
+
+carAvgLapTime(?lap, ?car, ?avgTime) <= Get(Standings.Lap, ?lap, Car, ?car, Time.Average, ?avgTime)
+carAvgLapTime(?lap, ?car, ?avgTime) <= carWeightedLapTimes(?lap, ?car, ?lapTimes), carLapAvgTime(?lap, ?car, ?lapTimes, ?avgTime),
+									   Set(Standings.Lap, ?lap, Car, ?car, Time.Average, ?avgTime)
+
+carWeightedLapTimes(?lap, ?car, ?times) <= carWeightedLapTimes(?lap, ?car, 0, ?temp), remove(?temp, 0, ?times) 
+
+carWeightedLapTimes(?lap, ?, ?lap, []) <= !
+carWeightedLapTimes(?, ?, ?offset, []) <= >=(?offset, !Session.Settings.Lap.History.Considered), !
+carWeightedLapTimes(?lap, ?car, ?offset, [?time | ?times]) <= ?tLap = ?lap - ?offset, carWeightedLapTime(?lap, ?car, ?tlap, ?time),
+															  ?nOffset = ?offset + 1, carWeightedLapTimes(?lap, ?car, ?nOffset, ?times)
+
+carWeightedLapTime(?referenceLap, ?car, ?lap, ?time) <=
+		carLapTime(?referenceLap, ?car, ?lastTime), carLapTime(?lap, ?car, ?lapTime),
+		lapWeight(?referenceLap, ?lap, ?weight), ?delta = ?lastTime - ?lapTime, ?weightedDelta = ?delta * ?weight,
+		?time = ?lastTime - ?weightedDelta
+
+carLapTime(?lap, ?, 0) <= =<(?lap, 0), !
+carLapTime(?lap, ?car, ?lapTime) <= Get(Standings.Lap, ?lap, Car, ?car, Time, ?lapTime), !
+carLapTime(?lap, ?car, ?lapTime) <= ?previousLap = ?lap - 1, carLapTime(?previousLap, ?car, ?lapTime)
+
+carLapAvgTime(?lap, !Driver.Car, ?lapTimes, ?avgTime) <= !, lapAvgTime(?lap, ?lapTimes, ?avgTime)
+carLapAvgTime(?, ?, [], 0) <= !
+carLapAvgTime(?lap, ?car, ?times, ?avgTime) <= sum(?times, ?sTimes), length(?times, ?sLength), ?avgTime = ?sTimes / ?sLength
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                    Upcoming Weather Change Notification                 ;;;
+;;;                                                                         ;;;
+;;; These rules will check wether a significant weather change is ahead and ;;;
+;;; will notify the driver accordingly. If the weather change is only a few ;;;
+;;; minutes ahead, a recommendation to use different tyre compound is		;;;
+;;; made.                                                                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 20, [?Lap] => (Prove: currentTyreCompound()), (Prove: currentTyreSet())
+
+currentTyreCompound() <= currentTyreCompound(?compound, ?color), Set(Tyre.Compound, ?compound), Set(Tyre.Compound.Color, ?color)
+currentTyreSet() <= currentTyreSet(?tyreSet), Set(Tyre.Set, ?tyreSet)
+
+#Include %kResourcesDirectory%Rules\Weather Notifications.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                           Pit Strategy Planning                         ;;;
+;;;                                                                         ;;;
+;;; This rule set will compute the best possible pitstop strategy.          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 5, [?Pitstop.Strategy.Plan] => (Clear: Pitstop.Strategy.Lap), (Prove: setMaxLap())
+
+setMaxLap() <= unbound(!Pitstop.Strategy.Lap.Max), Set(Pitstop.Strategy.Lap.Max, 99999)
+
+{All: [?Pitstop.Strategy.Plan = true], {Prove: pitstopRequired(!Lap)}} => (Prove: updatePitstopStrategy(!Lap))
+{All: [?Pitstop.Strategy.Plan > 1], {Prove: pitstopRequired(!Lap)}} => (Prove: updatePitstopStrategy(?Pitstop.Strategy.Plan))
+
+{All: {None: [?Pitstop.Strategy.Lap]}, [?Lap.Remaining.Session < ?Lap.Remaining.Fuel]} => (Set: Pitstop.Strategy.Lap, false)
+
+priority: -5, [?Pitstop.Strategy.Plan] => (Clear: Pitstop.Strategy.Plan), (Clear: Pitstop.Strategy.Lap.Max)
+
+pitstopRequired(?lap) <= Get(Strategy.Pitstop.Lap, ?)
+pitstopRequired(?lap) <= plannedPitstopLap(?pitstopLap), ?pitstopLap =< !Lap.Remaining.Session
+
+plannedPitstopLap(?pitstopLap) <= Get(Strategy.Pitstop.Lap, ?pitstopLap), ?pitstopLap >= !Lap, !
+plannedPitstopLap(?pitstopLap) <= remainingStintLaps(!Lap, Fuel, ?temp, false), floor(?temp, ?fuelLaps), ?pitstopLap = !Lap + ?fuelLaps
+
+updatePitstopStrategy(?lap) <= ?lap < !Lap, !, fail
+updatePitstopStrategy(!Lap) <= plannedPitstopLap(?pitstopLap),
+							   ?temp1 = !Session.Settings.Pitstop.Strategy.Window.Considered * 2, ?offset = ?temp1 - 1,
+							   ?temp2 = ?pitstopLap - ?offset, round(?temp2, ?targetLap),
+							   ?targetLap > !Lap, !, updatePitstopStrategy(?targetLap)
+updatePitstopStrategy(!Lap) <= plannedPitstopLap(?pitstopLap),
+							   ?temp = ?pitstopLap - !Session.Settings.Pitstop.Strategy.Window.Considered, round(?temp, ?targetLap),
+							   ?targetLap > !Lap, !, updatePitstopStrategy(?targetLap)
+updatePitstopStrategy(!Lap) <= plannedPitstopLap(?pitstopLap), ?pitstopLap > !Lap, !, updatePitstopStrategy(?pitstopLap)
+updatePitstopStrategy(?lap) <= ?deltaLaps = ?lap - !Lap, ?temp = !Lap.Remaining - ?deltaLaps,
+							   round(?temp, ?remainingLaps), ?remainingLaps > 0, updatePitstopStrategy(?lap, ?remainingLaps)
+							   
+updatePitstopStrategy(?targetLap, ?remainingLaps) <= ?remainingLaps < 3, Set(Pitstop.Strategy.Lap, ?targetLap), !
+updatePitstopStrategy(?targetLap, ?remainingLaps) <= pitstopWindow(!Lap, ?targetLap, ?remainingLaps, ?fromLap, ?toLap), ?toLap >= ?fromLap,
+													 choosePitstopStrategy(!Lap, ?fromLap, ?toLap)
+
+pitstopWindow(?lap, ?targetLap, ?remainingLaps, ?fromLap, ?toLap) <=
+		?temp = ?targetLap + ?remainingLaps, ?maxLap = ?temp - 1,
+		?tempSL = ?targetLap - !Session.Settings.Pitstop.Strategy.Window.Considered, max(?lap, ?tempSL, ?fromLap),
+		?tempTL1 = ?targetLap + !Session.Settings.Pitstop.Strategy.Window.Considered, min(?maxLap, ?tempTL1, ?tempTL2),
+		min(!Pitstop.Strategy.Lap.Max, ?tempTL2, ?toLap)
+
+choosePitstopStrategy(?lap, ?fromLap, ?fromLap) <= Set(Pitstop.Strategy.Lap, ?fromLap), !
+choosePitstopStrategy(?lap, ?fromLap, ?toLap) <= createPitstopScenarios(?lap, ?fromLap, ?toLap,
+																		?laps, ?positions, ?carsInFront, ?trafficDensities),
+												 Set(Pitstop.Strategy.Evaluation.Laps, ?laps),
+												 Set(Pitstop.Strategy.Evaluation.Positions, ?positions),
+												 Set(Pitstop.Strategy.Evaluation.Traffics, ?carsInFront),
+												 choosePitstopScenario(?laps, ?positions, ?carsInFront, ?trafficDensities,
+																	   ?targetLap, ?position, ?carsAhead),
+												 Set(Pitstop.Strategy.Lap, ?targetLap), Set(Pitstop.Strategy.Position, ?position),
+												 Set(Pitstop.Strategy.Traffic, ?carsAhead)
+
+createPitstopScenarios(?lap, ?fromLap, ?toLap, [], [], [], []) <= ?fromLap > ?toLap, !
+createPitstopScenarios(?lap, ?fromLap, ?toLap, [?fromLap | ?laps], [?position | ?positions],
+											   [?carsAhead | ?carsInFront], [?trafficDensity | ?trafficDensities]) <=
+		pitstopDeltaTime(?lap, ?fromLap, ?pitDelta), extrapolateLap(?lap, ?fromLap, ?pitDelta),
+		evaluatePosition(?fromLap, ?position, ?carsAhead, ?trafficDensity), !,
+		?nextLap = ?fromLap + 1, createPitstopScenarios(?lap, ?nextLap, ?toLap, ?laps, ?positions, ?carsInFront, ?trafficDensities)
+createPitstopScenarios(?lap, ?fromLap, ?toLap, ?laps, ?positions, ?carsInFront, ?trafficDensities) <=
+		?fromLap =< ?toLap, ?nextLap = ?fromLap + 1,
+		createPitstopScenarios(?lap, ?nextLap, ?toLap, ?laps, ?positions, ?carsInFront, ?trafficDensities)
+
+evaluatePosition(?lap, ?position, ?carsAhead, ?density) <= Get(Standings.Extrapolated, ?lap, Car, !Driver.Car, Position, ?position),
+														   trafficDensity(?lap, ?carsAhead, ?density)
+
+trafficDensity(?lap, ?carsAhead, ?density) <= Get(Standings.Extrapolated, ?lap, Car, !Driver.Car, Laps, ?temp1), round(?temp1, ?temp2),
+											  ?from = ?temp1 - ?temp2, ?to = ?from + !Session.Settings.Strategy.Traffic.Considered,
+											  trafficDensity(?lap, !Car.Count, ?from, ?to, ?carsAhead, ?density)
+
+trafficDensity(?, ?car, ?, ?, [], 0) <= ?car =< 0, !
+trafficDensity(?lap, ?car, ?from, ?to, [?car | ?carsAhead], ?count) <=
+		Get(Standings.Extrapolated, ?lap, Car, ?car, Laps, ?temp1), round(?temp1, ?temp2),
+		?position = ?temp1 - ?temp2, ?position > ?from, ?position < ?to, !,
+		?nextCar = ?car - 1, trafficDensity(?lap, ?nextCar, ?from, ?to, ?carsAhead, ?temp3), ?count = ?temp3 + 1
+trafficDensity(?lap, ?car, ?from, ?to, ?carsAhead, ?count) <=
+		?nextCar = ?car - 1, trafficDensity(?lap, ?nextCar, ?from, ?to, ?carsAhead, ?count)
+
+choosePitstopScenario([], [], [], [], ?cLap, ?cPosition, ?cCarsAhead, ?, ?cLap, ?cPosition, ?cCarsAhead)
+choosePitstopScenario([?cLap | ?laps], [?cPosition | ?positions],
+					  [?cCarsInFront | ?carsInFront], [?cDensity | ?densities], ?lap, ?position, ?carsAhead) <=
+		choosePitstopScenario(?laps, ?positions, ?carsInFront, ?densities,
+							  ?cLap, ?cPosition, ?cCarsInFront, ?cDensity, ?lap, ?position, ?carsAhead)
+choosePitstopScenario([?cLap | ?laps], [?cPosition | ?positions],
+					  [?cCarsInFront | ?carsInFront], [?cDensity | ?densities],
+					  ?bestLap, ?bestPosition, ?bestCarsAhead, ?bestDensity, ?lap, ?position, ?carsAhead) <=
+		?cPosition < ?bestPosition, !,
+		choosePitstopScenario(?laps, ?positions, ?carsInFront, ?densities,
+							  ?cLap, ?cPosition, ?cCarsInFront, ?cDensity, ?lap, ?position, ?carsAhead)
+choosePitstopScenario([?cLap | ?laps], [?cPosition | ?positions],
+					  [?cCarsInFront | ?carsInFront], [?cDensity | ?densities],
+					  ?bestLap, ?bestPosition, ?bestCarsAhead, ?bestDensity, ?lap, ?position, ?carsAhead) <=
+		?cPosition = ?bestPosition, ?cDensity =< ?bestDensity, ?cLap > ?bestLap, !,
+		choosePitstopScenario(?laps, ?positions, ?carsInFront, ?densities,
+							  ?cLap, ?cPosition, ?cCarsInFront, ?cDensity, ?lap, ?position, ?carsAhead)
+choosePitstopScenario([? | ?laps], [? | ?positions], [? | ?carsInFront], [? | ?densities],
+					  ?bestLap, ?bestPosition, ?bestCarsInFront, ?bestDensity, ?lap, ?position, ?carsAhead) <=
+		choosePitstopScenario(?laps, ?positions, ?carsInFront, ?densities,
+							  ?bestLap, ?bestPosition, ?bestCarsInFront, ?bestDensity, ?lap, ?position, ?carsAhead)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Pitstop Performed                           ;;;
+;;;                                                                         ;;;
+;;; Records a performed pitstop.                                            ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Pitstop.Lap] => (Prove: updatePitstopLap(?Pitstop.Lap))
+priority: -20, [?Pitstop.Lap] => (Clear: Pitstop.Lap)
+
+updatePitstopLap(?lap) <= Get(Pitstop.Last, ?last), Get(Pitstop, ?last, Lap, ?lap), !
+updatePitstopLap(?lap) <= Get(Pitstop.Last, ?last), ?next = ?last + 1, Set(Pitstop, ?next, Lap, ?lap), Set(Pitstop.Last, ?next), !
+updatePitstopLap(?lap) <= Set(Pitstop.1.Lap, ?lap), Set(Pitstop.Last, 1)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Strategy Handling                           ;;;
+;;;                                                                         ;;;
+;;; Handling of predfined pitstop strategies.                               ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Strategy.Pitstop.Lap] => (Prove: updatePitWarningLap(?Strategy.Pitstop.Lap, !Session.Settings.Lap.PitstopWarning))
+
+updatePitWarningLap(?pitstopLap, ?warningLaps) <= ?warningLap = ?pitstopLap - ?warningLaps, Set(Strategy.Pitstop.Lap.Warning, ?warningLap)
+
+[?Lap >= ?Strategy.Pitstop.Lap.Warning] => (Clear: Strategy.Pitstop.Lap.Warning), (Prove: reportUpcomingPitstop(!Strategy.Pitstop.Lap))
+
+reportUpcomingPitstop(?pitstopLap) <= Call(raiseEvent, PitstopUpcoming, ?pitstopLap), !
+reportUpcomingPitstop(?pitstopLap) <= Call(reportUpcomingPitstop, ?pitstopLap)
+
+[?Pitstop.Lap] => (Prove: pitstopPerformed(?Pitstop.Lap)), (Clear: Strategy.Pitstop.Position)
+
+pitstopPerformed(?) <= unbound?(!Strategy.Pitstop.Next), !
+pitstopPerformed(?pitstopLap) <= validPitstopLap(?pitstopLap), !Strategy.Pitstop.Next < !Strategy.Pitstop.Count, !,
+								 ?nextPitstop = !Strategy.Pitstop.Next + 1, Get(Strategy.Pitstop, ?nextPitstop, Lap, ?nextPitstopLap),
+								 Call(pitstopPerformed, !Strategy.Pitstop.Next),
+								 Get(Strategy.Pitstop, !Strategy.Pitstop.Next, Map, ?map), Set(Strategy.Map, ?map),
+								 Set(Strategy.Pitstop.Next, ?nextPitstop), Set(Strategy.Pitstop.Lap, ?nextPitstopLap)
+pitstopPerformed(?pitstopLap) <= validPitstopLap(?pitstopLap), !Strategy.Pitstop.Next = !Strategy.Pitstop.Count, !,
+								 Call(pitstopPerformed, !Strategy.Pitstop.Next),
+								 Get(Strategy.Pitstop, !Strategy.Pitstop.Next, Map, ?map), Set(Strategy.Map, ?map),
+								 Clear(Strategy.Pitstop.Next), Clear(Strategy.Pitstop.Lap)
+pitstopPerformed(?pitstopLap) <= ?pitstopLap < !Strategy.Pitstop.Lap, !
+pitstopPerformed(?pitstopLap) <= !Strategy.Pitstop.Next < !Strategy.Pitstop.Count, !,
+								 ?nextPitstop = !Strategy.Pitstop.Next + 1, Get(Strategy.Pitstop, ?nextPitstop, Lap, ?nextPitstopLap),
+								 Call(pitstopPerformed, !Strategy.Pitstop.Next),
+								 Get(Strategy.Pitstop, !Strategy.Pitstop.Next, Map, ?map), Set(Strategy.Map, ?map),
+								 Set(Strategy.Pitstop.Next, ?nextPitstop), Set(Strategy.Pitstop.Lap, ?nextPitstopLap),
+								 pitstopPerformed(?pitstopLap)
+pitstopPerformed(?pitstopLap) <= !Strategy.Pitstop.Next = !Strategy.Pitstop.Count, !,
+								 Call(pitstopPerformed, !Strategy.Pitstop.Next),
+								 Get(Strategy.Pitstop, !Strategy.Pitstop.Next, Map, ?map), Set(Strategy.Map, ?map),
+								 Clear(Strategy.Pitstop.Next), Clear(Strategy.Pitstop.Lap)
+
+validPitstopLap(?pitstopLap) <= ?diff = !Strategy.Pitstop.Lap - ?pitstopLap, abs(?diff, ?absDiff), ?absDiff =< !Strategy.Pitstop.Deviation
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                              Memory Cleanup                             ;;;
+;;;                                                                         ;;;
+;;; These rules remove knowledge that is no longer needed.					;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Lap] => (Set: Cleanup, Laps)
+
+priority: -40, [?Cleanup = Laps] => (Prove: clearLaps()), (Set: Cleanup, Standings)
+
+clearLaps() <= ?lap = !Lap - 1, ?clearLap = ?lap - !Session.Settings.Lap.History.Considered, clearLaps(?clearLap)
+
+clearLaps(0) <= !
+clearLaps(?lap) <= ?lap < 0, !
+clearLaps(?lap) <= clearLap(?lap), ?pLap = ?lap - 1, clearLaps(?pLap)
+
+priority: -40, [?Cleanup = Standings] => (Prove: clearStandings()), (Clear: Cleanup)
+
+clearStandings() <= ?lap = !Lap - 1, ?clearLap = ?lap - !Session.Settings.Lap.History.Considered, clearStandings(?clearLap)
+
+clearStandings(0) <= !
+clearStandings(?lap) <= ?lap < 0, !
+clearStandings(?lap) <= clearStanding(?lap), ?pLap = ?lap - 1, clearStandings(?pLap)
+
+clearStanding(?lap) <= Append(Standings.Lap., ?lap, .Car.Count, ?fact), fact?(?fact), !, Get(?fact, ?carCount), Clear(?fact),
+					   Clear(Standings.Lap, ?lap, Time), Clear(Standings.Lap, ?lap, Time.Sectors),
+					   Clear(Standings.Lap, ?lap, Position), Clear(Standings.Lap, ?lap, Weather),
+					   clearStanding(?lap, ?carCount), clearExtrapolatedLap(?lap, ?carCount)
+clearStanding(?)
+
+clearStanding(?, 0) <= !
+clearStanding(?, ?car) <= ?car < 0, !
+clearStanding(?lap, ?car) <= clearStanding(?lap, ?car, [Nr, ID, Delta, Laps, Time, Time.Sectors, Time.Average,
+														Position, Driver.Forname, Driver.Surname, Driver.Nickname, Driver.Category]),
+							 Clear(Standings.Extrapolated, ?lap, Car, ?car, Position),
+							 Clear(Standings.Extrapolated, ?lap, Car, ?car, Sequence),
+							 Clear(Standings.Extrapolated, ?lap, Car, ?car, Laps),
+							 ?pCar = ?car - 1, clearStanding(?lap, ?pCar)
+
+clearStanding(?, ?, []) <= !
+clearStanding(?lap, ?car, [?name | ?names]) <= Clear(Standings.Lap, ?lap, Car, ?car, ?name),
+											   clearStanding(?lap, ?car, ?names)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Car Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Car Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Tyre Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Tyre Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Lap Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Lap Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Pitstop Information Retrieval                     ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Pitstop Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Pitstop Computations                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Pitstop Computations.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Weather Information Retrieval                     ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Weather Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Session & Stint Information Retrieval                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Session Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Statistical Computations                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Statistical Computations.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                               Utilities                                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Utilities.rules

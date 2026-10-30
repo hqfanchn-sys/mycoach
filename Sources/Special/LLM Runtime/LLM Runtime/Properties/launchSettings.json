@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "LLM Runtime": {
+      "commandName": "Project",
+      "commandLineArgs": "\"G:\\Simulator Controller\\Temp\\LLM.cmd\" \"D:\\Machine Learning\\LM Studio\\Models\\bartowski\\Llama-3.3-70B-Instruct-GGUF\\Llama-3.3-70B-Instruct-Q4_K_M.gguf\" 2048 32"
+    }
+  }
+}

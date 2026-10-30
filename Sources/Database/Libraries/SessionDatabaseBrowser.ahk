@@ -1,0 +1,1184 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Session Database Browser        ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Framework.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "SessionDatabase.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Public Function Declaration Section                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+browseLapTelemetries(ownerOrCommand := false, arguments*) {
+	local x, y, names, ignore, infos, index, name, dirName, driverName
+	local carNames, trackNames, newSimulator, newCar, newTrack, newSourceType, force
+	local userTelemetries, communityTelemetries, info, command, fileNames, date
+	local directory
+
+	static sessionDB := false
+
+	static browserGui
+
+	static fileName := false
+	static result := false
+
+	static simulators := false
+	static cars := false
+	static tracks := false
+
+	static simulator := false
+	static car := false
+	static track := false
+
+	static sourceType := "User"
+
+	selectSimulator(*) {
+		try
+			browseLapTelemetries("ChooseSimulator", simulators[browserGui["simulatorDropDown"].Value])
+	}
+
+	selectCar(*) {
+		try
+			browseLapTelemetries("ChooseCar", cars[browserGui["carDropDown"].Value])
+	}
+
+	selectTrack(*) {
+		try
+			browseLapTelemetries("ChooseTrack", tracks[browserGui["trackDropDown"].Value])
+	}
+
+	selectSource(*) {
+		try
+			browseLapTelemetries("ChooseSource", ["User", "Community"][browserGui["sourceTypeDropDown"].Value])
+	}
+
+	lapTimeDisplayValue(lapTime) {
+		local seconds, fraction, minutes
+
+		if ((lapTime = "-") || isNull(lapTime))
+			return "-"
+		else {
+			if isNumber(lapTime)
+				return displayValue("Time", lapTime)
+			else
+				return lapTime
+		}
+	}
+
+	if ((ownerOrCommand == kOk) || (ownerOrCommand == kCancel))
+		result := ownerOrCommand
+	else if (ownerOrCommand == "Load") {
+		browserGui.Opt("+OwnDialogs")
+
+		dirName := (SessionDatabase.DatabasePath . "User\")
+
+		types := "*.telemetry; *.json; *.CSV"
+
+		if ((simulator = "iRacing") && SessionDatabase().hasTrackMap(simulator, track))
+			types .= "; *.ibt"
+
+		OnMessage(0x44, translateLoadCancelButtons)
+		fileName := withBlockedWindows(FileSelect, (simulator = "iRacing") ? 1 : "M1"
+												 , dirName, translate("Load Telemetry...")
+												 , "Lap Telemetry (" . types . ")")
+		OnMessage(0x44, translateLoadCancelButtons, 0)
+
+		if (isObject(fileName) && (fileName.Length = 1) && InStr(fileName[1], ".ibt"))
+			fileName := fileName[1]
+
+		if (!isObject(fileName) && InStr(fileName, ".ibt")) {
+			directory := (kTempDirectory . "Telemetry\IBT Import")
+
+			deleteDirectory(directory)
+
+			DirCreate(directory)
+
+			SplitPath(fileName, &name)
+
+			withBlockedWindows(() {
+				withTask(ProgressTask(translate("Extracting ") . name), () {
+					RunWait("`"" . kBinariesDirectory . "Connectors\iRacing IBT Reader\iRacing IBT Reader.exe`" `"" . fileName . "`" `"" . directory . "`"", , "Hide")
+				})
+			})
+
+			OnMessage(0x44, translateLoadCancelButtons)
+			fileName := withBlockedWindows(FileSelect, "M1", directory, translate("Load Telemetry..."), "Lap Telemetry (*.irc)")
+			OnMessage(0x44, translateLoadCancelButtons, 0)
+		}
+
+		if ((fileName != "") || (isObject(fileName) && (fileName.Length > 0))) {
+			fileNames := []
+			infos := []
+
+			for ignore, fileName in isObject(fileName) ? fileName : [fileName] {
+				browserGui.Block()
+
+				try {
+					fileName := sessionDB.importTelemetry(simulator, car, track, fileName, &info)
+				}
+				finally {
+					browserGui.Unblock()
+				}
+
+				if fileName {
+					fileNames.Push(fileName)
+					infos.Push(info)
+				}
+			}
+
+			if (fileNames.Length > 0) {
+				fileName := [fileNames, infos]
+
+				browseLapTelemetries(kOk)
+			}
+			else
+				fileName := false
+		}
+		else
+			fileName := false
+	}
+	else if (ownerOrCommand = "ChooseSimulator") {
+		newSimulator := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if newSimulator
+			newSimulator := sessionDB.getSimulatorName(newSimulator)
+
+		if (force || (newSimulator != simulator)) {
+			if (!newSimulator && (simulators.Length > 1))
+				newSimulator := simulators[1]
+
+			simulator := newSimulator
+
+			if simulator {
+				browserGui["simulatorDropDown"].Choose(inList(simulators, simulator))
+
+				cars := sessionDB.getCars(simulator)
+			}
+			else {
+				simulator := false
+
+				cars := []
+			}
+
+			carNames := cars.Clone()
+
+			for index, car in cars
+				carNames[index] := sessionDB.getCarName(simulator, car)
+
+			browserGui["carDropDown"].Delete()
+			browserGui["carDropDown"].Add(carNames)
+
+			browseLapTelemetries("ChooseCar", (cars.Length > 0) ? cars[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseCar") {
+		newCar := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newCar != car)) {
+			if (!newCar && (cars.Length > 1))
+				newCar := cars[1]
+
+			car := newCar
+
+			if car {
+				tracks := sessionDB.getTracks(simulator, car)
+
+				browserGui["carDropDown"].Choose(inList(cars, car))
+			}
+			else
+				tracks := []
+
+			browserGui["trackDropDown"].Delete()
+			browserGui["trackDropDown"].Add(collect(tracks, ObjBindMethod(sessionDB, "getTrackName", simulator)))
+
+			browseLapTelemetries("ChooseTrack", (tracks.Length > 0) ? tracks[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseTrack") {
+		newTrack := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newTrack != track)) {
+			if (!newTrack && (tracks.Length > 1))
+				newTrack := tracks[1]
+
+			track := newTrack
+
+			browserGui["telemetryListView"].Delete()
+
+			if track {
+				browserGui["trackDropDown"].Choose(inList(tracks, track))
+
+				if (sourceType = "User") {
+					sessionDB.getTelemetryNames(simulator, car, track, &userTelemetries := true, &ignore := false)
+
+					for ignore, name in userTelemetries {
+						info := sessionDB.readTelemetryInfo(simulator, car, track, name)
+
+						if info {
+							driverName := getMultiMapValue(info, "Lap", "Driver", false)
+
+							if !driverName
+								if getMultiMapValue(info, "Info", "Driver", getMultiMapValue(info, "Telemetry", "Driver", false)) {
+									driver := getMultiMapValue(info, "Telemetry", "Driver", false)
+
+									if driver
+										driverName := SessionDatabase.getDriverName(simulator, driver)
+									else
+										driverName := getMultiMapValue(info, "Info", "Driver", false)
+								}
+
+							lapTime := lapTimeDisplayValue(getMultiMapValue(info, "Lap", "LapTime", translate("-")))
+
+							try {
+								date := (FormatTime(getMultiMapValue(info, "Telemetry", "Date"), "ShortDate") . translate(" - ")
+									   . FormatTime(getMultiMapValue(info, "Telemetry", "Date"), "Time"))
+							}
+							catch Any {
+								date := translate("-")
+							}
+						}
+						else {
+							driverName := false
+							lapTime := translate("-")
+							date := translate("-")
+						}
+
+						if !driverName
+							driverName := SessionDatabase.getName("Creator")
+
+						browserGui["telemetryListView"].Add("", name, driverName, lapTimeDisplayValue(lapTime), date)
+					}
+				}
+				else {
+					sessionDB.getTelemetryNames(simulator, car, track, &userTelemetries := true, &communityTelemetries := true)
+
+					for ignore, name in communityTelemetries
+						if !inList(userTelemetries, name) {
+							info := sessionDB.readTelemetryInfo(simulator, car, track, name, "Community")
+
+							if info
+								lapTime := lapTimeDisplayValue(getMultiMapValue(info, "Lap", "LapTime", translate("-")))
+							else
+								lapTime := translate("-")
+
+							browserGui["telemetryListView"].Add("", name, translate("Community")
+																  , lapTimeDisplayValue(lapTime), translate("-"))
+						}
+				}
+
+				if (browserGui["telemetryListView"].GetCount() > 1)
+					browserGui["telemetryListView"].Modify(1, "Select +Vis")
+
+				browserGui["telemetryListView"].ModifyCol()
+
+				loop browserGui["telemetryListView"].GetCount("Col")
+					browserGui["telemetryListView"].ModifyCol(A_Index, "AutoHdr")
+			}
+		}
+	}
+	else if (ownerOrCommand = "ChooseSource") {
+		newSourceType := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newSourceType != sourceType)) {
+			sourceType := newSourceType
+
+			browserGui["sourceTypeDropDown"].Choose(inList(["User", "Community"], sourceType))
+
+			browseLapTelemetries("ChooseTrack", tracks[browserGui["trackDropDown"].Value], true)
+		}
+	}
+	else {
+		fileName := false
+
+		sessionDB := SessionDatabase()
+		simulators := sessionDB.getSimulators()
+
+		sourceType := "User"
+
+		result := false
+
+		browserGui := Window({Descriptor: "Lap Telemetry Browser", Options: "0x400000"}, translate("Load Telemetry..."))
+
+		if ownerOrCommand
+			browserGui.Opt("+Owner" . ownerOrCommand.Hwnd)
+
+		browserGui.Add("Text", "x8 yp+8 w70 h23 +0x200", translate("Simulator"))
+		browserGui.Add("DropDownList", "x90 yp w275 vsimulatorDropDown", simulators).OnEvent("Change", selectSimulator)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Car"))
+		browserGui.Add("DropDownList", "x90 yp w275 vcarDropDown").OnEvent("Change", selectCar)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Track"))
+		browserGui.Add("DropDownList", "x90 yp w275 vtrackDropDown").OnEvent("Change", selectTrack)
+
+		browserGui.Add("Text", "x8 yp+30 w70 h23 +0x200", translate("Source"))
+		browserGui.Add("DropDownList", "x90 yp w275 Choose1 vsourceTypeDropDown", collect(["User", "Community"], translate)).OnEvent("Change", selectSource)
+
+		browserGui.Add("ListView", "x8 yp+30 w357 h335 +Multi -LV0x10 AltSubmit vtelemetryListView", collect(["Telemetry", "Driver", "Lap Time", "Date"], translate))
+		browserGui["telemetryListView"].OnEvent("DoubleClick", browseLapTelemetries.Bind(kOk))
+
+		browserGui.Add("Button", "x8 yp+345 w80 h23 vopenButton", translate("Open...")).OnEvent("Click", browseLapTelemetries.Bind("Load"))
+
+		browserGui.Add("Button", "x197 yp w80 h23 Default vloadButton", translate("Load")).OnEvent("Click", browseLapTelemetries.Bind(kOk))
+		browserGui.Add("Button", "x285 yp w80 h23", translate("&Cancel")).OnEvent("Click", browseLapTelemetries.Bind(kCancel))
+
+		browserGui.Show("AutoSize Center")
+
+		browseLapTelemetries("ChooseSimulator", SessionDatabase.getSimulatorCode(%arguments[1]%), true)
+		browseLapTelemetries("ChooseCar", SessionDatabase.getCarCode(%arguments[1]%, %arguments[2]%), true)
+		browseLapTelemetries("ChooseTrack", SessionDatabase.getTrackCode(%arguments[1]%, %arguments[3]%), true)
+
+		if getWindowPosition("Lap Telemetry Browser", &x, &y)
+			browserGui.Show("x" . x . " y" . y)
+		else
+			browserGui.Show()
+
+		try {
+			loop {
+				Sleep(100)
+
+				if GetKeyState("Ctrl")
+					browserGui["openButton"].Text := translate("Import...")
+				else
+					browserGui["openButton"].Text := translate("Open...")
+
+				browserGui["loadButton"].Enabled := !!browserGui["telemetryListView"].GetNext(0)
+			}
+			until result
+
+			if (result = kOk) {
+				if (arguments.Length > 3)
+					%arguments[4]% := false
+
+				if fileName {
+					%arguments[1]% := false
+					%arguments[2]% := false
+					%arguments[3]% := false
+
+					if isObject(fileName) {
+						if (arguments.Length > 3)
+							%arguments[4]% := fileName[2]
+
+						return fileName[1]
+					}
+					else
+						return fileName
+				}
+				else {
+					fileNames := []
+					infos := []
+
+					index := 0
+
+					while (index := browserGui["telemetryListView"].GetNext(index))
+						if FileExist(sessionDB.getTelemetryDirectory(simulator, car, track, "User")
+								   . browserGui["telemetryListView"].GetText(index) . ".telemetry") {
+							fileNames.Push(sessionDB.getTelemetryDirectory(simulator, car, track, "User")
+										 . browserGui["telemetryListView"].GetText(index) . ".telemetry")
+
+							infos.Push(sessionDB.getTelemetryDirectory(simulator, car, track, "User")
+									 . browserGui["telemetryListView"].GetText(index) . ".telemetry.info")
+						}
+						else {
+							fileNames.Push(sessionDB.getTelemetryDirectory(simulator, car, track, "Community")
+										 . browserGui["telemetryListView"].GetText(index) . ".telemetry")
+
+							infos.Push(sessionDB.getTelemetryDirectory(simulator, car, track, "Community")
+									 . browserGui["telemetryListView"].GetText(index) . ".telemetry.info")
+						}
+
+					if (fileNames.Length > 0) {
+						%arguments[1]% := simulator
+						%arguments[2]% := car
+						%arguments[3]% := track
+
+						if ((infos.Length > 0) && (arguments.Length > 3))
+							%arguments[4]% := infos
+
+						return fileNames
+					}
+					else
+						return false
+				}
+			}
+			else
+				return false
+		}
+		finally {
+			browserGui.Destroy()
+
+			if ownerOrCommand
+				WinActivate(ownerOrCommand)
+		}
+	}
+}
+
+browseSoloSessions(ownerOrCommand := false, arguments*) {
+	local x, y, names, infos, index, name, dirName, driverName
+	local carNames, trackNames, newSimulator, newCar, newTrack, force
+
+	static sessionDB := false
+
+	static browserGui
+
+	static fileName := false
+	static result := false
+
+	static simulators := false
+	static cars := false
+	static tracks := false
+
+	static simulator := false
+	static car := false
+	static track := false
+
+	selectSimulator(*) {
+		try
+			browseSoloSessions("ChooseSimulator", simulators[browserGui["simulatorDropDown"].Value])
+	}
+
+	selectCar(*) {
+		try
+			browseSoloSessions("ChooseCar", cars[browserGui["carDropDown"].Value])
+	}
+
+	selectTrack(*) {
+		try
+			browseSoloSessions("ChooseTrack", tracks[browserGui["trackDropDown"].Value])
+	}
+
+	if ((ownerOrCommand == kOk) || (ownerOrCommand == kCancel))
+		result := ownerOrCommand
+	else if (ownerOrCommand == "Load") {
+		browserGui.Opt("+OwnDialogs")
+
+		if GetKeyState("Ctrl") {
+			OnMessage(0x44, translateLoadCancelButtons)
+			fileName := withBlockedWindows(FileSelect, "D1", kDatabaseDirectory, translate("Load Session..."))
+			OnMessage(0x44, translateLoadCancelButtons, 0)
+		}
+		else {
+			dirName := (SessionDatabase.DatabasePath . "User\")
+
+			OnMessage(0x44, translateLoadCancelButtons)
+			fileName := withBlockedWindows(FileSelect, 1, dirName, translate("Load Session..."), "Solo Session (*.solo)")
+			OnMessage(0x44, translateLoadCancelButtons, 0)
+		}
+
+		if (fileName != "")
+			browseSoloSessions(kOk)
+		else
+			fileName := false
+	}
+	else if (ownerOrCommand = "ChooseSimulator") {
+		newSimulator := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if newSimulator
+			newSimulator := sessionDB.getSimulatorName(newSimulator)
+
+		if (force || (newSimulator != simulator)) {
+			if (!newSimulator && (simulators.Length > 1))
+				newSimulator := simulators[1]
+
+			simulator := newSimulator
+
+			if simulator {
+				browserGui["simulatorDropDown"].Choose(inList(simulators, simulator))
+
+				cars := sessionDB.getCars(simulator)
+			}
+			else {
+				simulator := false
+
+				cars := []
+			}
+
+			carNames := cars.Clone()
+
+			for index, car in cars
+				carNames[index] := sessionDB.getCarName(simulator, car)
+
+			browserGui["carDropDown"].Delete()
+			browserGui["carDropDown"].Add(carNames)
+
+			browseSoloSessions("ChooseCar", (cars.Length > 0) ? cars[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseCar") {
+		newCar := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newCar != car)) {
+			if (!newCar && (cars.Length > 1))
+				newCar := cars[1]
+
+			car := newCar
+
+			if car {
+				tracks := sessionDB.getTracks(simulator, car)
+
+				browserGui["carDropDown"].Choose(inList(cars, car))
+			}
+			else
+				tracks := []
+
+			browserGui["trackDropDown"].Delete()
+			browserGui["trackDropDown"].Add(collect(tracks, ObjBindMethod(sessionDB, "getTrackName", simulator)))
+
+			browseSoloSessions("ChooseTrack", (tracks.Length > 0) ? tracks[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseTrack") {
+		newTrack := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newTrack != track)) {
+			if (!newTrack && (tracks.Length > 1))
+				newTrack := tracks[1]
+
+			track := newTrack
+
+			browserGui["sessionListView"].Delete()
+
+			if track {
+				browserGui["trackDropDown"].Choose(inList(tracks, track))
+
+				sessionDB.getSessions(simulator, car, track, "Solo", &names, &infos := true)
+
+				for index, name in names {
+					if getMultiMapValue(infos[index], "Session", "Driver", false)
+						driverName := SessionDatabase.getDriverName(simulator, getMultiMapValue(infos[index], "Session", "Driver"))
+					else
+						driverName := false
+
+					if !driverName
+						driverName := getMultiMapValue(infos[index], "Creator", "Name")
+
+					if !driverName
+						driverName := SessionDatabase.getName("Creator")
+
+					browserGui["sessionListView"].Add("", name, driverName
+														, FormatTime(getMultiMapValue(infos[index], "Session", "Date"), "ShortDate") . translate(" - ")
+														. FormatTime(getMultiMapValue(infos[index], "Session", "Date"), "Time"))
+				}
+
+				if (names.Length > 1)
+					browserGui["sessionListView"].Modify(1, "Select +Vis")
+
+				browserGui["sessionListView"].ModifyCol()
+
+				loop browserGui["sessionListView"].GetCount("Col")
+					browserGui["sessionListView"].ModifyCol(A_Index, "AutoHdr")
+			}
+		}
+	}
+	else {
+		fileName := false
+
+		sessionDB := SessionDatabase()
+		simulators := sessionDB.getSimulators()
+
+		result := false
+
+		browserGui := Window({Descriptor: "Practice Session Browser", Options: "0x400000"}, translate("Load Session..."))
+
+		if ownerOrCommand
+			browserGui.Opt("+Owner" . ownerOrCommand.Hwnd)
+
+		browserGui.Add("Text", "x8 yp+8 w70 h23 +0x200", translate("Simulator"))
+		browserGui.Add("DropDownList", "x90 yp w275 vsimulatorDropDown", simulators).OnEvent("Change", selectSimulator)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Car"))
+		browserGui.Add("DropDownList", "x90 yp w275 vcarDropDown").OnEvent("Change", selectCar)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Track"))
+		browserGui.Add("DropDownList", "x90 yp w275 vtrackDropDown").OnEvent("Change", selectTrack)
+
+		browserGui.Add("ListView", "x8 yp+30 w357 h335 -Multi -LV0x10 AltSubmit vsessionListView", collect(["Session", "Driver", "Date"], translate))
+		browserGui["sessionListView"].OnEvent("DoubleClick", browseSoloSessions.Bind(kOk))
+
+		browserGui.Add("Button", "x8 yp+345 w80 h23 vopenButton", translate("Open...")).OnEvent("Click", browseSoloSessions.Bind("Load"))
+
+		browserGui.Add("Button", "x197 yp w80 h23 Default vloadButton", translate("Load")).OnEvent("Click", browseSoloSessions.Bind(kOk))
+		browserGui.Add("Button", "x285 yp w80 h23", translate("&Cancel")).OnEvent("Click", browseSoloSessions.Bind(kCancel))
+
+		browserGui.Show("AutoSize Center")
+
+		browseSoloSessions("ChooseSimulator", SessionDatabase.getSimulatorCode(%arguments[1]%), true)
+		browseSoloSessions("ChooseCar", SessionDatabase.getCarCode(%arguments[1]%, %arguments[2]%), true)
+		browseSoloSessions("ChooseTrack", SessionDatabase.getTrackCode(%arguments[1]%, %arguments[3]%), true)
+
+		if getWindowPosition("Practice Session Browser", &x, &y)
+			browserGui.Show("x" . x . " y" . y)
+		else
+			browserGui.Show()
+
+		try {
+			loop {
+				Sleep(100)
+
+				if GetKeyState("Ctrl")
+					browserGui["openButton"].Text := translate("Import...")
+				else
+					browserGui["openButton"].Text := translate("Open...")
+
+				browserGui["loadButton"].Enabled := !!browserGui["sessionListView"].GetNext(0)
+			}
+			until result
+
+			if (result = kOk) {
+				if fileName {
+					%arguments[1]% := false
+					%arguments[2]% := false
+					%arguments[3]% := false
+
+					return fileName
+				}
+				else {
+					index := browserGui["sessionListView"].GetNext()
+
+					if index {
+						%arguments[1]% := simulator
+						%arguments[2]% := car
+						%arguments[3]% := track
+
+						return (sessionDB.getSessionDirectory(simulator, car, track, "Solo")
+							  . browserGui["sessionListView"].GetText(index) . ".solo")
+					}
+					else
+						return false
+				}
+			}
+			else
+				return false
+		}
+		finally {
+			browserGui.Destroy()
+
+			if ownerOrCommand
+				WinActivate(ownerOrCommand)
+		}
+	}
+}
+
+browseTeamSessions(ownerOrCommand := false, arguments*) {
+	local x, y, names, infos, index, name, driverName
+	local carNames, trackNames, newSimulator, newCar, newTrack, force, dirName
+
+	static sessionDB := false
+
+	static browserGui
+	static result := false
+
+	static simulators := false
+	static cars := false
+	static tracks := false
+
+	static simulator := false
+	static car := false
+	static track := false
+
+	static fileName := false
+
+	selectSimulator(*) {
+		try
+			browseTeamSessions("ChooseSimulator", simulators[browserGui["simulatorDropDown"].Value])
+	}
+
+	selectCar(*) {
+		try
+			browseTeamSessions("ChooseCar", cars[browserGui["carDropDown"].Value])
+	}
+
+	selectTrack(*) {
+		try
+			browseTeamSessions("ChooseTrack", tracks[browserGui["trackDropDown"].Value])
+	}
+
+	if ((ownerOrCommand == kOk) || (ownerOrCommand == kCancel))
+		result := ownerOrCommand
+	else if (ownerOrCommand = "Load") {
+		browserGui.Opt("+OwnDialogs")
+
+		if GetKeyState("Ctrl") {
+			OnMessage(0x44, translateLoadCancelButtons)
+			fileName := withBlockedWindows(FileSelect, "D1", kDatabaseDirectory, translate("Load Session..."))
+			OnMessage(0x44, translateLoadCancelButtons, 0)
+		}
+		else {
+			dirName := (SessionDatabase.DatabasePath . "User\")
+
+			OnMessage(0x44, translateLoadCancelButtons)
+			fileName := withBlockedWindows(FileSelect, 1, dirName, translate("Load Session..."), "Team Session (*.team)")
+			OnMessage(0x44, translateLoadCancelButtons, 0)
+		}
+
+		if (fileName != "")
+			browseTeamSessions(kOk)
+		else
+			fileName := false
+	}
+	else if (ownerOrCommand = "ChooseSimulator") {
+		newSimulator := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if newSimulator
+			newSimulator := sessionDB.getSimulatorName(newSimulator)
+
+		if (force || (newSimulator != simulator)) {
+			if (!newSimulator && (simulators.Length > 1))
+				newSimulator := simulators[1]
+
+			simulator := newSimulator
+
+			if simulator {
+				browserGui["simulatorDropDown"].Choose(inList(simulators, simulator))
+
+				cars := sessionDB.getCars(simulator)
+			}
+			else {
+				simulator := false
+
+				cars := []
+			}
+
+			carNames := cars.Clone()
+
+			for index, car in cars
+				carNames[index] := sessionDB.getCarName(simulator, car)
+
+			browserGui["carDropDown"].Delete()
+			browserGui["carDropDown"].Add(carNames)
+
+			browseTeamSessions("ChooseCar", (cars.Length > 0) ? cars[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseCar") {
+		newCar := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newCar != car)) {
+			if (!newCar && (cars.Length > 1))
+				newCar := cars[1]
+
+			car := newCar
+
+			if car {
+				tracks := sessionDB.getTracks(simulator, car)
+
+				browserGui["carDropDown"].Choose(inList(cars, car))
+			}
+			else
+				tracks := []
+
+			browserGui["trackDropDown"].Delete()
+			browserGui["trackDropDown"].Add(collect(tracks, ObjBindMethod(sessionDB, "getTrackName", simulator)))
+
+			browseTeamSessions("ChooseTrack", (tracks.Length > 0) ? tracks[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseTrack") {
+		newTrack := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newTrack != track)) {
+			if (!newTrack && (tracks.Length > 1))
+				newTrack := tracks[1]
+
+			track := newTrack
+
+			browserGui["sessionListView"].Delete()
+
+			if track {
+				browserGui["trackDropDown"].Choose(inList(tracks, track))
+
+				sessionDB.getSessions(simulator, car, track, "Team", &names, &infos := true)
+
+				for index, name in names
+					browserGui["sessionListView"].Add("", name
+														, (FormatTime(getMultiMapValue(infos[index], "Session", "Date"), "ShortDate") . translate(" - ")
+														 . FormatTime(getMultiMapValue(infos[index], "Session", "Date"), "Time")))
+
+				if (names.Length > 1)
+					browserGui["sessionListView"].Modify(1, "Select +Vis")
+
+				browserGui["sessionListView"].ModifyCol()
+
+				loop browserGui["sessionListView"].GetCount("Col")
+					browserGui["sessionListView"].ModifyCol(A_Index, "AutoHdr")
+			}
+		}
+	}
+	else {
+		sessionDB := SessionDatabase()
+		simulators := sessionDB.getSimulators()
+
+		fileName := false
+		result := false
+
+		browserGui := Window({Descriptor: "Race Session Browser", Options: "0x400000"}, translate("Load Session..."))
+
+		if ownerOrCommand
+			browserGui.Opt("+Owner" . ownerOrCommand.Hwnd)
+
+		browserGui.Add("Text", "x8 yp+8 w70 h23 +0x200", translate("Simulator"))
+		browserGui.Add("DropDownList", "x90 yp w275 vsimulatorDropDown", simulators).OnEvent("Change", selectSimulator)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Car"))
+		browserGui.Add("DropDownList", "x90 yp w275 vcarDropDown").OnEvent("Change", selectCar)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Track"))
+		browserGui.Add("DropDownList", "x90 yp w275 vtrackDropDown").OnEvent("Change", selectTrack)
+
+		browserGui.Add("ListView", "x8 yp+30 w357 h335 -Multi -LV0x10 AltSubmit vsessionListView", collect(["Session", "Date"], translate))
+		browserGui["sessionListView"].OnEvent("DoubleClick", browseTeamSessions.Bind(kOk))
+
+		browserGui.Add("Button", "x8 yp+345 w80 h23 vopenButton", translate("Open...")).OnEvent("Click", browseTeamSessions.Bind("Load"))
+
+		browserGui.Add("Button", "x197 yp w80 h23 Default vloadButton", translate("Load")).OnEvent("Click", browseTeamSessions.Bind(kOk))
+		browserGui.Add("Button", "x285 yp w80 h23", translate("&Cancel")).OnEvent("Click", browseTeamSessions.Bind(kCancel))
+
+		browserGui.Show("AutoSize Center")
+
+		browseTeamSessions("ChooseSimulator", SessionDatabase.getSimulatorCode(%arguments[1]%), true)
+		browseTeamSessions("ChooseCar", SessionDatabase.getCarCode(%arguments[1]%, %arguments[2]%), true)
+		browseTeamSessions("ChooseTrack", SessionDatabase.getTrackCode(%arguments[1]%, %arguments[3]%), true)
+
+		if getWindowPosition("Race Session Browser", &x, &y)
+			browserGui.Show("x" . x . " y" . y)
+		else
+			browserGui.Show()
+
+		try {
+			loop {
+				Sleep(100)
+
+				if GetKeyState("Ctrl")
+					browserGui["openButton"].Text := translate("Import...")
+				else
+					browserGui["openButton"].Text := translate("Open...")
+
+				browserGui["loadButton"].Enabled := !!browserGui["sessionListView"].GetNext(0)
+			}
+			until result
+
+			if (result = kOk) {
+				if fileName {
+					%arguments[1]% := false
+					%arguments[2]% := false
+					%arguments[3]% := false
+
+					return fileName
+				}
+				else {
+					index := browserGui["sessionListView"].GetNext()
+
+					if index {
+						%arguments[1]% := simulator
+						%arguments[2]% := car
+						%arguments[3]% := track
+
+						return (sessionDB.getSessionDirectory(simulator, car, track, "Team") . browserGui["sessionListView"].GetText(index) . ".team")
+					}
+					else
+						return false
+				}
+			}
+			else
+				return false
+		}
+		finally {
+			browserGui.Destroy()
+
+			if ownerOrCommand
+				WinActivate(ownerOrCommand)
+		}
+	}
+}
+
+browseStrategies(ownerOrCommand := false, arguments*) {
+	local x, y, names, infos, index, name, driverName
+	local carNames, trackNames, newSimulator, newCar, newTrack, newSourceType, force, dirName
+	local userStrategies, communityStrategies
+
+	static sessionDB := false
+
+	static browserGui
+	static result := false
+
+	static strategyTypes := []
+
+	static simulators := false
+	static cars := false
+	static tracks := false
+
+	static simulator := false
+	static car := false
+	static track := false
+
+	static fileName := false
+
+	static sourceType := "User"
+
+	selectSimulator(*) {
+		try
+			browseStrategies("ChooseSimulator", simulators[browserGui["simulatorDropDown"].Value])
+	}
+
+	selectCar(*) {
+		try
+			browseStrategies("ChooseCar", cars[browserGui["carDropDown"].Value])
+	}
+
+	selectTrack(*) {
+		try
+			browseStrategies("ChooseTrack", tracks[browserGui["trackDropDown"].Value])
+	}
+
+	selectSource(*) {
+		try
+			browseStrategies("ChooseSource", ["User", "Community"][browserGui["sourceTypeDropDown"].Value])
+	}
+
+	if ((ownerOrCommand == kOk) || (ownerOrCommand == kCancel))
+		result := ownerOrCommand
+	else if (ownerOrCommand = "Load") {
+		browserGui.Opt("+OwnDialogs")
+
+		dirName := (SessionDatabase.DatabasePath . "User\")
+
+		OnMessage(0x44, translateLoadCancelButtons)
+		fileName := withBlockedWindows(FileSelect, 1, dirName, translate("Load Strategy..."), "Strategy (*.strategy)")
+		OnMessage(0x44, translateLoadCancelButtons, 0)
+
+		if (fileName != "")
+			browseStrategies(kOk)
+		else
+			fileName := false
+	}
+	else if (ownerOrCommand = "ChooseSimulator") {
+		newSimulator := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if newSimulator
+			newSimulator := sessionDB.getSimulatorName(newSimulator)
+
+		if (force || (newSimulator != simulator)) {
+			if (!newSimulator && (simulators.Length > 1))
+				newSimulator := simulators[1]
+
+			simulator := newSimulator
+
+			if simulator {
+				browserGui["simulatorDropDown"].Choose(inList(simulators, simulator))
+
+				cars := sessionDB.getCars(simulator)
+			}
+			else {
+				simulator := false
+
+				cars := []
+			}
+
+			carNames := cars.Clone()
+
+			for index, car in cars
+				carNames[index] := sessionDB.getCarName(simulator, car)
+
+			browserGui["carDropDown"].Delete()
+			browserGui["carDropDown"].Add(carNames)
+
+			browseStrategies("ChooseCar", (cars.Length > 0) ? cars[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseCar") {
+		newCar := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newCar != car)) {
+			if (!newCar && (cars.Length > 1))
+				newCar := cars[1]
+
+			car := newCar
+
+			if car {
+				tracks := sessionDB.getTracks(simulator, car)
+
+				browserGui["carDropDown"].Choose(inList(cars, car))
+			}
+			else
+				tracks := []
+
+			browserGui["trackDropDown"].Delete()
+			browserGui["trackDropDown"].Add(collect(tracks, ObjBindMethod(sessionDB, "getTrackName", simulator)))
+
+			browseStrategies("ChooseTrack", (tracks.Length > 0) ? tracks[1] : false, true)
+		}
+	}
+	else if (ownerOrCommand = "ChooseTrack") {
+		newTrack := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newTrack != track)) {
+			if (!newTrack && (tracks.Length > 1))
+				newTrack := tracks[1]
+
+			track := newTrack
+
+			browserGui["strategyListView"].Delete()
+
+			if track {
+				browserGui["trackDropDown"].Choose(inList(tracks, track))
+
+				if (sourceType = "User") {
+					sessionDB.getStrategyNames(simulator, car, track, &userStrategies := true, &ignore := false)
+
+					names := userStrategies
+					strategyTypes := []
+
+					loop names.Length
+						strategyTypes.Push("User")
+				}
+				else {
+					sessionDB.getStrategyNames(simulator, car, track, &userStrategies := true, &communityStrategies := true)
+
+					names := []
+					strategyTypes := []
+
+					for ignore, name in communityStrategies
+						if !inList(userStrategies, name) {
+							names.Push(name)
+							strategyTypes.Push("Community")
+						}
+				}
+
+				for index, name in names
+					browserGui["strategyListView"].Add("", name)
+
+				if (names.Length > 1)
+					browserGui["strategyListView"].Modify(1, "Select +Vis")
+
+				browserGui["strategyListView"].ModifyCol()
+
+				loop browserGui["strategyListView"].GetCount("Col")
+					browserGui["strategyListView"].ModifyCol(A_Index, "AutoHdr")
+			}
+		}
+	}
+	else if (ownerOrCommand = "ChooseSource") {
+		newSourceType := arguments[1]
+		force := ((arguments.Length > 1) ? arguments[2] : false)
+
+		if (force || (newSourceType != sourceType)) {
+			sourceType := newSourceType
+
+			browserGui["sourceTypeDropDown"].Choose(inList(["User", "Community"], sourceType))
+
+			browseStrategies("ChooseTrack", tracks[browserGui["trackDropDown"].Value], true)
+		}
+	}
+	else {
+		sessionDB := SessionDatabase()
+		simulators := sessionDB.getSimulators()
+
+		sourceType := "User"
+
+		fileName := false
+		result := false
+
+		browserGui := Window({Descriptor: "Strategy Browser", Options: "0x400000"}, translate("Load Strategy..."))
+
+		if ownerOrCommand
+			browserGui.Opt("+Owner" . ownerOrCommand.Hwnd)
+
+		browserGui.Add("Text", "x8 yp+8 w70 h23 +0x200", translate("Simulator"))
+		browserGui.Add("DropDownList", "x90 yp w275 vsimulatorDropDown", simulators).OnEvent("Change", selectSimulator)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Car"))
+		browserGui.Add("DropDownList", "x90 yp w275 vcarDropDown").OnEvent("Change", selectCar)
+
+		browserGui.Add("Text", "x8 yp+24 w70 h23 +0x200", translate("Track"))
+		browserGui.Add("DropDownList", "x90 yp w275 vtrackDropDown").OnEvent("Change", selectTrack)
+
+		browserGui.Add("Text", "x8 yp+30 w70 h23 +0x200", translate("Source"))
+		browserGui.Add("DropDownList", "x90 yp w275 Choose1 vsourceTypeDropDown", collect(["User", "Community"], translate)).OnEvent("Change", selectSource)
+
+		browserGui.Add("ListView", "x8 yp+30 w357 h335 -Multi -LV0x10 AltSubmit vstrategyListView", collect(["Strategy"], translate))
+		browserGui["strategyListView"].OnEvent("DoubleClick", browseStrategies.Bind(kOk))
+
+		browserGui.Add("Button", "x8 yp+345 w80 h23 vopenButton", translate("Open...")).OnEvent("Click", browseStrategies.Bind("Load"))
+
+		browserGui.Add("Button", "x197 yp w80 h23 Default vloadButton", translate("Load")).OnEvent("Click", browseStrategies.Bind(kOk))
+		browserGui.Add("Button", "x285 yp w80 h23", translate("&Cancel")).OnEvent("Click", browseStrategies.Bind(kCancel))
+
+		browserGui.Show("AutoSize Center")
+
+		browseStrategies("ChooseSimulator", SessionDatabase.getSimulatorCode(%arguments[1]%), true)
+		browseStrategies("ChooseCar", SessionDatabase.getCarCode(%arguments[1]%, %arguments[2]%), true)
+		browseStrategies("ChooseTrack", SessionDatabase.getTrackCode(%arguments[1]%, %arguments[3]%), true)
+
+		if getWindowPosition("Strategy Browser", &x, &y)
+			browserGui.Show("x" . x . " y" . y)
+		else
+			browserGui.Show()
+
+		try {
+			loop {
+				Sleep(100)
+
+				browserGui["loadButton"].Enabled := !!browserGui["strategyListView"].GetNext(0)
+			}
+			until result
+
+			if (result = kOk) {
+				if fileName {
+					%arguments[1]% := false
+					%arguments[2]% := false
+					%arguments[3]% := false
+
+					return fileName
+				}
+				else {
+					index := browserGui["strategyListView"].GetNext()
+
+					if index {
+						%arguments[1]% := simulator
+						%arguments[2]% := car
+						%arguments[3]% := track
+
+						return (sessionDB.getStrategyDirectory(simulator, car, track, strategyTypes[index]) . browserGui["strategyListView"].GetText(index) . ".strategy")
+					}
+					else
+						return false
+				}
+			}
+			else
+				return false
+		}
+		finally {
+			browserGui.Destroy()
+
+			if ownerOrCommand
+				WinActivate(ownerOrCommand)
+		}
+	}
+}

@@ -1,0 +1,47 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Standings Computations          ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Rule Include Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Lap Information Retrieval.rules
+#Include %kResourcesDirectory%Rules\Car Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Public Rules Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 5, {Any: [?Lap], [?Sector], [?Standings]} =>
+		(Clear: Position.Standings.Overall.Ahead.Car), (Clear: Position.Standings.Overall.Ahead.Distance),
+		(Clear: Position.Standings.Overall.Ahead.Delta),
+		(Clear: Position.Standings.Overall.Behind.Car), (Clear: Position.Standings.Overall.Behind.Distance),
+		(Clear: Position.Standings.Overall.Behind.Delta),
+		(Clear: Position.Standings.Overall.Leader.Car), (Clear: Position.Standings.Overall.Leader.Distance),
+		(Clear: Position.Standings.Overall.Leader.Delta),
+		(Clear: Position.Standings.Class.Ahead.Car), (Clear: Position.Standings.Class.Ahead.Distance),
+		(Clear: Position.Standings.Class.Ahead.Delta),
+		(Clear: Position.Standings.Class.Behind.Car), (Clear: Position.Standings.Class.Behind.Distance),
+		(Clear: Position.Standings.Class.Behind.Delta),
+		(Clear: Position.Standings.Class.Leader.Car), (Clear: Position.Standings.Class.Leader.Distance),
+		(Clear: Position.Standings.Class.Leader.Delta),
+		(Clear: Position.Track.Ahead.Car), (Clear: Position.Track.Ahead.Distance), (Clear: Position.Track.Ahead.Delta),
+		(Clear: Position.Track.Behind.Car), (Clear: Position.Track.Behind.Distance), (Clear: Position.Track.Behind.Delta)
+{Any: [?Lap], [?Sector], [?Standings]} => (Prove: updateGrid(?Lap)), (Prove: updatePositions(?Lap)),
+										  (Prove: updateTrackAhead(?Lap)), (Prove: updateTrackBehind(?Lap))
+priority: -5, [?Standings] => (Clear: Standings)
+
+updateGrid(?lap) <= :computeGrid(?lap)
+
+updatePositions(?lap) <= :computePositions(?lap)
+
+updateTrackAhead(?) <= bound?(!Position.Track.Ahead.Car), !
+updateTrackAhead(?lap) <= carLaps(!Driver.Car, RUNNING, ?running), ?remaining = 1 - ?running, :computeTrackAhead(?remaining)
+
+updateTrackBehind(?) <= bound?(!Position.Track.Behind.Car), !
+updateTrackBehind(?lap) <= carLaps(!Driver.Car, RUNNING, ?running), :computeTrackBehind(?running)

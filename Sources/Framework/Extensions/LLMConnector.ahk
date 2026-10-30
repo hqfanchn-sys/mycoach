@@ -1,0 +1,1558 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - LLM Connector                   ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Global Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "JSON.ahk"
+#Include "HTTP.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class LLMTool {
+	iName := ""
+	iDescription := ""
+
+	class Function extends LLMTool {
+		iParameters := []
+
+		iCallable := false
+
+		class Parameter {
+			iName := ""
+			iDescription := ""
+
+			iType := "object"
+			iEnumeration := false
+			iRequired := true
+
+			iReader := (v) => v
+
+			Descriptor[schema := "OpenAI"] {
+				Get {
+					local descriptor := {description: this.Description, type: this.Type}
+
+					if this.Enumeration
+						descriptor.Enum := this.Enumeration
+
+					return descriptor
+				}
+			}
+
+			Name {
+				Get {
+					return this.iName
+				}
+			}
+
+			Description {
+				Get {
+					return this.iDescription
+				}
+			}
+
+			Type {
+				Get {
+					return this.iType
+				}
+			}
+
+			Enumeration {
+				Get {
+					return this.iEnumeration
+				}
+			}
+
+			Required {
+				Get {
+					return this.iRequired
+				}
+			}
+
+			Reader {
+				Get {
+					return this.iReader
+				}
+
+				Set {
+					return (this.iReader := value)
+				}
+			}
+
+			__New(name, description, type, enumeration := false, required := true, reader := (v) => v) {
+				if (enumeration && (enumeration.Length = 0))
+					enumeration := false
+
+				this.iName := name
+				this.iDescription := description
+				this.iType := StrLower(type)
+				this.iEnumeration := enumeration
+				this.iRequired := ((required = kTrue) ? kTrue : ((required = kFalse) ? false : required))
+				this.iReader := reader
+			}
+		}
+
+		Descriptor[schema := "OpenAI"] {
+			Get {
+				local required := []
+				local parameters := {}
+				local ignore, parameter
+
+				for ignore, parameter in this.Parameters {
+					parameters.%parameter.Name% := parameter.Descriptor[schema]
+
+					if parameter.Required
+						required.Push(parameter.Name)
+				}
+
+				if (schema = "OpenAI")
+					return {type: "function"
+						  , function: {name: this.Name, description: this.Description
+									 , parameters: {type: "object", properties: parameters, required: required}}}
+				else if (schema = "Anthropic")
+					return {name: this.Name, description: this.Description
+						  , input_schema: { type: "object"
+										  , properties: parameters
+										  , required: required}}
+				else
+					throw "Unsupported tool schema detected in LLMTool.Function.Descriptor..."
+			}
+		}
+
+		Type {
+			Get {
+				return "function"
+			}
+		}
+
+		Parameters {
+			Get {
+				return this.iParameters
+			}
+		}
+
+		Callable {
+			Get {
+				return this.iCallable
+			}
+
+			Set {
+				return (this.iCallable := false)
+			}
+		}
+
+		__New(name, description, parameters, callable := false) {
+			this.iParameters := parameters
+			this.iCallable := callable
+
+			super.__New(name, description)
+		}
+
+		static FromDescriptor(descriptor) {
+			local parameters := []
+			local required := []
+			local name, parameter
+
+			if !isObject(descriptor)
+				descriptor := JSON.parse(descriptor)
+
+			if descriptor["function"].Has("parameters") {
+				if descriptor["function"]["parameters"].Has("required")
+					required := descriptor["function"]["parameters"]["required"]
+
+				for name, parameter in descriptor["function"]["parameters"]["properties"]
+					parameters.Push(LLMTool.Function.Parameter(name, parameter["description"], parameter["type"],  parameter["enumeration"], inList(required, name)))
+			}
+
+			return LLMTool.Function(descriptor["function"]["name"], descriptor["function"]["description"], parameters)
+		}
+	}
+
+	Descriptor[schema := "OpenAI"] {
+		Get {
+			throw "Virtual property LLMTool.Descriptor must be implemeneted in a subclass..."
+		}
+	}
+
+	Type {
+		Get {
+			throw "Virtual property LLMTool.Type must be implemeneted in a subclass..."
+		}
+	}
+
+	Name {
+		Get {
+			return this.iName
+		}
+	}
+
+	Description {
+		Get {
+			return this.iDescription
+		}
+	}
+
+	JSON[schema := "OpenAI"] {
+		Get {
+			return JSON.print(this.Descriptor[schema], "  ")
+		}
+	}
+
+	__New(name, description) {
+		this.iName := name
+		this.iDescription := description
+	}
+
+	static FromDescriptor(descriptor) {
+		if !isObject(descriptor)
+			descriptor := JSON.parse(descriptor)
+
+		if isInstance(descriptor, Array)
+			return collect(descriptor, ObjBindMethod(this, "FromDescriptor"))
+		else if (descriptor["type"] = "function")
+			return LLMTool.Function.FromDescriptor(descriptor)
+		else
+			throw "Unknown tool type detected in LLMTool.FromDescriptor..."
+	}
+}
+
+class LLMConnector {
+	iManager := false
+	iModel := false
+
+	iMaxTokens := 1024
+	iTemperature := 0.5
+
+	iHistory := []
+	iMaxHistory := 3
+	iHistoryEnabled := true
+
+	class HTTPConnector extends LLMConnector {
+		iServer := ""
+		iToken := ""
+
+		Server {
+			Get {
+				return this.iServer
+			}
+		}
+
+		Token {
+			Get {
+				return this.iToken
+			}
+		}
+
+		Certificate {
+			Get {
+				return "CURRENT_USER\My\SimulatorController"
+			}
+		}
+
+		static Models {
+			Get {
+				return []
+			}
+		}
+
+		Models {
+			Get {
+				return LLMConnector.HTTPConnector.Models
+			}
+		}
+
+		Model[external := false] {
+			Get {
+				if !external {
+					if inList(this.Models, super.Model)
+						return StrLower(StrReplace(super.Model, A_Space, "-"))
+					else
+						return super.Model
+				}
+				else
+					return super.Model
+			}
+		}
+
+		Connect(server?, token?) {
+			this.iServer := (isSet(server) ? server : this.Server)
+			this.iToken := (isSet(token) ? token : this.Token)
+		}
+
+		AddConversation(question, answer) {
+			if this.History {
+				this.History.Push([question, answer])
+
+				while (this.History.Length > this.MaxHistory)
+					this.History.RemoveAt(1)
+			}
+		}
+
+		CreateServerURL(server) {
+			return server
+		}
+
+		CreateServiceURL(server) {
+			return this.CreateServerURL(server)
+		}
+
+		CreateHeaders(headers?) {
+			if !isSet(headers)
+				headers := Map()
+
+			if (Trim(this.Token) != "")
+				headers["Authorization"] := ("Bearer " . this.Token)
+
+			return headers
+		}
+
+		CreatePrompt(body, instructions, tools, question) {
+			throw "Virtual method LLMConnector.HTTPConnector.CreatePrompt must be implemented in a subclass..."
+		}
+
+		CreateTools(body, tools) {
+			throw "Virtual method LLMConnector.HTTPConnector.CreateTools must be implemented in a subclass..."
+		}
+
+		ProcessToolCalls(tools, message, &calls?) {
+			return false
+		}
+
+		ProcessAnswer(tools, answer, &calls?) {
+			throw "Virtual method LLMConnector.HTTPConnector.ProcessAnswer must be implemented in a subclass..."
+		}
+
+		Ask(question, instructions := false, tools := false, &calls?) {
+			local headers := this.CreateHeaders(Map("Content-Type", "application/json"))
+			local body := {model: this.Model, temperature: this.Temperature}
+			local toolCall := false
+			local tries := 5
+			local answer, wait
+
+			if this.MaxTokens
+				body.max_tokens := this.MaxTokens
+
+			if !instructions
+				instructions := this.GetInstructions()
+
+			if !tools
+				tools := this.GetTools()
+
+			try {
+				if isDebug()
+					body := JSON.print(this.CreatePrompt(body, instructions, tools, question), "  ")
+				else
+					body := JSON.print(this.CreatePrompt(body, instructions, tools, question))
+
+				if isDebug() {
+					deleteFile(kTempDirectory . "LLM.request")
+
+					try
+						FileAppend(body, kTempDirectory . "LLM.request")
+				}
+
+				while (tries-- > 0) {
+					if this.Certificate {
+						try {
+							answer := WinHttpRequest({Timeouts: [0, 60000, 30000, 600000]
+													, Certificate: this.Certificate}).POST(this.CreateServiceURL(this.Server)
+																						 , body, headers, {Object: true, Encoding: "UTF-8"})
+						}
+						catch Any as exception {
+							logError(exception, true)
+
+							answer := WinHttpRequest({Timeouts: [0, 60000, 30000, 600000]}).POST(this.CreateServiceURL(this.Server)
+																							  , body, headers, {Object: true, Encoding: "UTF-8"})
+						}
+					}
+					else
+						answer := WinHttpRequest({Timeouts: [0, 60000, 30000, 600000]}).POST(this.CreateServiceURL(this.Server)
+																						   , body, headers, {Object: true, Encoding: "UTF-8"})
+
+					if (answer.Status = 429) {
+						wait := (5 - tries)
+
+						wait *= wait
+
+						Sleep(wait * 500)
+					}
+					else
+						break
+				}
+
+				if ((answer.Status >= 200) && (answer.Status < 300)) {
+					this.Manager.connectorState("Active")
+
+					answer := answer.JSON
+
+					if isDebug() {
+						deleteFile(kTempDirectory . "LLM.response")
+
+						try
+							FileAppend(JSON.print(answer, "  "), kTempDirectory . "LLM.response")
+					}
+
+					try {
+						answer := this.ProcessAnswer(tools, answer, &calls)
+
+						if (answer && (answer != true))
+							this.AddConversation(question, answer)
+
+						return answer
+					}
+					catch Any as exception {
+						logError(exception, true)
+
+						this.Manager.connectorState("Error", "Answer", answer)
+
+						return false
+					}
+				}
+				else {
+					throw ("LLM API call returned " . answer.Status . " in HTTPConnector.Ask...")
+
+					this.Manager.connectorState("Error", "Connection", answer.Status)
+
+					return false
+				}
+			}
+			catch Any as exception {
+				logError(exception, true)
+
+				this.Manager.connectorState("Error", "Connection", isSet(answer) ? answer.Status : unset)
+
+				return false
+			}
+		}
+	}
+
+	class APIConnector extends LLMConnector.HTTPConnector {
+		Schema {
+			Get {
+				return "OpenAI"
+			}
+		}
+
+		Models {
+			Get {
+				return this.LoadModels()
+			}
+		}
+
+		CreateServerURL(server) {
+			if InStr(server, "/v1/chat/completions")
+				server := StrReplace(server, "/v1/chat/completions", "")
+
+			if (SubStr(server, StrLen(server)) = "/")
+				return SubStr(server, 1, StrLen(server) - 1)
+			else
+				return server
+		}
+
+		CreateServiceURL(server) {
+			return (this.CreateServerURL(server) . "/v1/chat/completions")
+		}
+
+		CreateModelsURL(server) {
+			return (this.CreateServerURL(server) . "/v1/models")
+		}
+
+		CreatePrompt(body, instructions, tools, question) {
+			local messages := []
+			local ignore, instruction, conversation, system
+
+			addInstruction(instruction) {
+				if (instruction && (Trim(instruction) != ""))
+					messages.Push({role: "system", content: instruction})
+			}
+
+			if (!question || (question == true) || (Trim(question) = ""))
+				throw Error("Invalid question detected in LLMConnector.APIConnector.CreatePrompt...")
+
+			if (this.Schema = "OpenAI")
+				do(instructions, addInstruction)
+			else if (this.Schema = "Anthropic") {
+				system := []
+
+				for ignore, instruction in instructions
+					if (instruction && (Trim(instruction) != ""))
+						system.Push({type: "text", text: instruction})
+
+				body.system := system
+			}
+			else
+				throw "Unsupported tool schema detected in LLMConnector.APIConnector.CreatePrompt..."
+
+			for ignore, conversation in (this.History ? this.History : []) {
+				messages.Push({role: "user", content: conversation[1]})
+				messages.Push({role: "assistant", content: conversation[2]})
+			}
+
+			messages.Push({role: "user", content: question})
+
+			body.messages := messages
+
+			if (tools.Length > 0)
+				body := this.CreateTools(body, tools)
+
+			return body
+		}
+
+		CreateTools(body, tools) {
+			body.tools := collect(tools, (t) => t.Descriptor[this.Schema])
+
+			return body
+		}
+
+		FindTool(tools, name) {
+			local ignore, candidate
+
+			for ignore, candidate in tools
+				if (candidate.Name = name)
+					return candidate
+
+			return false
+		}
+
+		ParseArguments(function, arguments) {
+			local result := []
+			local ignore, paramater, name, argument, value
+
+			for ignore, parameter in function.Parameters {
+				value := kUndefined
+
+				for name, argument in arguments
+					if (name = parameter.Name) {
+						value := parameter.Reader.Call(argument)
+
+						break
+					}
+
+				result.Push((value = kUndefined) ? unset : value)
+			}
+
+			return result
+		}
+
+		ParseToolCall(tools, descriptor, &name, &arguments) {
+			local tool
+
+			if descriptor.Has("function") {
+				tool := descriptor["function"]
+
+				name := tool["name"]
+				arguments := tool["arguments"]
+
+				tool := this.FindTool(tools, name)
+
+				if tool {
+					if isInstance(arguments, String)
+						arguments := JSON.parse(arguments)
+
+					arguments := this.ParseArguments(tool, toMap(arguments))
+
+					return tool
+				}
+				else
+					return false
+			}
+			else
+				throw "Unsupported tool type detected in LLMConnector.APIConnector.ParseToolCall..."
+		}
+
+		CallTool(tools, tool) {
+			local name, arguments
+
+			tool := this.ParseToolCall(tools, tool, &name, &arguments)
+
+			if tool {
+				tool.Callable.Call(arguments*)
+
+				return Array(tool, arguments)
+			}
+			else
+				return false
+		}
+
+		ProcessToolCalls(tools, message, &calls?) {
+			if (message.Has("tool_calls") && isInstance(message["tool_calls"], Array)) {
+				if isSet(calls)
+					calls := choose(collect(message["tool_calls"], ObjBindMethod(this, "CallTool", tools)), (v) => !!v)
+				else
+					do(message["tool_calls"], ObjBindMethod(this, "CallTool", tools))
+
+				return true
+			}
+			else
+				return false
+		}
+
+		ProcessAnswer(tools, answer, &calls?) {
+			answer := answer["choices"][1]
+
+			if answer.Has("message") {
+				answer := answer["message"]
+
+				if isSet(calls)
+					toolCall := this.ProcessToolCalls(tools, answer, &calls)
+				else
+					toolCall := this.ProcessToolCalls(tools, answer)
+
+				if toolCall {
+					if answer.Has("content") {
+						answer := answer["content"]
+
+						if ((answer = kNull) || (Trim(answer) = ""))
+							answer := true
+					}
+					else
+						answer := true
+				}
+				else if answer.Has("content") {
+					answer := answer["content"]
+
+					if ((answer = kNull) || (Trim(answer) = ""))
+						answer := false
+					else
+						answer := this.ParseAnswer(answer)
+				}
+				else
+					answer := false
+
+				return answer
+			}
+			else if answer.Has("text")
+				return this.ParseAnswer(answer["text"])
+			else
+				throw "Unknown answer format detected in LLMConnector.APIConnector.ProcessAnswer..."
+		}
+
+		ParseModels(response) {
+			local result := []
+
+			for ignore, element in response["data"]
+				result.Push(element["id"])
+
+			return result
+		}
+
+		LoadModels() {
+			try {
+				if this.Certificate {
+					try {
+						answer := WinHttpRequest({Certificate: this.Certificate}).GET(this.CreateModelsURL(this.Server), "", this.CreateHeaders(), {Encoding: "UTF-8"})
+					}
+					catch Any as exception {
+						logError(exception)
+
+						answer := WinHttpRequest().GET(this.CreateModelsURL(this.Server), "", this.CreateHeaders(), {Encoding: "UTF-8"})
+					}
+				}
+				else
+					answer := WinHttpRequest().GET(this.CreateModelsURL(this.Server), "", this.CreateHeaders(), {Encoding: "UTF-8"})
+
+				if ((answer.Status >= 200) && (answer.Status < 300))
+					return this.ParseModels(answer.JSON)
+				else {
+					if isDebug()
+						logMessage(kLogDebug, "LLM API call returned " . answer.Status . " in LLMConnector.APIConnector.LoadModels...")
+
+					return []
+				}
+			}
+			catch Any as exception {
+				logError(exception)
+
+				return []
+			}
+		}
+	}
+
+	class GenericConnector extends LLMConnector.APIConnector {
+		CreateServiceURL(server) {
+			return server
+		}
+
+		CreateModelsURL(server) {
+			return StrReplace(server, "/v1/chat/completions", "/v1/models")
+		}
+	}
+
+	class OpenAIConnector extends LLMConnector.APIConnector {
+		static Models {
+			Get {
+				return ["GPT 5 mini", "GPT 4.1 mini", "GPT 3.5 turbo", "GPT 4", "GPT 4 32k", "GPT 4 turbo", "GPT 4o", "GPT 5"]
+			}
+		}
+
+		Models {
+			Get {
+				return choose(super.Models, (m) => (InStr(m, "gpt") = 1))
+			}
+		}
+
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "https://api.openai.com"
+			serviceKey := ""
+			model := "GPT 5 mini"
+		}
+
+		CreatePrompt(body, instructions, tools, question) {
+			local version
+
+			if RegExMatch(this.Model, "[0-9\.]", &version)
+				if (isNumber(version[]) && (version[] >= 5)) {
+					if body.HasProp("max_tokens") {
+						body.max_completion_tokens := body.max_tokens
+
+						body.DeleteProp("max_tokens")
+					}
+
+					body.DeleteProp("temperature")
+
+					if ((tools.Length > 0) && (version[] >= 5))
+						body.reasoning_effort := "none"
+				}
+
+			return super.CreatePrompt(body, instructions, tools, question)
+		}
+	}
+
+	class YandexConnector extends LLMConnector.APIConnector {
+		static Models {
+			Get {
+				return []
+			}
+		}
+
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "https://ai.api.cloud.yandex.net"
+			serviceKey := ""
+			model := ""
+		}
+
+		CreateHeaders(headers?) {
+			headers := super.CreateHeaders(headers?)
+
+			if (Trim(this.Token) != "")
+				headers["Authorization"] := ("Api-Key " . this.Token)
+
+			return headers
+		}
+	}
+
+	class AzureConnector extends LLMConnector.OpenAIConnector {
+		static Models {
+			Get {
+				return ["GPT 3.5", "GPT 4", "GPT 4 turbo"]
+			}
+		}
+
+		Models {
+			Get {
+				return choose(super.Models, (m) => (InStr(m, "gpt") = 1))
+			}
+		}
+
+		Model[external := false] {
+			Get {
+				if !external
+					return StrReplace(super.Model[external], ".", "")
+				else
+					return super.Model[external]
+			}
+		}
+
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "__YOUR_AZURE_OPENAI_ENDPOINT__/openai/deployments/%model%/chat/completions?api-version=2023-05-15"
+			serviceKey := ""
+			model := "GPT 5 mini"
+		}
+
+		CreateServiceURL(server) {
+			return substituteVariables(server, {model: this.iModel})
+		}
+
+		CreateHeaders(headers?) {
+			headers := super.CreateHeaders(headers?)
+
+			if (Trim(this.Token) != "")
+				headers["api-key"] := this.Token
+
+			return headers
+		}
+	}
+
+	class MistralAIConnector extends LLMConnector.APIConnector {
+		static Models {
+			Get {
+				return ["Open Mistral 7b", "Open Mixtral 8x7b", "Open Mixtral 8x22b", "Mistral Small Latest", "Mistral Medium Latest", "Mistral Large Latest"]
+			}
+		}
+
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "https://api.mistral.ai"
+			serviceKey := ""
+			model := "Open Mixtral 8x22b"
+		}
+	}
+
+	class GoogleConnector extends LLMConnector.APIConnector {
+		static Models {
+			Get {
+				return ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"]
+			}
+		}
+
+		Models {
+			Get {
+				return choose(super.Models, (m) => (InStr(m, "gemini") = 1))
+			}
+		}
+
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "https://generativelanguage.googleapis.com"
+			serviceKey := ""
+			model := "gemini-2.0-flash-lite"
+		}
+
+		CreateServerURL(server) {
+			if InStr(server, "/v1beta/openai/chat/completions")
+				server := StrReplace(server, "/v1beta/openai/chat/completions", "")
+
+			if (SubStr(server, StrLen(server)) = "/")
+				return SubStr(server, 1, StrLen(server) - 1)
+			else
+				return server
+		}
+
+		CreateServiceURL(server) {
+			return (this.CreateServerURL(server) . "/v1beta/openai/chat/completions")
+		}
+
+		CreateModelsURL(server) {
+			return (this.CreateServerURL(server) . "/v1beta/openai/models")
+		}
+
+		ParseModels(response) {
+			local result := []
+
+			for ignore, element in response["data"]
+				result.Push(StrReplace(element["id"], "models/", ""))
+
+			return result
+		}
+	}
+
+	class AnthropicConnector extends LLMConnector.APIConnector {
+		static Models {
+			Get {
+				return ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]
+			}
+		}
+
+		Schema {
+			Get {
+				return "Anthropic"
+			}
+		}
+
+		Models {
+			Get {
+				return choose(super.Models, (m) => (InStr(m, "claude") = 1))
+			}
+		}
+
+		Model[external := false] {
+			Get {
+				return (external ? super.Model[true] : StrReplace(super.Model[false], ".", "-"))
+			}
+		}
+
+		Temperature {
+			Get {
+				return 1.0
+			}
+		}
+
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "https://api.anthropic.com"
+			serviceKey := ""
+			model := "claude-sonnet-4-6"
+		}
+
+		CreateServerURL(server) {
+			server := super.CreateServerURL(server)
+
+			if InStr(server, "/v1/messages")
+				server := StrReplace(server, "/v1/messages", "")
+
+			if (SubStr(server, StrLen(server)) = "/")
+				return SubStr(server, 1, StrLen(server) - 1)
+			else
+				return server
+		}
+
+		CreateServiceURL(server) {
+			return (this.CreateServerURL(server) . "/v1/messages")
+		}
+
+		CreateHeaders(headers?) {
+			if !isSet(headers)
+				headers := Map()
+
+			if (Trim(this.Token) != "")
+				headers["X-Api-Key"] := this.Token
+
+			headers["anthropic-version"] := "2023-06-01"
+
+			return headers
+		}
+
+		CreatePrompt(body, instructions, tools, question) {
+			body.DeleteProp("temperature")
+
+			return super.CreatePrompt(body, instructions, tools, question)
+		}
+
+		ParseToolCall(tools, descriptor, &name, &arguments) {
+			local tool
+
+			if (descriptor.Has("type") && (descriptor["type"] = "tool_use")) {
+				name := descriptor["name"]
+				arguments := descriptor["input"]
+
+				tool := this.FindTool(tools, name)
+
+				if tool {
+					if isInstance(arguments, String)
+						arguments := JSON.parse(arguments)
+
+					arguments := this.ParseArguments(tool, toMap(arguments))
+
+					return tool
+				}
+				else
+					return false
+			}
+			else
+				return super.ParseToolCall(tools, descriptor, &name, &arguments)
+		}
+
+		ProcessToolCalls(tools, message, &calls?) {
+			local toolCalls
+
+			if (message.Has("content") && isObject(message["content"])) {
+				toolCalls := choose(message["content"], (c) => (c["type"] = "tool_use"))
+
+				if (toolCalls.Length > 0) {
+					if isSet(calls)
+						calls := choose(collect(toolCalls, ObjBindMethod(this, "CallTool", tools)), (v) => !!v)
+					else
+						do(toolCalls, ObjBindMethod(this, "CallTool", tools))
+
+					return true
+				}
+				else
+					return false
+			}
+			else if isSet(calls)
+				return super.ProcessToolCalls(tools, message, &calls)
+			else
+				return super.ProcessToolCalls(tools, message)
+		}
+
+		ProcessAnswer(tools, answer, &calls?) {
+			local text
+
+			if answer.Has("content") {
+				text := first(answer["content"], (c) => (c["type"] = "text"))
+
+				if isSet(calls)
+					toolCall := this.ProcessToolCalls(tools, answer, &calls)
+				else
+					toolCall := this.ProcessToolCalls(tools, answer)
+
+				if toolCall {
+					if text {
+						answer := text["text"]
+
+						if ((answer = kNull) || (Trim(answer) = ""))
+							answer := true
+					}
+					else
+						answer := true
+				}
+				else if text {
+					answer := text["text"]
+
+					if ((answer = kNull) || (Trim(answer) = ""))
+						answer := false
+					else
+						answer := this.ParseAnswer(answer)
+				}
+				else
+					answer := false
+
+				return answer
+			}
+			else if isSet(calls)
+				return super.ProcessAnswer(tools, answer, &calls)
+			else
+				return super.ProcessAnswer(tools, answer)
+		}
+	}
+
+	class OpenRouterConnector extends LLMConnector.APIConnector {
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "https://openrouter.ai/api"
+			serviceKey := ""
+			model := ""
+		}
+	}
+
+	class OllamaConnector extends LLMConnector.APIConnector {
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "http://localhost:11434"
+			serviceKey := "ollama"
+			model := ""
+		}
+
+		CreateModelsURL(server) {
+			return (this.CreateServerURL(server) . "/api/tags")
+		}
+
+		ParseModels(response) {
+			local result := []
+
+			for ignore, element in response["models"]
+				result.Push(element["name"])
+
+			return result
+		}
+	}
+
+	class GPT4AllConnector extends LLMConnector.APIConnector {
+		static GetDefaults(&serviceURL, &serviceKey, &model) {
+			serviceURL := "http://localhost:4891"
+			serviceKey := "Any text will do the job"
+			model := ""
+		}
+	}
+
+	class LLMRuntimeConnector extends LLMConnector {
+		static sRuntimes := CaseInsenseMap()
+
+		iRuntime := false
+
+		iAnswerFile := false
+
+		iGPULayers := 0
+
+		class LLMRuntime {
+			iConnector := false
+
+			iPID := false
+
+			iExitCallback := false
+
+			iPromptFile := false
+
+			Connector {
+				Get {
+					return this.iConnector
+				}
+			}
+
+			PID {
+				Get {
+					return this.iPID
+				}
+			}
+
+			PromptFile {
+				Get {
+					return this.iPromptFile
+				}
+			}
+
+			__New(connector) {
+				this.iConnector := connector
+				this.iPromptFile := temporaryFileName("LLMRuntime", "prompt")
+			}
+
+			Connect(force := false) {
+				local connector := this.Connector
+				local settings := readMultiMap(getFileName("Core Settings.ini", kUserConfigDirectory, kConfigDirectory))
+				local grammar := getMultiMapValue(settings, "LLM Runtime", "Grammar", "Strict")
+				local contextSize := getMultiMapValue(settings, "LLM Runtime", "Context Size", 32768)
+				local batchSize := getMultiMapValue(settings, "LLM Runtime", "Batch Size", 2)
+				local threads := getMultiMapValue(settings, "LLM Runtime", "Threads", kUndefined)
+				local exePath, options, pid
+
+				if (!force && this.PID && !ProcessExist(this.PID))
+					return false
+
+				if (!this.PID || force) {
+					this.Disconnect(force)
+
+					exePath := (kProgramsDirectory . "LLM Runtime\LLM Runtime.exe")
+
+					if FileExist(exePath) {
+						deleteFile(this.PromptFile)
+
+						options := ("`"" . this.PromptFile . "`" `"" . connector.Model . "`" "
+								  . connector.MaxTokens . A_Space . connector.GPULayers . A_Space
+								  . grammar . A_Space . contextSize . A_Space . batchSize
+								  . ((threads != kUndefined) ? (A_Space . threads) : ""))
+
+						Run("`"" . exePath . "`" " . options, kProgramsDirectory . "LLM Runtime", "Hide", &pid)
+
+						if pid {
+							Sleep(1000)
+
+							if ProcessExist(pid) {
+								this.iPID := pid
+
+								if !this.iExitCallback {
+									this.iExitCallback := (*) => this.Disconnect(true)
+
+									OnExit(this.iExitCallback)
+								}
+
+								return true
+							}
+						}
+					}
+
+					return false
+				}
+
+				return true
+			}
+
+			Disconnect(force := false, arguments*) {
+				if ((arguments.Length > 0) && inList(["Logoff", "Shutdown"], arguments[1]))
+					return false
+
+				if this.PID {
+					loop 5 {
+						try {
+							deleteFile(this.PromptFile)
+
+							try
+								FileAppend("Exit`n", this.PromptFile)
+						}
+						catch Any as exception {
+							if (A_Index = 5)
+								logError(exception, true)
+						}
+
+						Sleep(250)
+
+						if !ProcessExist(this.PID)
+							break
+					}
+
+					if ProcessExist(this.PID)
+						ProcessClose(this.PID)
+
+					this.iPID := false
+				}
+
+				return false
+			}
+		}
+
+		Runtime {
+			Get {
+				return this.iRuntime
+			}
+		}
+
+		AnswerFile {
+			Get {
+				return this.iAnswerFile
+			}
+		}
+
+		GPULayers {
+			Get {
+				return this.iGPULayers
+			}
+		}
+
+		__New(manager, model, gpuLayers := 0) {
+			this.iGPULayers := gpuLayers
+			this.iAnswerFile := temporaryFileName("LLMRuntime", "answer")
+
+			super.__New(manager, model)
+		}
+
+		Connect(force := false) {
+			if !this.Runtime {
+				if !LLMConnector.LLMRuntimeConnector.sRuntimes.Has(this.Model)
+					LLMConnector.LLMRuntimeConnector.sRuntimes[this.Model] := LLMConnector.LLMRuntimeConnector.LLMRuntime(this)
+
+				this.iRuntime := LLMConnector.LLMRuntimeConnector.sRuntimes[this.Model]
+			}
+
+			return this.Runtime.Connect(force)
+		}
+
+		Disconnect(force := false) {
+			return (this.Runtime ? this.Runtime.Disconnect(force) : false)
+		}
+
+		CreatePrompt(instructions, tools, question) {
+			local prompt := ""
+			local ignore, instruction, conversation
+
+			addInstruction(instruction) {
+				if (instruction && (Trim(instruction) != "")) {
+					if (prompt = "")
+						prompt .= "<|### System ###|>`n"
+
+					prompt .= (instruction . "`n")
+				}
+			}
+
+			do(instructions, addInstruction)
+
+			prompt := ("<|### Options ###|>`nTemperature=" . this.Temperature . "`nOutput=" . this.AnswerFile . "`n" . prompt)
+
+			for ignore, conversation in (this.History ? this.History : []) {
+				prompt .= ("<|### User ###|>`n" . conversation[1] . "`n")
+				prompt .= ("<|### Assistant ###|>`n" . conversation[2] . "`n")
+			}
+
+			prompt .= ("<|### User ###|>`n" . question)
+
+			if (tools.Length > 0)
+				prompt .= ("`n<|### Tools ###|>`n" . values2String("`n<|### --- ###|>`n", collect(tools, (t) => t.JSON)*))
+
+			return prompt
+		}
+
+		ParseToolCall(tools, descriptor, &name, &arguments) {
+			local tool
+
+			if descriptor.Has("function") {
+				tool := descriptor["function"]
+
+				name := tool["name"]
+				arguments := tool["arguments"]
+
+				tool := this.FindTool(tools, name)
+
+				if tool {
+					if isInstance(arguments, String)
+						arguments := JSON.parse(arguments)
+
+					arguments := this.ParseArguments(tool, toMap(arguments))
+
+					return tool
+				}
+				else
+					return false
+			}
+			else
+				throw "Unsupported tool type detected in LLMConnector.APIConnector.ParseToolCall..."
+		}
+
+		CallTool(tools, tool) {
+			local name, arguments
+
+			tool := this.ParseToolCall(tools, tool, &name, &arguments)
+
+			if tool {
+				tool.Callable.Call(arguments*)
+
+				return Array(tool, arguments)
+			}
+			else
+				return false
+		}
+
+		ProcessToolCalls(tools, message, &calls?) {
+			if (InStr(message, "<|### Tool Calls ###|>") == 1) {
+				message := collect(string2Values("<|### --- ###|>", SubStr(message, "<|### Tool Calls ###|>", ""))
+								 , (c) => JSON.parse(c))
+
+				if isSet(calls)
+					calls := choose(collect(message, ObjBindMethod(this, "CallTool", tools)), (v) => !!v)
+				else
+					do(message, ObjBindMethod(this, "CallTool", tools))
+
+				return true
+			}
+			else
+				return false
+		}
+
+		ParseAnswer(answer) {
+			local ignore, label
+
+			for ignore, label in ["<|### Answer ###|>", "System:", "Assistant:", "User:", "Answer:"]
+				answer := Trim(StrReplace(answer, label, ""))
+
+			return answer
+		}
+
+		Ask(question, instructions := false, tools := false, &calls?) {
+			local toolCall := false
+			local command, prompt, answer
+
+			if !this.Connect() {
+				this.Manager.connectorState("Error", "Connection")
+
+				return false
+			}
+
+			runtime := this.Runtime
+
+			try {
+				prompt := this.CreatePrompt(instructions ? instructions : this.GetInstructions()
+										  , tools ? tools : this.GetTools(), question)
+
+				if isDebug() {
+					deleteFile(kTempDirectory . "LLM.request")
+
+					try
+						FileAppend(prompt, kTempDirectory . "LLM.request")
+				}
+
+				while !deleteFile(runtime.PromptFile)
+					Sleep(50)
+
+				while !deleteFile(this.AnswerFile)
+					Sleep(50)
+
+				loop 5
+					try {
+						FileAppend(prompt, runtime.PromptFile)
+
+						break
+					}
+					catch Any as exception {
+						if (A_Index = 5)
+							logError(exception, true)
+						else
+							Sleep(10)
+					}
+
+				loop 600
+					try
+						if FileExist(this.AnswerFile) {
+							Sleep(500)
+
+							break
+						}
+						else
+							Sleep(1000)
+			}
+			catch Any as exception {
+				logError(exception, true)
+
+				this.Manager.connectorState("Error", "Connection")
+
+				return false
+			}
+
+			try {
+				if !FileExist(this.AnswerFile) {
+					this.Manager.connectorState("Error", "Answer")
+
+					return false
+				}
+
+				answer := Trim(FileRead(this.AnswerFile, "`n"))
+
+				while ((StrLen(answer) > 0) && (SubStr(answer, 1, 1) = "`n"))
+					answer := Trim(SubStr(answer, 2))
+
+				if (answer = "Error")
+					answer := false
+				else {
+					this.Manager.connectorState("Active")
+
+					if isSet(calls)
+						toolCall := this.ProcessToolCalls(tools, answer, &calls)
+					else
+						toolCall := this.ProcessToolCalls(tools, answer)
+
+					if !isDebug()
+						deleteFile(this.AnswerFile)
+
+					if toolCall
+						return true
+					else {
+						answer := this.ParseAnswer(answer)
+
+						if isDebug() {
+							deleteFile(kTempDirectory . "LLM.response")
+
+							try
+								FileAppend(answer, kTempDirectory . "LLM.response")
+						}
+
+						this.AddConversation(question, answer)
+
+						return answer
+					}
+				}
+			}
+			catch Any as exception {
+				logError(exception, true)
+
+				this.Manager.connectorState("Error", "Answer")
+
+				return false
+			}
+		}
+	}
+
+	Manager {
+		Get {
+			return this.iManager
+		}
+	}
+
+	static Providers {
+		Get {
+			if FileExist(kProgramsDirectory . "LLM Runtime\LLM Runtime.exe")
+				return ["Generic", "OpenAI", "Anthropic", "Mistral AI", "Azure", "Google", "Yandex", "OpenRouter", "Ollama", "GPT4All", "LLM Runtime"]
+			else
+				return ["Generic", "OpenAI", "Anthropic", "Mistral AI", "Azure", "Google", "Yandex", "OpenRouter", "Ollama", "GPT4All"]
+		}
+	}
+
+	static Models {
+		Get {
+			return []
+		}
+	}
+
+	Models {
+		Get {
+			return LLMConnector.Models
+		}
+	}
+
+	Model {
+		Get {
+			return this.iModel
+		}
+	}
+
+	Temperature {
+		Get {
+			return this.iTemperature
+		}
+
+		Set {
+			return (this.iTemperature := value)
+		}
+	}
+
+	MaxTokens {
+		Get {
+			return this.iMaxTokens
+		}
+
+		Set {
+			return (this.iMaxTokens := value)
+		}
+	}
+
+	History[key?] {
+		Get {
+			if this.iHistoryEnabled
+				return (isSet(key) ? this.iHistory[key] : this.iHistory)
+			else
+				return false
+		}
+
+		Set {
+			return (this.iHistoryEnabled := (value != false))
+		}
+	}
+
+	MaxHistory {
+		Get {
+			return this.iMaxHistory
+		}
+
+		Set {
+			return (this.iMaxHistory := value)
+		}
+	}
+
+	__New(manager, model) {
+		this.iManager := manager
+		this.iModel := model
+	}
+
+	static GetDefaults(&serviceURL, &serviceKey, &model) {
+		serviceURL := ""
+		serviceKey := ""
+		model := ((this.Models.Length > 0) ? this.Models[1] : "")
+	}
+
+	Connect(*) {
+	}
+
+	Disconnect(*) {
+	}
+
+	Restart() {
+		this.History := true
+
+		this.History.Length := 0
+	}
+
+	GetInstructions() {
+		return this.Manager.getInstructions()
+	}
+
+	GetTools() {
+		return this.Manager.getTools()
+	}
+
+	ParseAnswer(answer) {
+		local index := InStr(answer, "</think>")
+
+		if index
+			answer := SubStr(answer, index + 8)
+
+		return answer
+	}
+
+	AddConversation(question, answer) {
+		if this.History {
+			this.History.Push([question, answer])
+
+			while (this.History.Length > this.MaxHistory)
+				this.History.RemoveAt(1)
+		}
+	}
+
+	Ask(question, instructions := false) {
+		throw "Virtual method LLMConnector.Ask must be implemented in a subclass..."
+	}
+}

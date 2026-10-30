@@ -1,0 +1,78 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Session Information Retrieval   ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Rule Include Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Lap Information Retrieval.rules
+#Include %kResourcesDirectory%Rules\Pitstop Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Public Rules Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+firstStintLap(?lap) <= pitstopLap(?lap), !
+firstStintLap(1)
+
+nextStintLaps(?laps) <= lapRemainingFuel(!Lap, ?remainingFuel), ?temp = ?remainingFuel + !Fuel.Amount.Target, !,
+						min(!Session.Settings.Fuel.Max, ?temp, ?fuel), lapAvgFuelConsumption(!Lap, ?fuelPerLap), ?laps = ?fuel / ?fuelPerLap
+nextStintLaps(?laps) <= remainingSessionLaps(!Lap, ?laps)
+
+additionalSessionLaps(?additionalLaps) <= Get(Session.AdditionalLaps, ?additionalLaps)
+additionalSessionLaps(0)
+
+postRaceLaps(1) <= !Session.Settings.Lap.PostRace = true
+postRaceLaps(0)
+
+remainingSessionLaps(?lap, ?remainingLaps) <= Get(Session.Format, Laps), !, Get(Session.Lap.Remaining, ?remainingSessionLaps),
+											  additionalSessionLaps(?additionalLaps), ?remainingLaps = ?remainingSessionLaps + ?additionalLaps
+remainingSessionLaps(?lap, ?remainingLaps) <= remainingSessionTime(?lap, ?remainingTime), lapAvgTime(?lap, ?avgTime),
+											  ?remainingSessionLaps = ?remainingTime / ?avgTime,
+											  additionalSessionLaps(?additionalLaps), ?remainingLaps = ?remainingSessionLaps + ?additionalLaps
+
+remainingSessionTime(?lap, ?remainingTime) <= Get(Session.Format, Time), !, Get(Session.Time.Remaining, ?remainingSessionTime),
+											  lapAvgTime(?lap, ?avgTime), additionalSessionLaps(?additionalLaps),
+											  ?additionalTime = ?additionalLaps * ?avgTime,
+											  ?remainingTime = ?remainingSessionTime + ?additionalTime
+remainingSessionTime(?lap, ?remainingTime) <= Get(Lap, ?lap, Laps, ?lastLap), lapAvgTime(?lap, ?avgTime), Get(Session.Laps, ?sessionLaps),
+											  ?remainingSessionLaps = ?sessionLaps - ?lastLap, additionalSessionLaps(?additionalLaps),
+											  ?remainingLaps = ?remainingSessionLaps + ?additionalLaps,
+											  ?remainingTime = ?remainingLaps * ?avgTime
+
+remainingStintLaps(?lap, ?remainingLaps) <= remainingStintLaps(?lap, Fuel, ?fuelLaps), remainingStintLaps(?lap, Driver, ?driverLaps),
+											min(?fuelLaps, ?driverLaps, ?remainingLaps), remainingSessionLaps(?lap, ?sessionLaps),
+											?remainingLaps < ?sessionLaps, !
+remainingStintLaps(?lap, ?remainingLaps) <= remainingSessionLaps(?lap, ?remainingLaps)
+
+remainingStintLaps(?lap, Fuel, ?remainingLaps) <= remainingStintLaps(?lap, Fuel, ?remainingLaps, false)
+remainingStintLaps(?lap, Energy, ?remainingLaps) <= lapRemainingEnergy(?lap, ?energyLeft), lapAvgEnergyConsumption(?lap, ?energyPerLap),
+													?remainingLaps = ?energyLeft / ?energyPerLap
+remainingStintLaps(?lap, Driver, ?remainingLaps) <= remainingStintTime(?stintTime), lapAvgTime(?lap, ?avgTime),
+													?remainingLaps = ?stintTime / ?avgTime
+
+remainingStintLaps(?lap, Fuel, ?remainingLaps, true) <= lapRemainingFuel(?lap, ?temp), lapAvgFuelConsumption(?lap, ?fuelPerLap),
+														safetyFuel(?fuelPerLap, ?safetyFuel), ?fuelLeft = ?temp - ?safetyFuel,
+														?remainingLaps = ?fuelLeft / ?fuelPerLap
+remainingStintLaps(?lap, Fuel, ?remainingLaps, false) <= lapRemainingFuel(?lap, ?fuelLeft), lapAvgFuelConsumption(?lap, ?fuelPerLap),
+														 ?remainingLaps = ?fuelLeft / ?fuelPerLap
+
+remainingStintTime(?lap, ?remainingTime) <= remainingStintLaps(?lap, Driver, ?remainingLaps), lapAvgTime(?lap, ?avgTime),
+											?remainingTime = ?remainingLaps * ?avgTime, remainingSessionTime(?lap, ?sessionTime),
+											?remainingTime < ?sessionTime, !
+remainingStintTime(?lap, ?remainingTime) <= remainingSessionTime(?lap, ?remainingTime)
+											
+remainingStintTime(?stintTime) <= Get(Driver.Time.Stint.Remaining, ?stintTime), Get(Driver.Time.Remaining, ?driverTime),
+								  ?stintTime =< ?driverTime, !
+remainingStintTime(!Driver.Time.Remaining)
+
+safetyFuel(?avgConsumption, ?safetyFuel, true) <= safetyFuel(?avgConsumption, ?safetyFuel)
+safetyFuel(?avgConsumption, ?safetyFuel, false) <= ?safetyFuel = ?avgConsumption + !Session.Settings.Fuel.SafetyMargin
+
+safetyFuel(?avgConsumption, ?safetyFuel) <= !Session.Settings.Lap.PostRace = true, ?safetyFuel = ?avgConsumption + !Session.Settings.Fuel.SafetyMargin, !
+safetyFuel(?, !Session.Settings.Fuel.SafetyMargin)

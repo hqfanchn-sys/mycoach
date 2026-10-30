@@ -1,0 +1,919 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Simulator Provider              ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Extensions\CLR.ahk"
+#Include "..\..\Database\Libraries\SessionDatabase.ahk"
+#Include "..\..\Plugins\Simulator Providers.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Public Constant Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kSessionUnknown := -2
+global kSessionFinished := 0
+global kSessionPaused := -1
+global kSessionOther := 1
+global kSessionPractice := 2
+global kSessionQualification := 3
+global kSessionRace := 4
+global kSessionTimeTrial := 5
+
+global kSessions := [kSessionOther, kSessionPractice, kSessionQualification, kSessionRace, kSessionTimeTrial]
+global kSessionNames := ["Other", "Practice", "Qualification", "Race", "Time Trial"]
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Private Constant Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kLogSimulator := getMultiMapValue(readMultiMap(getFileName("Core Settings.ini"
+																, kUserConfigDirectory, kConfigDirectory))
+									   , "Debug", "LogSimulator", false)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class SimulatorProvider {
+	static sSimulatorProviders := Map()
+
+	iCar := false
+	iTrack := false
+
+	iDriverNamePattern := false
+	iCarNamePattern := false
+
+	class GenericSimulatorProvider extends SimulatorProvider {
+		iSimulator := false
+
+		Simulator {
+			Get {
+				return this.iSimulator
+			}
+		}
+
+		__New(simulator, car, track) {
+			this.iSimulator := SessionDatabase.getSimulatorName(simulator)
+
+			super.__New(car, track)
+		}
+	}
+
+	static SimulatorProviders[code?] {
+		Get {
+			return (isSet(code) ? SimulatorProvider.sSimulatorProviders[code]
+								: SimulatorProvider.sSimulatorProviders)
+		}
+	}
+
+	static Simulator {
+		Get {
+			throw "Virtual property Simulator must be implemented in a subclass..."
+		}
+	}
+
+	static Code {
+		Get {
+			return SessionDatabase.getSimulatorCode(this.Simulator)
+		}
+	}
+
+	Simulator {
+		Get {
+			throw "Virtual property Simulator must be implemented in a subclass..."
+		}
+	}
+
+	Code {
+		Get {
+			return SessionDatabase.getSimulatorCode(this.Simulator)
+		}
+	}
+
+	Car {
+		Get {
+			return this.iCar
+		}
+	}
+
+	Track {
+		Get {
+			return this.iTrack
+		}
+	}
+
+	DriverNamePattern {
+		Get {
+			; if this.iDriverNamePattern
+				return this.iDriverNamePattern
+			; else
+			;	return "^(?<forname>[^\s]*)\s?(?<surname>[^\s]*)\s?\(?(?<nickname>[^\s]*)\)?$"
+		}
+	}
+
+	CarNamePattern {
+		Get {
+			return this.iCarNamePattern
+		}
+	}
+
+	Active {
+		Get {
+			return Application(this.Simulator, kSimulatorConfiguration).isRunning()
+		}
+	}
+
+	static Protocols {
+		Get {
+			return {Connector: {Type: "DLL", Protocol: "SHM"
+							  , File: kBinariesDirectory . "Connectors\%simulator% %protocol% Connector.dll"
+							  , Library: "%simulator% %protocol% Connector"}
+				  , Provider: {Type: "EXE", Protocol: "SHM"
+							 , File: kBinariesDirectory . "Providers\%simulator% %protocol% Provider.exe"}
+				  , Spotter: {Type: "EXE", Protocol: "SHM"
+							, File: kBinariesDirectory . "Providers\%simulator% %protocol% Spotter.exe"}
+				  , Coach: {Type: "EXE", Protocol: "SHM"
+						  , File: kBinariesDirectory . "Providers\%simulator% %protocol% Coach.exe"}}
+		}
+	}
+
+	__New(car, track) {
+		local key
+
+		static patternCache := CaseInsenseMap()
+
+		car := SessionDatabase.getCarCode(this.Simulator, car)
+		track := SessionDatabase.getTrackCode(this.Simulator, track)
+
+		this.iCar := car
+		this.iTrack := track
+
+		if (car && track) {
+			key := ("#D" . this.Simulator . car . track)
+
+			if patternCache.Has(key)
+				this.iDriverNamePattern := patternCache[key]
+			else {
+				this.iDriverNamePattern := SettingsDatabase().readSettingValue(this.Simulator, car, track, "*", "*", "Session Settings", "Driver.Name.Pattern", false)
+
+				patternCache[key] := this.iDriverNamePattern
+			}
+
+			key := ("#C" . this.Simulator . car . track)
+
+			if patternCache.Has(key)
+				this.iCarNamePattern := patternCache[key]
+			else {
+				this.iCarNamePattern := SettingsDatabase().readSettingValue(this.Simulator, car, track, "*", "*", "Session Settings", "Car.Name.Pattern", false)
+
+				patternCache[key] := this.iCarNamePattern
+			}
+		}
+	}
+
+	static getProtocols(simulator) {
+		local protocols
+
+		updateSimulator(object) {
+			local property, value, protocol
+
+			if object.HasProp("Protocol")
+				protocol := object.Protocol
+
+			for property, value in object.OwnProps()
+				if isObject(value)
+					updateSimulator(value)
+				else if isInstance(value, String)
+					try
+						if isSet(protocol)
+							object.%property% := substituteVariables(value, {simulator: simulator
+																		   , protocol: protocol}, false)
+						else
+							object.%property% := substituteVariables(value, {simulator: simulator}, false)
+		}
+
+		simulator := SessionDatabase.getSimulatorCode(simulator)
+
+		try {
+			protocols := %simulator . "Provider"%.Protocols
+
+			updateSimulator(protocols)
+
+			return protocols
+		}
+		catch Any as exception {
+			logError(exception)
+
+			return {}
+		}
+	}
+
+	static getProtocol(simulator, protocol) {
+		local protocols := this.getProtocols(simulator)
+
+		return (protocols.HasProp(protocol) ? protocols.%protocol% : false)
+	}
+
+	static getArguments(type, protocol, arguments := []) {
+		if protocol.HasProp("Arguments") {
+			if arguments
+				return concatenate(protocol.Arguments, arguments)
+			else
+				return protocol.Arguments
+		}
+		else
+			return arguments
+	}
+
+	static computeArguments(simulator, type, protocol, arguments := []) {
+		return %simulator . "Provider"%.getArguments(type, protocol, arguments)
+	}
+
+	static getOptions(type, protocol, options := []) {
+		if !isObject(options)
+			options := string2Values(",", options)
+
+		if protocol.HasProp("Options") {
+			if options
+				return concatenate(protocol.Options, options)
+			else
+				return protocol.Options
+		}
+		else
+			return options
+	}
+
+	static computeOptions(simulator, type, protocol, options := false) {
+		return %simulator . "Provider"%.getOptions(type, protocol, options)
+	}
+
+	static createSimulatorProvider(simulator, car, track) {
+		try {
+			simulator := SessionDatabase.getSimulatorCode(simulator)
+
+			if this.SimulatorProviders.Has(simulator)
+				return this.SimulatorProviders[simulator](car, track)
+			else
+				return %SessionDatabase.getSimulatorCode(simulator)%Provider(car, track)
+		}
+		catch Any {
+			return SimulatorProvider.GenericSimulatorProvider(SessionDatabase.getSimulatorName(simulator), car, track)
+		}
+	}
+
+	static registerSimulatorProvider(code, class) {
+		SimulatorProvider.sSimulatorProviders[code] := class
+	}
+
+	supportsPitstop(&refuelService?, &tyreService?, &brakeService?, &repairService?) {
+		refuelService := false
+		tyreService := false
+		brakeService := false
+		repairService := []
+
+		return false
+	}
+
+	supportsTyreManagement(&mixedCompounds?, &tyreSets?) {
+		mixedCompounds := false
+		tyreSets := false
+
+		return false
+	}
+
+	supportsSetupImport() {
+		return false
+	}
+
+	supportsTrackMap() {
+		return false
+	}
+
+	prepareProvider() {
+	}
+
+	parseDriverName(name, &forName, &surName, &nickName) {
+		local namePattern := this.DriverNamePattern
+		local match, hasNames
+
+		if (namePattern && RegExMatch(Trim(name), namePattern, &match)) {
+			forName := ""
+			surName := ""
+			nickName := ""
+			hasNames := false
+
+			loop match.Count
+				if (match.Name[A_Index] != "") {
+					hasNames := true
+
+					switch match.Name[A_Index], false {
+						case "forname":
+							forName := match[A_Index]
+						case "surname":
+							surName := match[A_Index]
+						case "nickname":
+							nickName := match[A_Index]
+					}
+				}
+
+			if !hasNames {
+				forName := match[1]
+				surName := ((match.Count > 1) ? match[2] : "")
+
+				if (match.Count > 2)
+					nickName := match[3]
+			}
+
+			if ((nickName = "") && (forName != "") && (surName != ""))
+				nickName := (SubStr(forName, 1, 1) . SubStr(surName, 1, 1))
+
+			return true
+		}
+		else
+			return parseDriverName(name, &forName, &surName, &nickName)
+	}
+
+	parseCarName(name, &nr, &model, &class, &category, &team) {
+		local namePattern := this.CarNamePattern
+		local match, hasNames
+
+		nr := ""
+		model := ""
+		class := ""
+		category := ""
+		team := false
+
+		if (namePattern && RegExMatch(Trim(name), namePattern, &match)) {
+			loop match.Count
+				if (match.Name[A_Index] != "") {
+					hasNames := true
+
+					switch match.Name[A_Index], false {
+						case "nr":
+							nr := match[A_Index]
+						case "model":
+							model := match[A_Index]
+						case "class":
+							class := match[A_Index]
+						case "category":
+							category := match[A_Index]
+						case "team":
+							team := match[A_Index]
+					}
+				}
+
+			if !hasNames {
+				if (match.Count > 0)
+					nr := match[1]
+
+				if (match.Count > 1)
+					model := match[2]
+
+				if (match.Count > 2)
+					class := match[3]
+
+				if (match.Count > 3)
+					category := match[4]
+
+				if (match.Count > 4)
+					team := match[5]
+			}
+
+			return true
+		}
+		else {
+			model := name
+
+			return false
+		}
+	}
+
+	correctStandingsData(standingsData, needCorrection := false) {
+		local positions := Map()
+		local cars := []
+		local count, position
+
+		count := getMultiMapValue(standingsData, "Position Data", "Car.Count", 0)
+
+		if !needCorrection
+			loop count {
+				position := (getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Position", 0) + 0)
+
+				if positions.Has(position)
+					needCorrection := true
+				else
+					positions[position] := true
+			}
+
+		if needCorrection {
+			loop count
+				cars.Push(Array(A_Index, getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Laps"
+																	   , getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Lap"))
+									   + getMultiMapValue(standingsData, "Position Data", "Car." . A_Index . ".Lap.Running")))
+
+			bubbleSort(&cars, (c1, c2) => c1[2] < c2[2])
+
+			if isDebug() {
+				loop count {
+					if (getMultiMapValue(standingsData, "Position Data", "Car." . cars[A_Index][1] . ".Position") != A_Index)
+						logMessage(kLogDebug, "Corrected position for car " . cars[A_Index][1] . ": "
+											. getMultiMapValue(standingsData, "Position Data", "Car." . cars[A_Index][1] . ".Position")
+											. " -> " . A_Index)
+
+					setMultiMapValue(standingsData, "Position Data", "Car." . cars[A_Index][1] . ".Position", A_Index)
+				}
+			}
+			else
+				loop count
+					setMultiMapValue(standingsData, "Position Data", "Car." . cars[A_Index][1] . ".Position", A_Index)
+		}
+
+		return standingsData
+	}
+
+	readTelemetryData() {
+		local trackData, data, name, forName, surName, nickName, nr, model, class, team
+
+		static sessionDB := false
+
+		if kLogSimulator
+			logMessage(kLogDebug, "Read telemetry data for simulator " . this.Simulator)
+
+		if !sessionDB
+			sessionDB := SessionDatabase()
+
+		trackData := sessionDB.getTrackData(this.Simulator, this.Track)
+
+		data := this.readSessionData(trackData ? ("Track=" . trackData) : "")
+
+		if this.DriverNamePattern {
+			name := getMultiMapValue(data, "Stint Data", "DriverName", kUndefined)
+
+			if (name != kUndefined) {
+				if this.parseDriverName(name, &forName, &surName, &nickName) {
+					setMultiMapValue(data, "Stint Data", "DriverForname", forName)
+					setMultiMapValue(data, "Stint Data", "DriverSurname", surName)
+					setMultiMapValue(data, "Stint Data", "DriverNickname", nickName)
+				}
+
+				if !isDebug()
+					removeMultiMapValue(data, "Stint Data", "DriverName")
+			}
+		}
+
+		if this.CarNamePattern {
+			name := getMultiMapValue(data, "Session Data", "Car", kUndefined)
+
+			if ((name != kUndefined) && this.parseCarName(name, &nr, &model, &class, &team))
+				if (model != "")
+					setMultiMapValue(data, "Session Data", "Car", model)
+		}
+
+		return data
+	}
+
+	readStandingsData(telemetryData, correct := false) {
+		local standingsData, prefix, name, forName, surName, nickName, nr, model, class, category, team
+
+		if kLogSimulator
+			logMessage(kLogDebug, "Read standings data for simulator " . this.Simulator)
+
+		if telemetryData.Has("Position Data") {
+			standingsData := newMultiMap()
+
+			setMultiMapValues(standingsData, "Position Data", getMultiMapValues(telemetryData, "Position Data"))
+		}
+		else
+			standingsData := this.readSessionData("Standings=true")
+
+		if (this.DriverNamePattern || this.CarNamePattern)
+			loop getMultiMapValue(standingsData, "Position Data", "Car.Count", 0) {
+				prefix := ("Car." . A_Index . ".")
+				name := getMultiMapValue(standingsData, "Position Data", prefix . "Driver.Name", kUndefined)
+
+				if (name != kUndefined) {
+					if this.parseDriverName(name, &forName, &surName, &nickName) {
+						setMultiMapValue(standingsData, "Position Data", prefix . "Driver.Forname", forName)
+						setMultiMapValue(standingsData, "Position Data", prefix . "Driver.Surname", surName)
+						setMultiMapValue(standingsData, "Position Data", prefix . "Driver.Nickname", nickName)
+					}
+
+					if !isDebug()
+						removeMultiMapValue(standingsData, "Position Data", prefix . "Driver.Name")
+				}
+
+				name := getMultiMapValue(standingsData, "Position Data", prefix . "Car", kUndefined)
+
+				if ((name != kUndefined) && this.parseCarName(name, &nr, &model, &class, &category, &team))
+					if (model != "")
+						setMultiMapValue(standingsData, "Position Data", prefix . "Car", model)
+			}
+
+		if correct {
+			standingsData := this.correctStandingsData(standingsData)
+
+			if telemetryData.Has("Position Data")
+				telemetryData["Position Data"] := standingsData["Position Data"]
+		}
+
+		return standingsData
+	}
+
+	acquireTelemetryData() {
+		if kLogSimulator
+			logMessage(kLogDebug, "Acquire telemetry data for simulator " . this.Simulator)
+
+		return this.readTelemetryData()
+	}
+
+	acquireStandingsData(telemetryData, finished := false) {
+		if kLogSimulator
+			logMessage(kLogDebug, "Acquire standings data for simulator " . this.Simulator)
+
+		return this.readStandingsData(telemetryData, !finished)
+	}
+
+	acquireSessionData(&telemetryData, &standingsData, finished := false) {
+		local prefix, driver, carNr, count
+
+		if kLogSimulator
+			logMessage(kLogDebug, "Acquire session data for simulator " . this.Simulator)
+
+		telemetryData := this.acquireTelemetryData()
+
+		if getMultiMapValue(telemetryData, "Session Data", "Active", false)
+			standingsData := this.acquireStandingsData(telemetryData, finished)
+		else
+			standingsData := newMultiMap()
+
+		count := getMultiMapValue(standingsData, "Position Data", "Car.Count", 0)
+		driver := getMultiMapValue(standingsData, "Position Data", "Driver.Car", false)
+
+		loop count {
+			prefix := ("Car." . A_Index . ".")
+			carNr := StrReplace(getMultiMapValue(standingsData, "Position Data", prefix . "Nr", ""), "`"", "")
+
+			if !IsAlnum(carNr)
+				carNr := "-"
+
+			setMultiMapValue(standingsData, "Position Data", prefix . "Nr", carNr)
+		}
+
+		if (driver && (count > 0)) {
+			if (getMultiMapValue(standingsData, "Position Data", "Car." . driver . ".InPitLane", false)
+			 && !getMultiMapValue(telemetryData, "Stint Data", "InPitLane", false))
+				setMultiMapValue(telemetryData, "Stint Data", "InPitLane", true)
+
+			if (getMultiMapValue(telemetryData, "Stint Data", "Running", kUndefined) == kUndefined)
+				setMultiMapValue(telemetryData, "Stint Data", "Running"
+							   , getMultiMapValue(standingsData, "Position Data", "Car." . driver . ".Running", 0))
+		}
+	}
+
+	readSessionData(options := "", protocol?) {
+		local simulator := this.Simulator
+		local car := this.Car
+		local track := this.Track
+		local data := callSimulator(SessionDatabase.getSimulatorCode(simulator), options, protocol?)
+		local tyreCompound, tyreCompoundColor, ignore, section
+
+		if kLogSimulator
+			logMessage(kLogDebug, "Read session data for simulator " . simulator . " for "
+																	 . ((options = "") ? "Telemetry=true" : options))
+
+		if !car
+			car := getMultiMapValue(data, "Session Data", "Car", false)
+
+		if !track
+			track := getMultiMapValue(data, "Session Data", "Track", false)
+
+		for ignore, section in ["Car Data", "Setup Data"] {
+			tyreCompound := getMultiMapValue(data, section, "TyreCompound", kUndefined)
+
+			if (tyreCompound = kUndefined) {
+				tyreCompound := getMultiMapValue(data, section, "TyreCompoundRaw", kUndefined)
+
+				if ((tyreCompound != kUndefined) && tyreCompound) {
+					tyreCompound := SessionDatabase.getTyreCompoundName(simulator, car, track, tyreCompound, kUndefined)
+
+					if (tyreCompound = kUndefined)
+						tyreCompound := normalizeCompound("Dry")
+
+					if tyreCompound {
+						splitCompound(tyreCompound, &tyreCompound, &tyreCompoundColor := false)
+
+						setMultiMapValue(data, section, "TyreCompound", tyreCompound)
+						setMultiMapValue(data, section, "TyreCompoundColor", tyreCompoundColor)
+					}
+				}
+			}
+		}
+
+		return data
+	}
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Public Functions Section                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+callSimulator(simulator, options := "", protocol?) {
+	local exePath, dataFile, data, settings
+	local connector, curWorkingDir, buf, arguments, callOptions, theProtocols
+
+	static defaultProtocol := false
+	static protocols := CaseInsenseMap()
+	static connectors := CaseInsenseMap()
+	static dataIndex := 0
+
+	if !defaultProtocol {
+		settings := readMultiMap(getFileName("Core Settings.ini", kUserConfigDirectory, kConfigDirectory))
+
+		defaultProtocol := getMultiMapValue(settings, "Simulator", "Data Provider", "Connector")
+
+		if ((defaultProtocol = "Connector") || (defaultProtocol = "DLL"))
+			defaultProtocol := "Connector"
+		else
+			defaultProtocol := "Provider"
+	}
+
+	simulator := SessionDatabase.getSimulatorCode(simulator)
+
+	if !protocols.Has(simulator)
+		try {
+			theProtocols := SimulatorProvider.getProtocols(simulator)
+
+			if (!theProtocols.HasProp("Connector") && !theProtocols.HasProp("Provider"))
+				throw "Unsupported simulator detected in callSimulator..."
+			else
+				protocols[simulator] := theProtocols
+		}
+		catch Any {
+			throw "Unsupported simulator detected in callSimulator..."
+		}
+
+	if kLogSimulator {
+		logMessage(kLogDebug, "Calling simulator " . SessionDatabase.getSimulatorName(simulator)
+												   . " for " . ((options = "") ? "Telemetry=true" : options)
+												   . " by " . (isSet(protocol) ? protocol : defaultProtocol))
+
+		try {
+			throw Error("Caller stack")
+		}
+		catch (Any as exception) {
+			if exception.HasProp("Stack")
+				logMessage(kLogDebug, "Stack:`n`n" . exception.Stack, false, false, false)
+		}
+	}
+
+	if ((defaultProtocol = "Provider") && protocols[simulator].HasProp("Provider"))
+		protocol := protocols[simulator].Provider
+	else if isSet(protocol) {
+		if protocols[simulator].HasProp(protocol)
+			protocol := protocols[simulator].%protocol%
+		else
+			protocol := kUndefined
+	}
+	else if protocols[simulator].HasProp("Connector")
+		protocol := protocols[simulator].Connector
+	else if protocols[simulator].HasProp("Provider")
+		protocol := protocols[simulator].Provider
+	else
+		protocol := kUndefined
+
+	try {
+		if (options = "Close") {
+			if ((protocol.Type = "DLL") && connectors.Has(simulator . ".DLL")) {
+				try {
+					DLLCall(protocol.Library . "\close")
+
+					connectors.Delete(simulator . ".DLL")
+				}
+			}
+			else if ((protocol.Type = "CLR") && connectors.Has(simulator . ".CLR")) {
+				try {
+					connectors[simulator . ".CLR"].Close()
+
+					connectors.Delete(simulator . ".DLL")
+				}
+			}
+		}
+		else {
+			if (protocol.Type = "DLL") {
+				if !connectors.Has(simulator . ".DLL") {
+					curWorkingDir := A_WorkingDir
+
+					SetWorkingDir(kBinariesDirectory . "Connectors\")
+
+					try {
+						connector := DllCall("LoadLibrary", "Str", protocol.File, "Ptr")
+
+						if isDebug()
+							try
+								DLLCall(protocol.Library . "\setLogFile", "Str", kLogsDirectory . simulator . " Connector.log")
+
+						arguments := SimulatorProvider.computeArguments(simulator, "Connector", protocol)
+
+						if (arguments && (arguments.Length > 0))
+							DLLCall(protocol.Library . "\open", "Str", values2String(",", arguments*))
+						else
+							DLLCall(protocol.Library . "\open")
+
+						connectors[simulator . ".DLL"] := connector
+
+						OnExit((*) {
+							callSimulator(simulator, "Close", "Connector")
+						})
+					}
+					finally {
+						SetWorkingDir(curWorkingDir)
+					}
+				}
+
+				buf := Buffer(1024 * 1024)
+
+				callOptions := values2String(",", SimulatorProvider.computeOptions(simulator, "Connector"
+																				 , protocol, options)*)
+
+				DllCall(protocol.Library . "\call", "AStr", callOptions, "Ptr", buf, "Int", buf.Size)
+
+				data := parseMultiMap(StrGet(buf, "UTF-8"))
+
+				if (data.Count = 0)
+					throw ("DLL returned empty data for " . simulator . " in callSimulator...")
+			}
+			else if (protocol.Type = "CLR") {
+				if connectors.Has(simulator . ".CLR")
+					connector := connectors[simulator . ".CLR"]
+				else {
+					if !FileExist(protocol.File)
+						throw "Unable to find `"" . protocol.File . "`" in callSimulator..."
+
+					connector := CLR_LoadLibrary(protocol.File).CreateInstance(protocol.Instance)
+
+					if isDebug()
+						try
+							connector.SetLogFile(kLogsDirectory . simulator . " Connector.log")
+
+					arguments := SimulatorProvider.computeArguments(simulator, "Connector", protocol)
+
+					if !arguments
+						arguments := []
+
+					if (!connector.Open(arguments*) && !isDebug())
+						throw "Cannot startup `"" . protocol.File . "`" in callSimulator..."
+
+					connectors[simulator . ".CLR"] := connector
+
+					OnExit((*) {
+						callSimulator(simulator, "Close", "Connector")
+					})
+				}
+
+				callOptions := values2String(",", SimulatorProvider.computeOptions(simulator, "Connector"
+																				 , protocol, options)*)
+
+				data := parseMultiMap(connector.Call(callOptions))
+
+				if (data.Count = 0)
+					throw ("DLL returned empty data for " . simulator . " in callSimulator...")
+			}
+			else if (protocol.Type = "EXE") {
+				if !FileExist(protocol.File)
+					throw "File `"" . protocol.File . "`" not found in callSimulator..."
+
+				DirCreate(kTempDirectory . simulator . " Data")
+
+				dataFile := temporaryFileName(simulator . " Data\Provider", "data")
+
+				arguments := SimulatorProvider.computeArguments(simulator, "Connector", protocol)
+
+				if (arguments && (arguments.Length > 0))
+					arguments := values2String(A_Space, collect(arguments, (a) => ("`"" . a . "`""))*)
+				else
+					arguments := ""
+
+				callOptions := values2String(",", SimulatorProvider.computeOptions(simulator, "Provider"
+																				 , protocol, options)*)
+
+				RunWait(A_ComSpec . " /c `"`"" . protocol.File . "`" " . arguments
+											   . " `"" . callOptions . "`" > `"" . dataFile . "`"`"", , "Hide")
+
+				data := readMultiMap(dataFile)
+
+				deleteFile(dataFile)
+			}
+
+			setMultiMapValue(data, "Session Data", "Simulator", simulator)
+
+			if isDebug() {
+				if (dataIndex = 0) {
+					deleteDirectory(kTempDirectory . "Data")
+
+					DirCreate(kTempDirectory . "Data")
+				}
+
+				loop
+					dataIndex += 1
+
+				until !FileExist(dataFile := (kTempDirectory . "Data\" . format("{:06}", dataIndex) . " Data.data"))
+
+				writeMultiMap(dataFile, data)
+			}
+
+			return data
+		}
+	}
+	catch Any as exception {
+		if ((protocol = kUndefined) || (protocol.Type = "EXE")) {
+			logError(exception, true)
+
+			if (protocol = kUndefined) {
+				protocol := "SHM"
+				exePath := "..."
+			}
+			else {
+				exePath := protocol.File
+				protocol := protocol.Protocol
+			}
+
+			logMessage(kLogCritical, substituteVariables(translate("Cannot start %simulator% %protocol% Provider (")
+													   , {simulator: simulator, protocol: protocol})
+								   . exePath . translate(") - please rebuild the applications in the binaries folder (")
+								   . kBinariesDirectory . translate(")"))
+
+			if !kSilentMode
+				showMessage(substituteVariables(translate("Cannot start %simulator% %protocol% Provider (%exePath%) - please check the configuration...")
+											  , {exePath: exePath, simulator: simulator, protocol: protocol})
+						  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+
+			return newMultiMap()
+		}
+		else {
+			logError(exception)
+
+			return callSimulator(simulator, options, "Provider")
+		}
+	}
+}
+
+_callSimulator := callSimulator
+
+readSimulator(simulator, car, track, topics := {}, format := "Object") {
+	local provider := SimulatorProvider.createSimulatorProvider(simulator, car, track)
+	local data, telemetryData, standingsData
+
+	provider.acquireSessionData(&telemetryData, &standingsData)
+
+	if ((car != getMultiMapValue(telemetryData, "Session Data", "Car", car))
+	 || (track != getMultiMapValue(telemetryData, "Session Data", "Track", track))) {
+		car := getMultiMapValue(telemetryData, "Session Data", "Car")
+		track := getMultiMapValue(telemetryData, "Session Data", "Track")
+
+		provider := SimulatorProvider.createSimulatorProvider(simulator, car, track)
+
+		provider.acquireSessionData(&telemetryData, &standingsData)
+	}
+
+	if (!topics.HasProp("Setup") || topics.Setup) {
+		if (getMultiMapValues(telemetryData, "Setup Data").Count = 0)
+			data := provider.readSessionData("Setup=true")
+		else {
+			data := newMultiMap()
+
+			if (topics.HasProp("Telemetry") && !topics.Telemetry)
+				setMultiMapValues(data, "Setup Data", getMultiMapValues(telemetryData, "Setup Data").Clone())
+		}
+	}
+	else
+		data := newMultiMap()
+
+	setMultiMapValue(data, "System", "Time", A_TickCount)
+
+	if (!topics.HasProp("Telemetry") || topics.Setup)
+		addMultiMapValues(data, telemetryData)
+
+	if (!topics.HasProp("Standings") || topics.Setup)
+		addMultiMapValues(data, standingsData)
+
+	return ((format = "Text") ? printMultiMap(data) : data)
+}
+
+_readSimulator(simulator, topics := "All", car := false, track := false) {
+	return readSimulator(simulator, car, track
+					   , {Session: InStr(topics, "All") || InStr(topics, "Session")
+					    , Standings: InStr(topics, "All") || InStr(topics, "Standings")
+					    , Setup: InStr(topics, "All") || InStr(topics, "Pitstop")}
+					   , "Text")
+}

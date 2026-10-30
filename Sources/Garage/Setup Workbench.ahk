@@ -1,0 +1,7616 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Setup Workbench                 ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Global Declaration Section                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;@SC-IF %configuration% == Development
+#Include "..\Framework\Development.ahk"
+;@SC-EndIF
+
+;@SC-If %configuration% == Production
+;@SC #Include "..\Framework\Production.ahk"
+;@SC-EndIf
+
+;@Ahk2Exe-SetMainIcon ..\..\Resources\Icons\Setup.ico
+;@Ahk2Exe-ExeName Setup Workbench.exe
+;@Ahk2Exe-SetCompanyName Oliver Juwig (TheBigO)
+;@Ahk2Exe-SetCopyright TheBigO - Creative Commons - BY-NC-SA
+;@Ahk2Exe-SetProductName Simulator Controller
+;@Ahk2Exe-SetVersion 0.0.0.0
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework\Application.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework\Extensions\HTMLViewer.ahk"
+#Include "..\Framework\Extensions\Task.ahk"
+#Include "..\Framework\Extensions\Math.ahk"
+#Include "..\Framework\Extensions\JSON.ahk"
+#Include "..\Framework\Extensions\RuleEngine.ahk"
+#Include "..\Framework\Extensions\ScriptEngine.ahk"
+#Include "..\Framework\Extensions\LLMConnector.ahk"
+#Include "..\Framework\Extensions\Markdown.ahk"
+#Include "..\Database\Libraries\SessionDatabase.ahk"
+#Include "..\Database\Libraries\TelemetryViewer.ahk"
+#Include "..\Configuration\Libraries\ConfigurationEditor.ahk"
+#Include "..\Plugins\Libraries\SimulatorProvider.ahk"
+#Include "..\Database\Libraries\TelemetryCollector.ahk"
+#Include "..\Database\Libraries\TelemetryAnalyzer.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Private Constant Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kOk := "ok"
+global kCancel := "cancel"
+
+global kMaxCharacteristics := 8
+global kCharacteristicHeight := 56
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Public Constant Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kDebugOff := 0
+global kDebugKnowledgeBase := 1
+global kDebugRules := 2
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Public Classes Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; Logbook                                                                 ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class Logbook {
+	iFileName := false
+	iEntries := []
+
+	class LogbookEntry {
+		iDescriptor := ""
+
+		Type {
+			Get {
+				return this.Properties["Type"]
+			}
+		}
+
+		Descriptor {
+			Get {
+				return this.iDescriptor
+			}
+
+			Set {
+				return (this.iDescriptor := value)
+			}
+		}
+
+		Properties {
+			Get {
+				local properties
+
+				this.parseDescriptor(this.Descriptor, &properties)
+
+				return properties
+			}
+		}
+
+		Property[name] {
+			Get {
+				return this.Properties[name]
+			}
+		}
+
+		Payload {
+			Get {
+				local payload
+
+				this.parseDescriptor(this.Descriptor, , &payload)
+
+				return payload
+			}
+		}
+
+		HTML {
+			Get {
+				throw "Virtual property LogbookEntry.HTML must be implemented in a subclass..."
+			}
+		}
+
+		__New(descriptor) {
+			this.iDescriptor := descriptor
+		}
+
+		static fromDescriptor(descriptor) {
+			local type := string2Values("=", choose(string2Values("`n", descriptor), (l) => (l != ""))[1])[2]
+
+			return %type . "Entry"%(descriptor)
+		}
+
+		parseDescriptor(descriptor, &properties?, &payload?) {
+			local ignore, line
+
+			descriptor := string2Values("###++++++###++++++###", descriptor)
+
+			if (descriptor.Length > 1)
+				payload := descriptor[2]
+
+			properties := CaseInsenseMap()
+
+			for ignore, line in string2Values("`n", descriptor[1])
+				if (Trim(line) != "") {
+					line := string2Values("=", line)
+
+					properties[line[1]] := line[2]
+				}
+		}
+
+		superseeds(entry) {
+			return false
+		}
+	}
+
+	FileName {
+		Get {
+			return this.iFileName
+		}
+	}
+
+	Entries {
+		Get {
+			return this.iEntries
+		}
+	}
+
+	Descriptor {
+		Get {
+			return values2String("###------###------###", collect(this.Entries, (e) => e.Descriptor)*)
+		}
+	}
+
+	__New(fileName, entries) {
+		this.iFileName := fileName
+		this.iEntries := entries
+	}
+
+	static readLogbook(fileName) {
+		local entries := string2Values("###------###------###", FileRead(fileName))
+		local superfluousEntries := []
+		local lastEntry := false
+
+		entries := collect(entries, (d) {
+					   if (Trim(d) != "")
+						   return Logbook.LogbookEntry.fromDescriptor(Trim(d))
+					   else
+						   return false
+				   })
+
+		entries := choose(entries, (e) => e)
+
+		do(entries, (entry) {
+			if (lastEntry && entry.superseeds(lastEntry))
+				superfluousEntries.Push(lastEntry)
+
+			lastEntry := entry
+		})
+
+		return Logbook(fileName, choose(entries, (e) => !inList(superfluousEntries, e)))
+	}
+
+	superfluous() {
+		return (this.Entries.Length = 1)
+	}
+
+	writeLogbook(fileName) {
+		deleteFile(fileName)
+
+		FileAppend(this.Descriptor, fileName)
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SelectionEntry                                                          ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SelectionEntry extends Logbook.LogbookEntry {
+	HTML {
+		Get {
+			local html := "<table class=`"table-std`">"
+
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Simulator") . "</th><td>" . this.Simulator . "</td></tr>")
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Car") . "</th><td>" . this.Car . "</td></tr>")
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Track") . "</th><td>" . this.Track . "</td></tr>")
+
+			return (html . "</table>")
+		}
+	}
+
+	Simulator {
+		Get {
+			return this.Property["Simulator"]
+		}
+	}
+
+	Car {
+		Get {
+			local car := this.Property["Car"]
+
+			return ((car != translate("All")) ? SessionDatabase.getCarName(this.Simulator, car) : car)
+		}
+	}
+
+	Track {
+		Get {
+			local track := this.Property["Track"]
+
+			return ((track != translate("All")) ? SessionDatabase.getTrackName(this.Simulator, track) : track)
+		}
+	}
+
+	superseeds(entry) {
+		return isInstance(entry, SelectionEntry)
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; IssuesEntry                                                             ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class IssuesEntry extends Logbook.LogbookEntry {
+	HTML {
+		Get {
+			local html := ""
+			local îssues := this.Issues.Clone()
+			local ignore, issue
+
+			if (îssues.Length > 0) {
+				html .= "<table class=`"table-std`">"
+				html .= ("<tr><th class=`"th-std`">" . translate("Characteristic") . "</th>"
+					   . "<th class=`"th-std`">" . translate("Importance") . "</th>"
+					   . "<th class=`"th-std`">" . translate("Severity") . "</th></tr>")
+
+				for ignore, issue in îssues {
+					html .= ("<tr><td>" . issue.Characteristic . "</td>")
+					html .= ("<td>" . issue.Importance . "</td>")
+					html .= ("<td>" . issue.Severity . "</td></tr>")
+				}
+
+				return (html . "</table>")
+			}
+
+			return html
+		}
+	}
+
+	Issues {
+		Get {
+			local issues := []
+			local ignore, issue
+
+			for ignore, issue in string2Values("`n", this.Payload) {
+				issue := string2Values("=", issue)
+
+				issues.Push({Characteristic: issue[1]
+						   , Importance: string2Values("/", issue[2])[1]
+						   , Severity: string2Values("/", issue[2])[2]})
+			}
+
+			return issues
+		}
+	}
+
+	superseeds(entry) {
+		if isInstance(entry, IssuesEntry)
+			return all(entry.Issues, (c1) => exist(this.Issues
+												 , (c2) => (c1.Characteristic = c2.Characteristic)))
+		else
+			return false
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SetupEntry                                                              ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SetupEntry extends Logbook.LogbookEntry {
+	HTML {
+		Get {
+			local html := "<table class=`"table-std`">"
+
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Setup:") . "</th><td>" . this.Setup . "</td></tr>")
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("File:") . "</th><td>" . this.FileName . "</td></tr>")
+
+			return (html . "</table>")
+		}
+	}
+
+	Setup {
+		Get {
+			return this.Property["Setup"]
+		}
+	}
+
+	FileName {
+		Get {
+			return this.Property["FileName"]
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; LoadEntry                                                               ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class LoadEntry extends SetupEntry {
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SaveEntry                                                               ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SaveEntry extends SetupEntry {
+	HTML {
+		Get {
+			local html := super.HTML
+			local settings := this.Settings.Clone()
+			local lastCategory := false
+			local ignore, setting
+
+			if (settings.Length > 0) {
+				html .= "<br><br><table class=`"table-std`">"
+				html .= ("<tr><th class=`"th-std`">" . translate("Category") . "</th>"
+					   . "<th class=`"th-std`">" . translate("Setting") . "</th>"
+					   . "<th class=`"th-std`">" . translate("Value") . "</th></tr>")
+
+				for ignore, setting in bubbleSort(&settings, (s1, s2) => strGreater(s1.Category, s2.Category)) {
+					html .= ("<tr><td>" . ((setting.Category != lastCategory) ? setting.Category : "") . "</td>")
+					html .= ("<td>" . setting.Setting . "</td>")
+					html .= ("<td>" . setting.Value . "</td></tr>")
+
+					lastCategory := setting.Category
+				}
+
+				return (html . "</table>")
+			}
+
+			return html
+		}
+	}
+
+	Settings {
+		Get {
+			local settings := []
+			local ignore, setting
+
+			for ignore, setting in string2Values("`n", this.Payload) {
+				setting := string2Values("=", setting)
+
+				settings.Push({Category: setting[1], Setting: setting[2], Value: setting[3]})
+			}
+
+			return settings
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; LapEntry                                                                ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class LapEntry extends Logbook.LogbookEntry {
+	HTML {
+		Get {
+			local html := "<table class=`"table-std`">"
+
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Lap:") . "</th><td>" . this.Lap . "</td></tr>")
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Lap Time:") . "</th><td>" . this.LapTime . "</td></tr>")
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Sector Times:") . "</th><td>" . this.SectorTimes . "</td></tr>")
+
+			return (html . "</table>")
+		}
+	}
+
+	Lap {
+		Get {
+			return this.Property["Lap"]
+		}
+	}
+
+	LapTime {
+		Get {
+			return this.Property["Lap Time"]
+		}
+	}
+
+	SectorTimes {
+		Get {
+			return this.Property["Sector Times"]
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; AnalysisEntry                                                           ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class AnalysisEntry extends Logbook.LogbookEntry {
+	HTML {
+		Get {
+			local html := "<table class=`"table-std`">"
+
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Lap:") . "</th><td>" . this.Lap . "</td></tr>")
+			html .= ("<tr><th class=`"th-std th-left`">" . translate("Lap Time:") . "</th><td>" . this.LapTime . "</td></tr>")
+
+			return (html . "</table><br><br>" . this.Payload)
+		}
+	}
+
+	Lap {
+		Get {
+			return this.Property["Lap"]
+		}
+	}
+
+	LapTime {
+		Get {
+			return this.Property["Lap Time"]
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; RecommendationsEntry                                                    ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class RecommendationsEntry extends Logbook.LogbookEntry {
+	HTML {
+		Get {
+			local html := ""
+			local settings := this.Settings.Clone()
+			local ignore, setting
+
+			if (settings.Length > 0) {
+				html .= "<table class=`"table-std`">"
+				html .= ("<th class=`"th-std`">" . translate("Setting") . "</th>"
+					   . "<th class=`"th-std`">" . translate("Increment") . "</th></tr>")
+
+				for ignore, setting in settings {
+					html .= ("<td>" . setting.Setting . "</td>")
+					html .= ("<td>" . setting.Increment . "</td></tr>")
+				}
+
+				return (html . "</table>")
+			}
+
+			return html
+		}
+	}
+
+	Settings {
+		Get {
+			local settings := []
+			local ignore, setting
+
+			for ignore, setting in string2Values("`n", this.Payload) {
+				setting := string2Values("=", setting)
+
+				settings.Push({Setting: setting[1], Increment: setting[2]})
+			}
+
+			return settings
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; NotesEntry                                                              ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class NotesEntry extends Logbook.LogbookEntry {
+	HTML {
+		Get {
+			return markdown2HTML(this.Notes)
+		}
+	}
+
+	Notes {
+		Get {
+			return this.Payload
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SetupWorkbench                                                          ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SetupWorkbench extends ConfigurationItem {
+	iWindow := false
+
+	iDebug := kDebugOff
+
+	iProgressCount := 0
+
+	iCharacteristicsArea := false
+
+	iOriginalDefinition := false
+	iDefinition := false
+
+	iOriginalSimulatorDefinition := false
+	iSimulatorDefinition := false
+
+	iSimulatorSettings := false
+
+	iSelectedSimulator := false
+	iAvailableCars := []
+	iSelectedCar := true
+	iSelectedTrack := true
+	iSelectedWeather := "Dry"
+
+	iLogbookDirectory := false
+	iLogbook := false
+
+	iCharacteristics := []
+	iSettings := []
+
+	iSelectedCharacteristics := []
+	iSelectedCharacteristicsWidgets := CaseInsenseMap()
+
+	iSettingsViewer := false
+
+	iTelemetryViewer := false
+	iSetupEngineer := false
+
+	iSetupEditors := []
+
+	iSetup := false
+
+	iKnowledgeBase := false
+
+	class LabelsMap extends SectionMap {
+		__Item[key] {
+			Get {
+				return (this.Has(key) ? super.__Item[key] : key)
+			}
+
+			Set {
+				return (super.__Item[key] := value)
+			}
+		}
+	}
+
+	class WorkbenchWindow extends Window {
+		iWorkbench := false
+
+		Workbench {
+			Get {
+				return this.iWorkbench
+			}
+		}
+
+		__New(workbench) {
+			this.iWorkbench := workbench
+
+			super.__New({Descriptor: "Setup Workbench", Resizeable: true, Closeable: true})
+		}
+
+		Close(*) {
+			if this.Closeable
+				closeSetupWorkbench()
+			else
+				return true
+		}
+	}
+
+	class WorkbenchResizer extends Window.Resizer {
+		iSettingsViewer := false
+		iRedraw := false
+
+		__New(window, settingsViewer, arguments*) {
+			this.iSettingsViewer := settingsViewer
+
+			super.__New(window, arguments*)
+
+			Task.startTask(ObjBindMethod(this, "RedrawHTMLViwer"), 500, kHighPriority)
+		}
+
+		Redraw() {
+			this.iRedraw := true
+		}
+
+		RedrawHTMLViwer() {
+			if this.iRedraw {
+				local ignore, button
+
+				for ignore, button in ["LButton", "MButton", "RButton"]
+					if GetKeyState(button)
+						return Task.CurrentTask
+
+				this.iRedraw := false
+
+				this.iSettingsViewer.Resized()
+
+				try {
+					this.Window.Workbench.updateRecommendations(true, false)
+				}
+				catch Any as exception {
+					logError(exception)
+
+					return false
+				}
+			}
+
+			return Task.CurrentTask
+		}
+	}
+
+	Window {
+		Get {
+			return this.iWindow
+		}
+	}
+
+	Control[name] {
+		Get {
+			return this.Window[name]
+		}
+	}
+
+	ProgressCount {
+		Get {
+			return this.iProgressCount
+		}
+
+		Set {
+			return (this.iProgressCount := value)
+		}
+	}
+
+	Definition {
+		Get {
+			return this.iDefinition
+		}
+	}
+
+	SimulatorDefinition {
+		Get {
+			return this.iSimulatorDefinition
+		}
+	}
+
+	SimulatorSettings {
+		Get {
+			return this.iSimulatorSettings
+		}
+	}
+
+	LogbookDirectory {
+		Get {
+			return this.iLogbookDirectory
+		}
+	}
+
+	Logbook {
+		Get {
+			return this.iLogbook
+		}
+	}
+
+	Characteristics {
+		Get {
+			return this.iCharacteristics
+		}
+	}
+
+	Settings {
+		Get {
+			return this.iSettings
+		}
+	}
+
+	CharacteristicsArea {
+		Get {
+			return this.iCharacteristicsArea
+		}
+	}
+
+	SelectedCharacteristics[key?] {
+		Get {
+			return (isSet(key) ? this.iSelectedCharacteristics[key] : this.iSelectedCharacteristics)
+		}
+	}
+
+	SelectedCharacteristicsWidgets[key?] {
+		Get {
+			return (isSet(key) ? this.iSelectedCharacteristicsWidgets[key] : this.iSelectedCharacteristicsWidgets)
+		}
+
+		Set {
+			return (key ? (this.iSelectedCharacteristicsWidgets[key] := value) : (this.iSelectedCharacteristicsWidgets := value))
+		}
+	}
+
+	Debug[option] {
+		Get {
+			return (this.iDebug & option)
+		}
+	}
+
+	SelectedSimulator[label := true] {
+		Get {
+			if (label = "*")
+				return ((this.iSelectedSimulator == true) ? "*" : this.iSelectedSimulator)
+			else if this.SimulatorSettings
+				return (label ? this.SimulatorSettings.Name : this.iSelectedSimulator)
+			else
+				return this.iSelectedSimulator
+		}
+	}
+
+	AvailableCars[label := true] {
+		Get {
+			local cars, index, car
+
+			if ((label == true) && inList(this.iAvailableCars, "*")) {
+				cars := this.iAvailableCars.Clone()
+
+				for index, car in cars
+					if (car = "*")
+						cars[index] := translate("All")
+
+				return cars
+			}
+			else
+				return this.iAvailableCars
+		}
+	}
+
+	SelectedCar[label := true] {
+		Get {
+			if ((label = "*") && (this.iSelectedCar == true))
+				return "*"
+			else if (label && (this.iSelectedCar == true))
+				return translate("All")
+			else
+				return this.iSelectedCar
+		}
+	}
+
+	SelectedTrack[label := true] {
+		Get {
+			if ((label = "*") && (this.iSelectedTrack == true))
+				return "*"
+			else if (label && (this.iSelectedTrack == true))
+				return translate("All")
+			else
+				return this.iSelectedTrack
+		}
+	}
+
+	SelectedWeather {
+		Get {
+			return this.iSelectedWeather
+		}
+	}
+
+	SettingsViewer {
+		Get {
+			return this.iSettingsViewer
+		}
+	}
+
+	Setup {
+		Get {
+			return this.iSetup
+		}
+
+		Set {
+			return (this.iSetup := value)
+		}
+	}
+
+	TelemetryViewer {
+		Get {
+			return this.iTelemetryViewer
+		}
+	}
+
+	SetupEngineer {
+		Get {
+			return this.iSetupEngineer
+		}
+	}
+
+	SetupEditors {
+		Get {
+			return this.iSetupEditors
+		}
+	}
+
+	KnowledgeBase {
+		Get {
+			return this.iKnowledgeBase
+		}
+	}
+
+	__New(simulator := false, car := false, track := false, weather := false) {
+		local found := false
+		local definition, ignore, fileName, logbookFolder
+
+		if simulator {
+			this.iSelectedSimulator := SessionDatabase.getSimulatorName(simulator)
+			this.iSelectedCar := (car ? SessionDatabase.getCarName(simulator, car) : false)
+			this.iSelectedTrack := (track ? SessionDatabase.getTrackName(simulator, track) : false)
+			this.iSelectedWeather := weather
+		}
+
+		definition := readMultiMap(kResourcesDirectory . "Garage\Setup Workbench.ini")
+
+		for ignore, fileName in getFileNames("Setup Workbench." . getLanguage(), kTranslationsDirectory, kUserTranslationsDirectory) {
+			found := true
+
+			addMultiMapValues(definition, readMultiMap(fileName))
+		}
+
+		if !found
+			addMultiMapValues(definition, readMultiMap(kTranslationsDirectory . "Setup Workbench.en"))
+
+		this.iOriginalDefinition := definition
+		this.iDefinition := definition.Clone()
+
+		super.__New(kSimulatorConfiguration)
+
+		logbookFolder := getMultiMapValue(readMultiMap(kUserConfigDirectory . "Setup Workbench.ini")
+										, "Setup Workbench", "Diary"
+										, kTempDirectory . "Setup Workbench\Logbook")
+		logbookFolder := getMultiMapValue(readMultiMap(kUserConfigDirectory . "Setup Workbench.ini")
+										, "Setup Workbench", "Logbook", logbookFolder)
+
+		if (!logbookFolder || (logbookFolder = ""))
+			logbookFolder := (kTempDirectory . "Setup Workbench\Logbook")
+
+		DirCreate(logbookFolder)
+
+		this.iLogbookDirectory := (normalizeDirectoryPath(logbookFolder) . "\")
+		this.iLogbook := (this.LogbookDirectory . A_Now . ".logbook")
+
+		SetupWorkbench.Instance := this
+
+		OnExit((*) {
+			if this.TelemetryViewer
+				this.TelemetryViewer.shutdownCollector()
+
+			deleteDirectory(kTempDirectory . "Setup Workbench\Telemetry")
+
+			return false
+		})
+	}
+
+	createGui(configuration) {
+		local workbench := this
+		local simulators, simulator, weather, choices, chosen, index, name, workbenchGui, button
+
+		chooseSimulator(*) {
+			workbench.loadSimulator((workbenchGui["simulatorDropDown"].Text = translate("Generic")) ? true : workbenchGui["simulatorDropDown"].Text)
+
+			workbench.logLogbook("Selection")
+		}
+
+		chooseCar(*) {
+			workbench.loadCar((workbenchGui["carDropDown"].Text = translate("All")) ? true : workbenchGui["carDropDown"].Text)
+
+			workbench.logLogbook("Selection")
+		}
+
+		chooseTrack(*) {
+			local simulator, tracks, trackNames
+
+			if (workbenchGui["trackDropDown"].Text = translate("All"))
+				workbench.loadTrack(true)
+			else {
+				simulator := workbench.SelectedSimulator
+				tracks := workbench.getTracks(simulator, workbench.SelectedCar)
+				trackNames := collect(tracks, ObjBindMethod(workbench, "getTrackName", simulator))
+
+				workbench.loadTrack(tracks[inList(trackNames, workbenchGui["trackDropDown"].Text)])
+			}
+
+			workbench.logLogbook("Selection")
+		}
+
+		chooseWeather(*) {
+		}
+
+		chooseCharacteristic(*) {
+			workbench.chooseCharacteristic()
+		}
+
+		editSetup(*) {
+			workbench.editSetup()
+		}
+
+		browseLogbooks(*) {
+			this.browseLogbooks()
+		}
+
+		loadIssues(*) {
+			local fileName
+
+			workbenchGui.Opt("+OwnDialogs")
+
+			OnMessage(0x44, translateLoadCancelButtons)
+			fileName := withBlockedWindows(FileSelect, 1, "", translate("Load Issues..."), "Issues (*.issues)")
+			OnMessage(0x44, translateLoadCancelButtons, 0)
+
+			if (fileName != "")
+				workbench.restoreState(fileName, false)
+		}
+
+		saveIssues(*) {
+			local fileName
+
+			workbenchGui.Opt("+OwnDialogs")
+
+			OnMessage(0x44, translateSaveCancelButtons)
+			fileName := withBlockedWindows(FileSelect, "S17", "", translate("Save Issues..."), "Issues (*.issues)")
+			OnMessage(0x44, translateSaveCancelButtons, 0)
+
+			if (fileName != "") {
+				if !InStr(fileName, ".issues")
+					fileName := (fileName . ".issues")
+
+				workbench.saveIssues(fileName)
+			}
+		}
+
+		workbenchGui := SetupWorkbench.WorkbenchWindow(this)
+
+		this.iWindow := workbenchGui
+
+		workbenchGui.SetFont("s10 Bold", "Arial")
+
+		workbenchGui.Add("Text", "w1184 Center H:Center", translate("Modular Simulator Controller System")).OnEvent("Click", moveByMouse.Bind(workbenchGui, "Setup Workbench"))
+
+		workbenchGui.SetFont("s9 Norm", "Arial")
+
+		workbenchGui.Add("Documentation", "x488 YP+20 w224 Center H:Center", translate("Setup Workbench")
+					   , "https://github.com/SeriousOldMan/Simulator-Controller/wiki/Setup-Workbench")
+
+		workbenchGui.Add("Text", "x8 yp+30 w1196 W:Grow 0x10 Section")
+
+		workbenchGui.SetFont("Norm")
+		workbenchGui.SetFont("s10 Bold", "Arial")
+
+		workbenchGui.Add("Picture", "x16 yp+12 w30 h30", workbenchGui.Theme.RecolorizeImage(kIconsDirectory . "Road.ico"))
+		workbenchGui.Add("Text", "x50 yp+5 w120 h26", translate("Selection"))
+
+		workbenchGui.SetFont("s8 Norm", "Arial")
+
+		workbenchGui.Add("Text", "x16 yp+32 w80 h23 +0x200", translate("Simulator"))
+
+		simulators := this.getSimulators()
+		simulator := 0
+
+		if (simulators.Length > 0) {
+			if this.SelectedSimulator
+				simulator := inList(simulators, this.SelectedSimulator)
+
+			if (simulator == 0)
+				simulator := inList(simulators, true)
+		}
+
+		for index, name in simulators
+			if (name == true)
+				simulators[index] := translate("Generic")
+
+		workbenchGui.Add("DropDownList", "x100 yp w196 Choose" . simulator . " vsimulatorDropDown", simulators).OnEvent("Change", chooseSimulator)
+
+		if (simulator > 0)
+			simulator := simulators[simulator]
+		else
+			simulator := false
+
+		workbenchGui.Add("Text", "x16 yp+24 w80 h23 +0x200", translate("Car"))
+		workbenchGui.Add("DropDownList", "x100 yp w196 Choose1 vcarDropDown", [translate("All")]).OnEvent("Change", chooseCar)
+		workbenchGui.Add("Text", "x16 yp+24 w80 h23 +0x200", translate("Track"))
+		workbenchGui.Add("DropDownList", "x100 yp w196 Choose1 vtrackDropDown", [translate("All")]).OnEvent("Change", chooseTrack)
+
+		workbenchGui.Add("Text", "x16 yp+24 w80 h23 +0x200", translate("Conditions"))
+
+		weather := this.SelectedWeather
+		choices := collect(kWeatherConditions, translate)
+		chosen := inList(kWeatherConditions, weather)
+
+		if (!chosen && (choices.Length > 0)) {
+			weather := choices[1]
+			chosen := 1
+		}
+
+		workbenchGui.Add("DropDownList", "x100 yp w196 Disabled Choose" . chosen . "  vweatherDropDown", choices).OnEvent("Change", chooseWeather)
+
+		workbenchGui.Add("Button", "x305 ys+49 w94 h94 Disabled veditSetupButton").OnEvent("Click", editSetup)
+		setButtonIcon(workbenchGui["editSetupButton"], kIconsDirectory . "Car Setup.ico", 1, "W64 H64")
+
+		workbenchGui.Add("Text", "x8 yp+103 w400 0x10")
+
+		workbenchGui.SetFont("Norm")
+		workbenchGui.SetFont("s10 Bold", "Arial")
+
+		workbenchGui.Add("Picture", "x16 yp+12 w30 h30", workbenchGui.Theme.RecolorizeImage(kIconsDirectory . "Report.ico"))
+		workbenchGui.Add("Text", "x50 yp+5 w180 h26", translate("Characteristics"))
+
+		workbenchGui.SetFont("s8 Norm")
+		workbenchGui.Add("Picture", "x16 yp+30 w382 h469 H:Grow Border BackgroundTrans")
+
+		this.iCharacteristicsArea := {X: 16, Y: 262, Width: 382, W: 482, Height: 439, H: 439}
+
+		workbenchGui.Add("Button", "x208 yp-32 w70 h23 vanalyzerButton Hidden", translate("Analyzer...")).OnEvent("Click", (*) => this.startIssueAnalyzer())
+
+		workbenchGui.Add("Button", "x280 yp w70 h23 vcharacteristicsButton", translate("Issue...")).OnEvent("Click", chooseCharacteristic)
+		button := workbenchGui.Add("Button", "x352 yp w23 h23")
+		button.OnEvent("Click", loadIssues)
+		setButtonIcon(button, kIconsDirectory . "Load.ico", 1, "L2 T2 R2 B2")
+		button := workbenchGui.Add("Button", "x376 yp w23 h23")
+		button.OnEvent("Click", saveIssues)
+		setButtonIcon(button, kIconsDirectory . "Save.ico", 1, "L4 T4 R4 B4")
+
+		workbenchGui.SetFont("Norm")
+		workbenchGui.SetFont("s10 Bold", "Arial")
+
+		workbenchGui.Add("Picture", "x420 ys+12 w30 h30", workbenchGui.Theme.RecolorizeImage(kIconsDirectory . "Assistant.ico"))
+		workbenchGui.Add("Text", "x454 yp+5 w150 h26", translate("Recommendations"))
+
+		button := workbenchGui.Add("Button", "x1148 yp+6 w23 h23 X:Move")
+		button.OnEvent("Click", browseLogbooks)
+		setButtonIcon(button, kIconsDirectory . "Book.ico", 1, "L2 T2 R2 B2")
+
+		button := workbenchGui.Add("Button", "x1172 yp w23 h23 X:Move")
+		button.OnEvent("Click", (*) => this.editSettings())
+		setButtonIcon(button, kIconsDirectory . "General Settings.ico", 1)
+
+		workbenchGui.SetFont("s8 Norm", "Arial")
+
+		this.iSettingsViewer := workbenchGui.Add("HTMLViewer", "x420 yp+24 w775 h621 W:Grow H:Grow Border vsettingsViewer")
+
+		this.showSettingsChart(false)
+
+		/*
+		workbenchGui.SetFont("Norm", "Arial")
+
+		workbenchGui.Add("Text", "x8 y730 w1200 Y:Move W:Grow 0x10")
+
+		workbenchGui.Add("Button", "x16 y738 w77 h23 Y:Move", translate("&Load...")).OnEvent("Click", loadIssues)
+		workbenchGui.Add("Button", "x98 y738 w77 h23 Y:Move", translate("&Save...")).OnEvent("Click", saveIssues)
+
+		workbenchGui.Add("Button", "x574 y738 w80 h23 Y:Move H:Center", translate("Close")).OnEvent("Click", closeSetupWorkbench)
+		*/
+
+		workbenchGui.Add(SetupWorkbench.WorkbenchResizer(workbenchGui, this.iSettingsViewer))
+	}
+
+	show() {
+		local window := this.Window
+		local x, y, w, h
+
+		if getWindowPosition("Setup Workbench", &x, &y)
+			window.Show("x" . x . " y" . y)
+		else
+			window.Show()
+
+		if getWindowSize("Setup Workbench", &w, &h)
+			window.Resize("Initialize", w, h)
+	}
+
+	saveIssues(fileName := false) {
+		local state, ignore, characteristic, widgets, value1, value2
+
+		if !fileName
+			fileName := (kUserConfigDirectory . "Setup Workbench.issues")
+
+		state := this.SimulatorDefinition.Clone()
+
+		setMultiMapValue(state, "State", "Simulator", this.SelectedSimulator["*"])
+		setMultiMapValue(state, "State", "Car", this.SelectedCar["*"])
+		setMultiMapValue(state, "State", "Track", this.SelectedTrack["*"])
+		setMultiMapValue(state, "State", "Weather", this.SelectedWeather)
+
+		setMultiMapValue(state, "State", "Characteristics", values2String(",", this.Characteristics*))
+		setMultiMapValue(state, "State", "Settings", values2String(",", this.Settings*))
+
+		setMultiMapValue(state, "Characteristics", "Characteristics", values2String(",", this.SelectedCharacteristics*))
+
+		for ignore, characteristic in this.SelectedCharacteristics {
+			widgets := this.SelectedCharacteristicsWidgets[characteristic]
+
+			value1 := widgets[1].Value
+			value2 := widgets[2].Value
+
+			setMultiMapValue(state, "Characteristics", characteristic . ".Weight", value1)
+			setMultiMapValue(state, "Characteristics", characteristic . ".Value", value2)
+		}
+
+		setMultiMapValues(state, "KnowledgeBase", this.KnowledgeBase.Facts.Facts)
+
+		writeMultiMap(fileName, state)
+	}
+
+	restoreState(fileName := false, reset := true) {
+		local state, simulator, car, track, weather, characteristicLabels, characteristics
+		local ignore, characteristic
+
+		if !fileName
+			fileName := (kUserConfigDirectory . "Setup Workbench.issues")
+
+		if FileExist(fileName) {
+			state := readMultiMap(fileName)
+
+			simulator := getMultiMapValue(state, "State", "Simulator")
+			car := getMultiMapValue(state, "State", "Car")
+			track := getMultiMapValue(state, "State", "Track")
+			weather := getMultiMapValue(state, "State", "Weather")
+
+			if (simulator = "*")
+				simulator := true
+
+			if (car = "*")
+				car := true
+
+			if (track = "*")
+				track := true
+
+			if !GetKeyState("Ctrl")
+				this.clearCharacteristics()
+
+			this.Window.Block()
+
+			try {
+				this.loadSimulator(simulator, reset)
+				this.loadCar(car, false)
+				this.loadTrack(track, false)
+				this.loadWeather(weather, false)
+
+				this.logLogbook("Selection")
+
+				characteristicLabels := toMap(getMultiMapValues(this.Definition
+															  , "Workbench.Characteristics.Labels")
+											, SetupWorkbench.LabelsMap)
+
+				characteristics := string2Values(",", getMultiMapValue(state, "Characteristics", "Characteristics"))
+
+				if (characteristics.Length > 0) {
+					this.ProgressCount := 0
+
+					showProgress({color: "Green", width: 350, title: translate("Loading Issues"), message: translate("Preparing Characteristics...")})
+
+					Sleep(200)
+
+					for ignore, characteristic in characteristics {
+						showProgress({progress: (this.ProgressCount += 10), message: translate("Load ") . characteristicLabels[characteristic] . translate("...")})
+
+						if (this.SelectedCharacteristics.Length < kMaxCharacteristics)
+							this.addCharacteristic(characteristic, getMultiMapValue(state, "Characteristics", characteristic . ".Weight")
+																 , getMultiMapValue(state, "Characteristics", characteristic . ".Value")
+																 , false)
+					}
+
+					this.updateRecommendations()
+
+					this.updateState()
+
+					showProgress({progress: 100, message: translate("Finished...")})
+
+					Sleep(500)
+
+					hideProgress()
+				}
+			}
+			finally {
+				this.Window.Unblock()
+			}
+		}
+		else
+			this.loadSimulator(true, true)
+
+		this.logLogbook("Selection")
+
+		return false
+	}
+
+	showSettingsChart(content) {
+		local isChart, before, after, width, height, info, html, index, message, iWidth, iHeight, document
+
+		if !content
+			content := [translate("Please describe your car handling issues.")]
+
+		isChart := !isObject(content)
+
+		if this.SettingsViewer {
+			this.SettingsViewer.document.open()
+
+			if (content && (content != "")) {
+				if isChart {
+					before := "
+					(
+						<html>
+							<meta charset='utf-8'>
+							<head>
+								<style>
+									.headerStyle { height: 25; font-size: 11px; font-weight: 500; background-color: #%headerBackColor%; }
+									.rowStyle { font-size: 11px; color: #%fontColor%; background-color: #%evenRowBackColor%; }
+									.oddRowStyle { font-size: 11px; color: #%fontColor%; background-color: #%oddRowBackColor%; }
+								</style>
+								%chartScript%
+								<script type="text/javascript">
+									%chartLoad%
+					)"
+
+					before := substituteVariables(before, {chartScript: getGoogleChartsScriptTag()
+														 , chartLoad: getGoogleChartsLoadStatement("drawChart"
+																								 , "corechart", "table", "bar")
+														 , fontColor: this.Window.Theme.TextColor
+														 , headerBackColor: this.Window.Theme.ListBackColor["Header"]
+														 , evenRowBackColor: this.Window.Theme.ListBackColor["EvenRow"]
+														 , oddRowBackColor: this.Window.Theme.ListBackColor["OddRow"]})
+
+					width := this.SettingsViewer.getWidth() - 4
+					height := (this.SettingsViewer.getHeight() - 110 - 4)
+
+					info := getMultiMapValue(this.Definition, "Workbench.Info", "ChangeWarning", "")
+
+					iWidth := width - 10
+					iHeight := 90
+
+					after := "
+					(
+								</script>
+							</head>
+							<body style='background-color: #%backColor%' style='overflow: auto' leftmargin='0' topmargin='0' rightmargin='0' bottommargin='0'>
+								<style> table, p, div { color: #%fontColor% } </style>
+								<div id="chart_id" style="width: %width%px; height: %height%px"></div>
+								<div style="width: %iWidth%px; height: %iHeight%px">
+									<p style="font-family: Arial; font-size: 16px; margin: 5px">
+										<br>
+										<br>
+										%info%
+									</p>
+								</div>
+							</body>
+						</html>
+					)"
+
+					after := substituteVariables(after, {fontColor: this.Window.Theme.TextColor
+													   , width: width, height: height, iWidth: iWidth, iHeight: iHeight
+													   , info: info, backColor: this.Window.AltBackColor})
+
+					this.SettingsViewer.document.write(before . content . after)
+				}
+				else {
+					width := this.SettingsViewer.getWidth() - 4
+					height := (this.SettingsViewer.getHeight() - 4)
+
+					html := ""
+
+					for index, message in content {
+						if (index > 1)
+							html .= "<br><br>"
+
+						html .= message
+					}
+
+					document := "
+					(
+					<html>
+						<meta charset='utf-8'>
+						<head>
+						</head>
+						<body style='background-color: #%backColor%' style='overflow: auto' leftmargin='0' topmargin='0' rightmargin='0' bottommargin='0'>
+							<style> table, p, div { color: #%fontColor% } </style>
+							<div style="width: %width%px; height: %height%px; text-align: center">
+								<p style="font-family: Arial; font-size: 16px; height: %height%px; margin: auto">
+									<br>
+									<br>
+									<br>
+									<br>
+									%html%
+								</p>
+							</div>
+						</body>
+					</html>
+					)"
+
+					this.SettingsViewer.document.write(substituteVariables(document, {fontColor: this.Window.Theme.TextColor
+																					, width: width, height: height, html: html
+																					, backColor: this.Window.AltBackColor}))
+				}
+			}
+			else {
+				html := "<html><body style='background-color: #%backColor' style='overflow: auto' leftmargin='0' topmargin='0' rightmargin='0' bottommargin='0'></body></html>"
+
+				this.SettingsViewer.document.write(substituteVariables(html, {backColor: this.Window.AltBackColor}))
+			}
+
+			this.SettingsViewer.document.close()
+		}
+	}
+
+	showSettingsDeltas(settings) {
+		local drawChartFunction, names, values, ignore, setting, theMax, index, value
+
+		this.showSettingsChart(false)
+
+		if settings {
+			if (settings.Length > 0) {
+				drawChartFunction := "function drawChart() {"
+				drawChartFunction .= "`nvar data = google.visualization.arrayToDataTable(["
+
+				if false {
+					names := []
+					values := []
+				}
+				else {
+					names := [translate("Settings")]
+					values := [0.0]
+				}
+
+				for ignore, setting in settings {
+					names.Push(setting[1])
+					values.Push(setting[2])
+				}
+
+				theMax := Max(Abs(maximum(values)), Abs(minimum(values)))
+
+				if (theMax != 0)
+					for index, value in values
+						values[index] := (value / theMax)
+
+				drawChartFunction .= ("`n['" . values2String("', '", names*) . "'],")
+
+				drawChartFunction .= ("`n[" . values2String(",", values*) . "]")
+
+				drawChartFunction .= "`n]);"
+
+				drawChartFunction .= ("`nvar options = { legend: { textStyle: { color: '" . this.Window.Theme.TextColor . "'} }, bar: { groupWidth: " . (settings.Length * 16) . " }, vAxis: { textPosition: 'none', baseline: 'none', gridlines: { count: 0 }, textStyle: { color: '" . this.Window.Theme.TextColor["Grid"] . "'} }, hAxis: {maxValue: 1, minValue: -1, gridlines: {count: 4, color: '" . this.Window.Theme.GridColor . "'}, textStyle: { color: '" . this.Window.Theme.TextColor["Grid"] . "'}}, bars: 'horizontal', backgroundColor: '" . this.Window.AltBackColor . "', chartArea: { left: '5%', top: '5%', right: '40%', bottom: '5%' } };")
+
+				drawChartFunction .= "`nvar chart = new google.visualization.BarChart(document.getElementById('chart_id')); chart.draw(data, options); }"
+			}
+			else
+				drawChartFunction := [translate("I can't help you with that."), translate("You are on your own this time.")]
+
+			this.showSettingsChart(drawChartFunction)
+		}
+	}
+
+	setDebug(option, enabled, *) {
+		setDebugAsync() {
+			local label := false
+
+			if enabled
+				this.iDebug := (this.iDebug | option)
+			else if (this.Debug[option] == option)
+				this.iDebug := (this.iDebug - option)
+
+			switch option {
+				case kDebugKnowledgeBase:
+					label := translate("Debug Knowledgebase")
+
+					if enabled
+						this.dumpKnowledgeBase(this.KnowledgeBase)
+				case kDebugRules:
+					label := translate("Debug Rule System")
+
+					if enabled
+						this.dumpRules(this.KnowledgeBase)
+			}
+
+			if label
+				if enabled
+					SupportMenu.Check(label)
+				else
+					SupportMenu.Uncheck(label)
+		}
+
+		Task.startTask(setDebugAsync)
+	}
+
+	toggleDebug(option, *) {
+		this.setDebug(option, !this.Debug[option])
+	}
+
+	getSimulators() {
+		local simulators := []
+		local hasGeneric := false
+		local simulator
+
+		loop Files, kResourcesDirectory "Garage\Definitions\*.ini", "F" {
+			SplitPath(A_LoopFileName, , , , &simulator)
+
+			if (simulator = "Generic")
+				hasGeneric := true
+			else if !inList(simulators, simulator)
+				simulators.Push(simulator)
+		}
+
+		loop Files, kUserHomeDirectory "Garage\Definitions\*.ini", "F" {
+			SplitPath(A_LoopFileName, , , , &simulator)
+
+			if (simulator = "Generic")
+				hasGeneric := true
+			else if !inList(simulators, simulator)
+				simulators.Push(simulator)
+		}
+
+		if hasGeneric
+			simulators.InsertAt(1, true)
+
+		return simulators
+	}
+
+	getCars(simulator) {
+		local cars := []
+		local ignore, directory, files, car, descriptor, extension
+
+		if ((simulator != true) && (simulator != "*")) {
+			for ignore, directory in [kResourcesDirectory, kUserHomeDirectory]
+				for ignore, files in ["Garage\Definitions\Cars\" . simulator . ".*.ini"
+									, "Garage\Rules\Cars\" . simulator . ".*.rules"]
+					loop Files, directory . files, "F" {
+						SplitPath(A_LoopFileName, , , &extension, &descriptor)
+
+						car := StrReplace(StrReplace(descriptor, simulator . ".", ""), "." . extension, "")
+
+						if ((car != "Generic") && !inList(cars, car))
+							cars.Push(SessionDatabase.getCarName(simulator, car))
+					}
+
+			if (this.SimulatorDefinition && (getMultiMapValue(this.SimulatorDefinition, "Simulator", "Cars", false) = "*"))
+				for ignore, car in SessionDatabase().getCars(simulator, true) {
+					car := SessionDatabase.getCarName(simulator, car)
+
+					if !inList(cars, car)
+						cars.Push(car)
+				}
+		}
+
+		bubbleSort(&cars)
+
+		cars.InsertAt(1, "*")
+
+		return cars
+	}
+
+	getTracks(simulator, car) {
+		local tracks := []
+		local ignore, track
+
+		if (car && (car != true))
+			tracks := SessionDatabase().getTracks(simulator, car)
+
+		if (this.SimulatorDefinition && (getMultiMapValue(this.SimulatorDefinition, "Simulator", "Tracks", false) = "*"))
+			for ignore, track in SessionDatabase().getTracks(simulator, , true)
+				if !inList(tracks, track)
+					tracks.Push(track)
+
+		loop tracks.Length
+			tracks[A_Index] := SessionDatabase.getTrackName(simulator, tracks[A_Index])
+
+		bubbleSort(&tracks)
+
+		tracks.InsertAt(1, "*")
+
+		return tracks
+	}
+
+	getTrackName(simulator, track) {
+		if ((track = "*") || (track == true))
+			return translate("All")
+		else
+			return SessionDatabase.getTrackName(simulator, track)
+	}
+
+	dumpKnowledgeBase(knowledgeBase) {
+		knowledgeBase.dumpFacts()
+	}
+
+	dumpRules(knowledgeBase) {
+		knowledgeBase.dumpRules()
+	}
+
+	updateState() {
+		local editorClass := (this.SimulatorDefinition && getMultiMapValue(this.SimulatorDefinition, "Setup", "Editor", false))
+
+		/*
+		if (this.SelectedCharacteristics.Length < kMaxCharacteristics)
+			this.Control["characteristicsButton"].Enabled := true
+		else
+			this.Control["characteristicsButton"].Enabled := false
+		*/
+
+		if editorClass
+			this.Control["editSetupButton"].Enabled := %editorClass%(this).editableSetup(this.SelectedCar["*"])
+		else
+			this.Control["editSetupButton"].Enabled := false
+
+		if (!this.SimulatorDefinition || !getMultiMapValue(this.SimulatorDefinition, "Simulator", "Analyzer", false)
+									  || !inList(getKeys(getMultiMapValues(getControllerState(), "Simulators")), this.SelectedSimulator))
+			this.Control["analyzerButton"].Enabled := false
+		else
+			this.Control["analyzerButton"].Enabled := true
+
+		if this.SetupEngineer
+			this.SetupEngineer.updateState()
+	}
+
+	compileRules(fileName, &productions, &reductions, &includes) {
+		if (fileName && (fileName != "") && FileExist(fileName))
+			RuleCompiler().compileRules(FileRead(fileName), &productions, &reductions, &includes)
+	}
+
+	loadRules(&productions, &reductions, &includes) {
+		local simulator, car
+
+		productions := false
+		reductions := false
+
+		if !includes
+			includes := []
+
+		RuleCompiler().compileRules(FileRead(kResourcesDirectory . "Garage\Rules\Setup Workbench.rules"), &productions, &reductions, &includes)
+
+		simulator := this.SelectedSimulator
+		car := this.SelectedCar[false]
+
+		this.compileRules(getFileName("Garage\Rules\" . simulator . ".rules", kResourcesDirectory, kUserHomeDirectory)
+						, &productions, &reductions, &includes)
+		this.compileRules(getFileName("Garage\Rules\Cars\" . simulator . ".Generic.rules", kResourcesDirectory, kUserHomeDirectory)
+						, &productions, &reductions, &includes)
+
+		if (car != true)
+			this.compileRules(getFileName("Garage\Rules\Cars\" . simulator . "." . car . ".rules", kResourcesDirectory, kUserHomeDirectory)
+							, &productions, &reductions, &includes)
+	}
+
+	loadCharacteristics(simulator := false, car := false, track := false, fast := false) {
+		local knowledgeBase := this.KnowledgeBase
+		local characteristicLabels := toMap(getMultiMapValues(this.Definition
+															, "Workbench.Characteristics.Labels")
+										  , SetupWorkbench.LabelsMap)
+		local compiler, group, ignore, groupOption, option, characteristic
+
+		this.iCharacteristics := []
+
+		if !simulator
+			knowledgeBase.addFact("Characteristics.Count", 0)
+
+		compiler := RuleCompiler()
+
+		for group, definition in getMultiMapValues(this.Definition, "Workbench.Characteristics")
+			for ignore, groupOption in string2Values(";", definition) {
+				if InStr(groupOption, ":") {
+					groupOption := string2Values(":", groupOption)
+
+					for ignore, option in string2Values(",", groupOption[2]) {
+						characteristic := factPath(group, groupOption[1], option)
+
+						if !simulator {
+							showProgress({progress: ++this.ProgressCount, message: translate("Initializing Characteristic ")
+																				 . characteristicLabels[characteristic]
+																				 . translate("...")})
+
+							knowledgeBase.prove(compiler.compileGoal("addCharacteristic(" . characteristic . ")")).dispose()
+
+							this.Characteristics.Push(characteristic)
+
+							if (!fast && !isDebug())
+								Sleep(25)
+						}
+						else {
+							option := StrReplace(values2String(",", simulator, car, track, characteristic), A_Space, "\ ")
+							option := StrReplace(option, "(", "\(")
+							option := StrReplace(option, ")", "\)")
+
+							if knowledgeBase.prove(compiler.compileGoal("characteristicActive(" . option . ")")) {
+								showProgress({progress: ++this.ProgressCount})
+
+								this.Characteristics.Push(characteristic)
+							}
+						}
+					}
+				}
+				else {
+					characteristic := factPath(group, groupOption)
+
+					if !simulator {
+						showProgress({progress: ++this.ProgressCount, message: translate("Initializing Characteristic ")
+																			 . characteristicLabels[characteristic] . translate("...")})
+
+						knowledgeBase.prove(compiler.compileGoal("addCharacteristic(" . characteristic . ")")).dispose()
+
+						this.Characteristics.Push(characteristic)
+
+						if (!fast && !isDebug())
+							Sleep(25)
+					}
+					else {
+						option := StrReplace(values2String(",", simulator, car, track, characteristic), A_Space, "\ ")
+						option := StrReplace(option, "(", "\(")
+						option := StrReplace(option, ")", "\)")
+
+						if knowledgeBase.prove(compiler.compileGoal("characteristicActive(" . option . ")")) {
+							showProgress({progress: ++this.ProgressCount})
+
+							this.Characteristics.Push(characteristic)
+						}
+					}
+				}
+			}
+	}
+
+	initializeSettings(simulator, car) {
+		local fileName, carSettings
+
+		if simulator {
+			if car {
+				fileName := ("Garage\Definitions\Cars\" . simulator . "." . car . ".ini")
+				carSettings := getMultiMapValues(readMultiMap(getFileName(fileName, kResourcesDirectory, kUserHomeDirectory))
+											   , "Workbench.Settings")
+				setMultiMapValues(this.Definition, "Workbench.Settings", carSettings, false)
+			}
+		}
+	}
+
+	getSettings(simulator := false, car := false) {
+		return getMultiMapValues(this.Definition, "Workbench.Settings")
+	}
+
+	getLabel(setting) {
+		return toMap(getMultiMapValues(this.Definition, "Workbench.Settings.Labels")
+				   , SetupWorkbench.LabelsMap)[setting]
+	}
+
+	loadSettings(simulator := false, car := false, fast := false) {
+		local knowledgeBase := this.KnowledgeBase
+		local compiler, group, ignore, groupOption, option, setting, settingLabel
+
+		this.iSettings := []
+
+		if !simulator
+			knowledgeBase.setFact("Settings.Count", 0)
+
+		this.initializeSettings(simulator, car)
+
+		compiler := RuleCompiler()
+
+		for group, definition in this.getSettings(simulator, car)
+			for ignore, groupOption in string2Values(";", definition) {
+				if InStr(groupOption, ":") {
+					groupOption := string2Values(":", groupOption)
+
+					for ignore, option in string2Values(",", groupOption[2]) {
+						setting := factPath(group, groupOption[1], option)
+
+						settingLabel := this.getLabel(setting)
+
+						if !simulator {
+							showProgress({progress: ++this.ProgressCount
+										, message: translate("Initializing Setting ") . settingLabel . translate("...")})
+
+							knowledgeBase.prove(compiler.compileGoal("addSetting(" . setting . ")")).dispose()
+
+							this.Settings.Push(setting)
+
+							if (!fast && !isDebug())
+								Sleep(25)
+						}
+						else {
+							option := StrReplace(values2String(",", simulator, car, setting), A_Space, "\ ")
+							option := StrReplace(option, "(", "\(")
+							option := StrReplace(option, ")", "\)")
+
+							if knowledgeBase.prove(compiler.compileGoal("settingAvailable(" . option . ")")) {
+								showProgress({progress: ++this.ProgressCount})
+
+								this.Settings.Push(setting)
+							}
+						}
+					}
+				}
+				else {
+					setting := factPath(group, groupOption)
+
+					if !simulator {
+						showProgress({progress: ++this.ProgressCount
+									, message: translate("Initializing Setting ") . this.getLabel(setting) . translate("...")})
+
+						knowledgeBase.prove(compiler.compileGoal("addSetting(" . setting . ")")).dispose()
+
+						this.Settings.Push(setting)
+
+						if (!fast && !isDebug())
+							Sleep(25)
+					}
+					else {
+						option := StrReplace(values2String(",", simulator, car, setting), A_Space, "\ ")
+						option := StrReplace(option, "(", "\(")
+						option := StrReplace(option, ")", "\)")
+
+						if knowledgeBase.prove(compiler.compileGoal("settingAvailable(" . option . ")")) {
+							showProgress({progress: ++this.ProgressCount})
+
+							this.Settings.Push(setting)
+						}
+					}
+				}
+			}
+	}
+
+	matchSettings(descriptor) {
+		local simulator := this.SelectedSimulator["*"]
+		local car := this.SelectedCar["*"]
+		local pattern, group, definition, ignore, groupOption, option, setting, settings
+
+		if InStr(descriptor, "*") {
+			pattern := string2Values(".", descriptor)
+			settings := []
+
+			for group, definition in this.getSettings(simulator, car)
+				for ignore, groupOption in string2Values(";", definition)
+					if InStr(groupOption, ":") {
+						groupOption := string2Values(":", groupOption)
+
+						for ignore, option in string2Values(",", groupOption[2]) {
+							setting := string2Values(".", factPath(group, groupOption[1], option))
+
+							if (pattern.Length = setting.Length) {
+								valid := true
+
+								loop pattern.Length
+									if ((pattern[A_Index] != setting[A_Index]) && pattern[A_Index] != "*") {
+										valid := false
+
+										break
+									}
+
+								if valid
+									settings.Push(values2String(".", setting*))
+							}
+						}
+					}
+					else {
+						setting := string2Values(".", factPath(group, groupOption))
+
+						if (pattern.Length = setting.Length) {
+							valid := true
+
+							loop pattern.Length
+								if ((pattern[A_Index] != setting[A_Index]) && pattern[A_Index] != "*") {
+									valid := false
+
+									break
+								}
+
+							if valid
+								settings.Push(values2String(".", setting*))
+						}
+					}
+
+			if (settings.Length = 0)
+				return "[]"
+			else if (settings.Length = 1)
+				return settings[1]
+			else
+				return ("[" . values2String(", ", settings*) . "]")
+		}
+		else
+			return descriptor
+	}
+
+	createKnowledgeBase(productions, reductions, facts := false, includes := false) {
+		local engine := RuleEngine(productions, reductions, facts, includes)
+
+		return KnowledgeBase(engine, engine.createFacts(), engine.createRules())
+	}
+
+	initializeSimulator(name) {
+		local definition := readMultiMap(kResourcesDirectory . "Garage\Definitions\" . name . ".ini")
+		local simulator := getMultiMapValue(definition, "Simulator", "Simulator")
+		local cars, tracks
+
+		addMultiMapValues(definition, readMultiMap(kUserHomeDirectory . "Garage\Definitions\" . name . ".ini"))
+
+		this.iOriginalSimulatorDefinition := definition
+		this.iSimulatorDefinition := definition.Clone()
+
+		cars := this.getCars(simulator)
+		tracks := this.getTracks(simulator, true)
+
+		this.iSimulatorSettings := {Name: name, Simulator: simulator, Cars: cars, Tracks: tracks}
+
+		this.iSelectedSimulator := ((simulator = "*") ? true : simulator)
+		this.iAvailableCars := cars
+		this.iSelectedCar := ((cars[1] = "*") ? true : cars[1])
+		this.iSelectedTrack := ((tracks[1] = "*") ? true : tracks[1])
+	}
+
+	resetSimulator() {
+		this.iSimulatorDefinition := this.iOriginalSimulatorDefinition.Clone()
+	}
+
+	initializeWorkbench(phase1 := "Initializing Setup Workbench", phase2 := "Starting Setup Workbench", phase3 := "Loading Car", fast := false) {
+		local knowledgeBase, simulator, car, x, y, productions, reductions, includes
+		local simulatorDefinition, carDefinition, ignore, section
+
+		simulator := this.SelectedSimulator
+
+		this.ProgressCount := 0
+
+		showProgress({color: "Blue", width: 350, title: translate(phase1), message: translate("Clearing Issues...")})
+
+		this.resetWorkbench()
+		this.resetSimulator()
+
+		simulatorDefinition := readMultiMap(getFileName("Garage\Definitions\" . simulator . ".ini"
+													  , kResourcesDirectory, kUserHomeDirectory))
+
+		for ignore, section in ["Workbench.Characteristics", "Workbench.Categories", "Workbench.Settings"]
+			setMultiMapValues(this.Definition, section, getMultiMapValues(simulatorDefinition, section), false)
+
+		for ignore, section in ["Workbench.Characteristics.Labels"
+							  , "Workbench.Categories.Labels"
+							  , "Workbench.Settings.Labels"] {
+			values := getMultiMapValues(simulatorDefinition, section . "." . getLanguage())
+
+			if (values.Count = 0)
+				values := getMultiMapValues(simulatorDefinition, section . ".EN")
+
+			setMultiMapValues(this.Definition, section, values, false)
+
+			setMultiMapValues(this.Definition, section
+							, toMap(getMultiMapValues(this.Definition, section), SetupWorkbench.LabelsMap))
+		}
+
+		car := this.SelectedCar["*"]
+
+		if car {
+			car := ((car = "*") ? "Generic" : car)
+
+			carDefinition := readMultiMap(getFileName("Garage\Definitions\Cars\" . simulator . "." . car . ".ini"
+													, kResourcesDirectory, kUserHomeDirectory))
+
+			for ignore, section in ["Workbench.Characteristics", "Workbench.Categories", "Workbench.Settings"]
+				setMultiMapValues(this.Definition, section, getMultiMapValues(carDefinition, section), false)
+
+			for ignore, section in ["Workbench.Characteristics.Labels", "Workbench.Categories.Labels", "Workbench.Settings.Labels"] {
+				values := getMultiMapValues(carDefinition, section . "." . getLanguage())
+
+				if (values.Count = 0)
+					values := getMultiMapValues(carDefinition, section . ".EN")
+
+				setMultiMapValues(this.Definition, section, values, false)
+			}
+		}
+
+		Sleep(200)
+
+		this.closeTelemetryViewer()
+
+		this.clearCharacteristics()
+
+		showProgress({progress: this.ProgressCount++, message: translate("Preparing Knowledgebase...")})
+
+		Sleep(200)
+
+		productions := false
+		reductions := false
+		includes := false
+
+		this.loadRules(&productions, &reductions, &includes)
+
+		knowledgeBase := this.createKnowledgeBase(productions, reductions, includes)
+
+		this.iKnowledgeBase := knowledgeBase
+
+		if this.Debug[kDebugRules]
+			this.dumpRules(this.KnowledgeBase)
+
+		this.loadCharacteristics(false, false, false, fast)
+		this.loadSettings(false, false, fast)
+
+		showProgress({progress: this.ProgressCount++, color: "Green", title: translate(phase2), message: translate("Starting AI Kernel...")})
+
+		knowledgeBase.addFact("Initialize", true)
+
+		knowledgeBase.produce()
+
+		Sleep(200)
+
+		showProgress({progress: this.ProgressCount++, color: "Green", title: translate(phase3), message: translate("Loading Car Settings...")})
+
+		this.loadCharacteristics(this.SelectedSimulator["*"], this.SelectedCar["*"], this.SelectedTrack["*"], fast)
+
+		Sleep(200)
+
+		this.loadSettings(this.SelectedSimulator["*"], this.SelectedCar["*"], fast)
+
+		Sleep(200)
+
+		knowledgeBase.setFact("Workbench.Simulator", this.SelectedSimulator["*"])
+		knowledgeBase.setFact("Workbench.Car", this.SelectedCar["*"])
+		knowledgeBase.setFact("Workbench.Track", this.SelectedTrack["*"])
+
+		knowledgeBase.setFact("Calculate", true)
+
+		knowledgeBase.produce()
+
+		if this.Debug[kDebugKnowledgeBase]
+			this.dumpKnowledgeBase(knowledgeBase)
+
+		showProgress({progress: this.ProgressCount++, message: translate("Initializing Car Setup...")})
+
+		Sleep(200)
+
+		this.updateRecommendations(false, false)
+
+		this.showSettingsChart(false)
+
+		showProgress({message: translate("Finished...")})
+
+		Sleep(500)
+
+		this.iSetup := false
+
+		hideProgress()
+
+		this.updateState()
+	}
+
+	resetWorkbench() {
+		this.iDefinition := this.iOriginalDefinition.Clone()
+	}
+
+	logLogbook(type, arguments*) {
+		switch type, false {
+			case "Selection":
+				FileAppend("###------###------###"
+						 . "Type=Selection`n"
+						 . "Simulator=" . this.SelectedSimulator[true] . "`n"
+						 . "Car=" . this.SelectedCar[true] . "`n"
+						 . "Track=" . this.SelectedTrack[true], this.Logbook, "UTF-16")
+			case "Issues":
+				FileAppend("###------###------###"
+						 . "Type=Issues`n"
+						 . "###++++++###++++++###"
+						 . arguments[1], this.Logbook, "UTF-16")
+			case "Load":
+				FileAppend("###------###------###"
+						 . "Type=Load`n"
+						 . "Setup=" . arguments[1] . "`n"
+						 . "FileName=" . arguments[2], this.Logbook, "UTF-16")
+			case "Save":
+				FileAppend("###------###------###"
+						 . "Type=Save`n"
+						 . "Setup=" . arguments[1] . "`n"
+						 . "FileName=" . arguments[2] . "`n"
+						 . "###++++++###++++++###"
+						 . arguments[3], this.Logbook, "UTF-16")
+			case "Lap":
+				FileAppend("###------###------###"
+						 . "Type=Lap`n"
+						 . "Lap=" . arguments[1] . "`n"
+						 . "Lap Time=" . arguments[2] . "`n"
+						 . "Sector Times=" . arguments[3], this.Logbook, "UTF-16")
+			case "Notes":
+				FileAppend("###------###------###"
+						 . "Type=Notes`n"
+						 . "###++++++###++++++###"
+						 . arguments[1], this.Logbook, "UTF-16")
+		}
+	}
+
+	logLoad(editor, setup) {
+		this.logLogbook("Load", setup.Name, setup.FileName)
+	}
+
+	logSave(editor, setup) {
+		local categories := getMultiMapValues(this.Definition, "Workbench.Categories")
+		local categoriesLabels := toMap(getMultiMapValues(this.Definition, "Workbench.Categories.Labels")
+									  , SetupWorkbench.LabelsMap)
+		local settingsList := []
+		local ignore, setting, handler, unit, originalValue, modifiedValue, value
+		local candidate, settings
+
+		for ignore, setting in editor.getSettings() {
+			handler := editor.createSettingHandler(setting)
+
+			if handler {
+				unit := editor.getUnit(setting)
+
+				originalValue := handler.convertToDisplayValue(setup.getValue(setting, true))
+				modifiedValue := handler.convertToDisplayValue(setup.getValue(setting, false))
+
+				if (originalValue != modifiedValue) {
+					if (isNumber(originalValue) && isNumber(modifiedValue)) {
+						if (originalValue = modifiedValue) {
+							value := handler.formatValue(originalValue)
+
+							if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure")))
+								value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+
+							value := displayValue("Float", value)
+						}
+						else {
+							value := handler.formatValue(Abs(originalValue - modifiedValue))
+
+							if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+								originalValue := convertUnit("Pressure", convertUnit("Pressure", originalValue, unit, false))
+								modifiedValue := convertUnit("Pressure", convertUnit("Pressure", modifiedValue, unit, false))
+								value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+							}
+
+							if (modifiedValue > originalValue)
+								value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "+"
+										. displayValue("Float", value) . translate(")"))
+							else
+								value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "-"
+										. displayValue("Float", value) . translate(")"))
+						}
+					}
+					else {
+						if (originalValue = modifiedValue)
+							value := originalValue
+						else
+							value := modifiedValue
+					}
+
+					category := ""
+
+					for candidate, settings in categories {
+						for ignore, cSetting in string2Values(";", settings)
+							if (InStr(setting, cSetting) == 1) {
+								category := candidate
+
+								break
+							}
+
+						if (category != "")
+							break
+					}
+
+					label := editor.getLabel(setting)
+
+					if inList(kPressureUnits, unit)
+						unit := getUnit("Pressure")
+
+					settingsList.Push(categoriesLabels[category] . "=" . label . "=" . value . A_Space . translate(unit))
+				}
+			}
+		}
+
+		this.logLogbook("Save", setup.Name, setup.FileName, values2String("`n", settingsList*))
+	}
+
+	logLap(name, lapTime, sectorTimes) {
+		this.logLogbook("Lap", name, lapTime, sectorTimes ? values2String(", ", sectorTimes*) : translate("-"))
+	}
+
+	loadSimulator(simulator, force := false) {
+		local simulators
+
+		if (force || (simulator != this.SelectedSimulator)) {
+			this.Window.Block()
+
+			try {
+				this.iSelectedSimulator := simulator
+
+				if (simulator == true)
+					removeSetting("Setup Workbench", "Simulator")
+				else
+					setSetting("Setup Workbench", "Simulator", simulator)
+
+				this.initializeSimulator((simulator == true) ? "Generic" : simulator)
+
+				simulators := this.getSimulators()
+
+				if (simulators.Length > 0)
+					this.Control["simulatorDropDown"].Choose(inList(this.getSimulators(), simulator))
+
+				this.loadCars(this.AvailableCars[true])
+
+				this.initializeWorkbench()
+
+				this.updateState()
+			}
+			finally {
+				this.Window.Unblock()
+			}
+		}
+	}
+
+	loadCars(cars) {
+		local tracks, trackNames
+
+		this.Control["carDropDown"].Delete()
+		this.Control["carDropDown"].Add(cars)
+
+		this.Control["carDropDown"].Choose(1)
+
+		this.iSelectedCar := ((cars[1] = translate("All")) ? true : cars[1])
+
+		tracks := this.getTracks(this.SelectedSimulator, this.SelectedCar).Clone()
+		trackNames := collect(tracks, ObjBindMethod(this, "getTrackName", this.SelectedSimulator))
+
+		this.Control["trackDropDown"].Delete()
+		this.Control["trackDropDown"].Add(trackNames)
+		this.Control["trackDropDown"].Choose(1)
+	}
+
+	loadCar(car, force := false) {
+		local tracks, trackNames
+
+		if (force || (car != this.SelectedCar[false])) {
+			this.Window.Block()
+
+			try {
+				this.iSelectedCar := car
+
+				if (car == true)
+					removeSetting("Setup Workbench", "Car")
+				else
+					setSetting("Setup Workbench", "Car", car)
+
+				this.Control["carDropDown"].Choose(inList(this.AvailableCars, this.SelectedCar))
+
+				tracks := this.getTracks(this.SelectedSimulator, car).Clone()
+				trackNames := collect(tracks, ObjBindMethod(this, "getTrackName", this.SelectedSimulator))
+
+				this.Control["trackDropDown"].Delete()
+				this.Control["trackDropDown"].Add(trackNames)
+				this.Control["trackDropDown"].Choose(1)
+
+				this.initializeWorkbench("Loading Car", "Loading Car", "Loading Car", true)
+
+				this.loadTrack(true, true)
+
+				this.updateState()
+			}
+			finally {
+				this.Window.Unblock()
+			}
+		}
+	}
+
+	loadTrack(track, force := false) {
+		if (force || (track != this.SelectedTrack[false])) {
+			this.Window.Block()
+
+			try {
+				this.iSelectedTrack := track
+
+				if (track == true)
+					removeSetting("Setup Workbench", "Track")
+				else
+					setSetting("Setup Workbench", "Track", track)
+
+				if (track != true) {
+					track := inList(this.getTracks(this.SelectedSimulator, this.SelectedCar), SessionDatabase.getTrackName(this.SelectedSimulator, track))
+
+					if !track
+						track := 1
+				}
+
+				this.Control["trackDropDown"].Choose(track)
+
+				this.closeTelemetryViewer()
+
+				this.updateState()
+			}
+			finally {
+				this.Window.Unblock()
+			}
+		}
+	}
+
+	loadWeather(weather, force := false) {
+		this.updateState()
+	}
+
+	startIssueAnalyzer() {
+		local analyzerClass := getMultiMapValue(this.SimulatorDefinition, "Simulator", "Analyzer", false)
+
+		if analyzerClass {
+			this.Window.Block()
+
+			try {
+				%analyzerClass%(this, this.SelectedSimulator).createCharacteristics()
+			}
+			finally {
+				this.Window.Unblock()
+			}
+		}
+	}
+
+	openTelemetryViewer() {
+		local lastSimulator := false
+		local lastTrack := false
+
+		static lastActiveSimulator := false
+		static lastActiveTrack := false
+		static lastTrackLength := false
+
+		static hasTask := false
+
+		startupCollector() {
+			local simulator := this.SelectedSimulator[false]
+			local track := this.SelectedTrack[false]
+			local simmulatorCode, trackLength, provider, fileName
+
+			if (this.TelemetryViewer && simulator && (simulator != true) && track) {
+				if ((simulator != lastSimulator) || (track != lastTrack)) {
+					this.TelemetryViewer.shutdownCollector()
+
+					if (lastSimulator || lastTrack) {
+						if ((lastActiveSimulator != simulator) || (lastActiveTrack != track))
+							deleteDirectory(kTempDirectory . "Setup Workbench\Telemetry", false)
+
+						this.TelemetryViewer.restart(kTempDirectory . "Setup Workbench\Telemetry")
+					}
+
+					trackLength := getMultiMapValue(readSimulator(simulator, this.SelectedCar[false], track), "Track Data", "Length", 0)
+
+					if (trackLength > 0) {
+						lastSimulator := simulator
+						lastTrack := track
+						lastActiveSimulator := simulator
+						lastActiveTrack := track
+						lastTrackLength := trackLength
+
+						this.TelemetryViewer.startupCollector(simulator, track, trackLength)
+					}
+					else {
+						lastSimulator := false
+						lastTrack := false
+					}
+				}
+				else
+					this.TelemetryViewer.startupCollector(lastSimulator, lastTrack, lastTrackLength)
+			}
+			else {
+				if this.TelemetryViewer {
+					this.TelemetryViewer.shutdownCollector()
+
+					if (!track || (track == true)) {
+						this.TelemetryViewer.close()
+
+						this.iTelemetryViewer := false
+					}
+				}
+
+				lastSimulator := false
+				lastTrack := false
+			}
+		}
+
+		if this.TelemetryViewer
+			activateWindow(this.TelemetryViewer.Window)
+		else {
+			if ((lastActiveSimulator != this.SelectedSimulator[false]) || (lastActiveTrack != this.SelectedTrack[false])) {
+				DirCreate(kTempDirectory . "Setup Workbench")
+
+				deleteDirectory(kTempDirectory . "Setup Workbench\Telemetry")
+
+				DirCreate(kTempDirectory . "Setup Workbench\Telemetry")
+			}
+
+			this.iTelemetryViewer := TelemetryViewer(this, kTempDirectory . "Setup Workbench\Telemetry", true, true, true)
+
+			this.TelemetryViewer.show()
+
+			if !hasTask {
+				hasTask := true
+
+				PeriodicTask(startupCollector, 2000, kLowPriority).start()
+
+				PeriodicTask(() => this.updateTelemetries(), 5000, kLowPriority).start()
+			}
+		}
+	}
+
+	closeTelemetryViewer() {
+		if this.TelemetryViewer {
+			this.TelemetryViewer.close()
+
+			this.iTelemetryViewer := false
+		}
+	}
+
+	closedTelemetryViewer() {
+		this.iTelemetryViewer := false
+	}
+
+	updateTelemetries() {
+		local simulator := this.SelectedSimulator[false]
+		local track := this.SelectedTrack[false]
+		local telemetries := []
+		local name, info, lapTime, sectorTimes
+
+		static lastSimulator := false
+		static lastTrack := false
+		static lastTelemetries := []
+
+		if (simulator && (simulator != true) && track && ((simulator != lastSimulator) || (track != lastTrack)))
+			lastTelemetries := []
+
+		lastSimulator := simulator
+		lastTrack := track
+
+		loop Files, kTempDirectory . "Setup Workbench\Telemetry\*.telemetry", "F"
+			telemetries.Push(A_LoopFileFullPath)
+
+		do(telemetries, (fileName) {
+			if !inList(lastTelemetries, fileName) {
+				if FileExist(fileName . ".info") {
+					info := readMultiMap(fileName . ".info")
+
+					lapTime := getMultiMapValue(info, "Lap", "LapTime"
+												, getMultiMapValue(info, "Info", "LapTime", false))
+					sectorTimes := getMultiMapValue(info, "Lap", "SectorTimes"
+														, getMultiMapValue(info, "Info", "SectorTimes", false))
+
+					if sectorTimes
+						sectorTimes := string2Values(",", sectorTimes)
+					else
+						sectorTimes := ["-"]
+
+					if (sectorTimes && !first(sectorTimes, (s) => (isNumber(s) && (s != 0))))
+						sectorTimes := false
+
+					SplitPath(fileName, , , , &name)
+
+					this.logLap(name, lapTimeDisplayValue(lapTime), sectorTimes)
+
+					lastTelemetries.Push(fileName)
+				}
+			}
+		})
+	}
+
+	openSetupEngineer() {
+		if this.SetupEngineer
+			activateWindow(this.SetupEngineer.Window)
+		else {
+			this.iSetupEngineer := SetupEngineer(this, readMultiMap(kUserConfigDirectory . "Setup Workbench.ini"))
+
+			this.SetupEngineer.show()
+		}
+	}
+
+	closeSetupEngineer() {
+		if this.SetupEngineer {
+			this.SetupEngineer.close()
+
+			this.iSetupEngineer := false
+		}
+	}
+
+	closedSetupEngineer() {
+		this.iSetupEngineer := false
+	}
+
+	getSessionInformation(&simulator, &car, &track) {
+		simulator := this.SelectedSimulator
+
+		if (this.SelectedCar[false] && (this.SelectedCar[false] != true))
+			car := SessionDatabase.getCarCode(simulator, this.SelectedCar)
+		else
+			car := false
+
+		if (this.SelectedTrack[false] && (this.SelectedCar[false] != true))
+			track := SessionDatabase.getTrackCode(simulator, this.SelectedTrack)
+		else
+			track := false
+	}
+
+	getLapInformation(lapNumber, &driver, &lapTime, &sectorTimes) {
+		driver := SessionDatabase.getName("Creator")
+
+		lapTime := "-"
+		sectorTimes := ["-"]
+
+		return false
+	}
+
+	clearCharacteristics() {
+		while (this.SelectedCharacteristics.Length > 0)
+			this.deleteCharacteristic(this.SelectedCharacteristics[this.SelectedCharacteristics.Length], false)
+
+		this.showSettingsChart(false)
+	}
+
+	addCharacteristic(characteristic, weight := 50, value := 33, draw := true, *) {
+		local workbench := this
+		local window := this.Window
+		local numCharacteristics := this.SelectedCharacteristics.Length
+		local x, y, characteristicLabels, callback
+		local label1, label2, slider1, slider2, deleteButton
+
+		updateSlider(characteristic, slider1, slider2, *) {
+			if (slider1.Value == 0)
+				slider1.Value := 1
+
+			if (slider2.Value == 0)
+				slider2.Value := 1
+
+			workbench.updateCharacteristic(characteristic, slider1.Value, slider2.Value)
+		}
+
+		if (!inList(this.SelectedCharacteristics, characteristic) && (numCharacteristics <= kMaxCharacteristics)) {
+			x := (this.CharacteristicsArea.X + 8)
+			y := (this.CharacteristicsArea.Y + 8 + (numCharacteristics * kCharacteristicHeight))
+
+			characteristicLabels := toMap(getMultiMapValues(this.Definition
+														  , "Workbench.Characteristics.Labels")
+										, SetupWorkbench.LabelsMap)
+
+			this.SelectedCharacteristics.Push(characteristic)
+
+			window.SetFont("s10 Italic", "Arial")
+
+			deleteButton := window.Add("Button", "x" . X . " y" . Y . " w20 h20")
+			deleteButton.OnEvent("Click", ObjBindMethod(this, "deleteCharacteristic", characteristic, true))
+			setButtonIcon(deleteButton, kIconsDirectory . "Minus.ico", 1, "L4 T4 R4 B4")
+
+			x := x + 25
+
+			label1 := window.Add("Text", "x" . X . " y" . Y . " w300 h26", characteristicLabels[characteristic])
+
+			x := x - 25
+
+			window.SetFont("s8 Norm", "Arial")
+
+			x := x + 8
+			y := y + 26
+
+			label2 := window.Add("Text", "x" . X . " y" . Y . " w139", translate("Importance / Severity"))
+
+			x := x + 144
+
+			slider1 := window.Add("Slider", "Center Thick15 x" . x . " yp-2 w106 0x10 Range0-100 ToolTip", 0)
+
+			x := x + 109
+
+			slider2 := window.Add("Slider", "Center Thick15 x" . x . " yp w106 0x10 Range0-100 ToolTip", 0)
+
+			callback := updateSlider.Bind(characteristic, slider1, slider2)
+
+			slider1.OnEvent("Change", callback)
+			slider2.OnEvent("Change", callback)
+
+			slider1.Value := weight
+			slider2.Value := value
+
+			this.SelectedCharacteristicsWidgets[characteristic] := [slider1, slider2, label1, label2, deleteButton]
+
+			if draw {
+				this.updateRecommendations()
+
+				this.updateState()
+			}
+		}
+	}
+
+	deleteCharacteristic(characteristic, draw := true, *) {
+		local numCharacteristics := this.SelectedCharacteristics.Length
+		local index := inList(this.SelectedCharacteristics, characteristic)
+		local ignore, widget, row, y, widgets, pos, poxX, posY
+
+		if index {
+			for ignore, widget in this.SelectedCharacteristicsWidgets[characteristic]
+				widget.Visible := false
+
+			loop (numCharacteristics - index) {
+				row := (A_Index + index)
+
+				for ignore, widget in this.SelectedCharacteristicsWidgets[this.SelectedCharacteristics[row]] {
+					ControlGetPos(&posX, &posY, &posW, &posH, widget)
+
+					y := (posY - kCharacteristicHeight)
+
+					ControlMove(posX, Y, , , widget)
+					widget.Redraw()
+				}
+			}
+
+			widgets := this.SelectedCharacteristicsWidgets[characteristic]
+
+			this.KnowledgeBase.clearFact(characteristic . ".Weight")
+			this.KnowledgeBase.clearFact(characteristic . ".Value")
+
+			this.SelectedCharacteristics.RemoveAt(index)
+
+			if this.SelectedCharacteristicsWidgets.Has(characteristic)
+				this.SelectedCharacteristicsWidgets.Delete(characteristic)
+
+			this.updateRecommendations(draw)
+		}
+	}
+
+	chooseCharacteristic() {
+		local simulators := getKeys(getMultiMapValues(getControllerState(), "Simulators"))
+		local dynamicMenus := CaseInsenseMap()
+		local characteristicLabels, menuIndex, groups, translatedGroups, ignore, group, definition, option
+		local groupMenu, groupEmpty, groupOption, optionMenu, optionEmpty, label, characteristic
+		local characteristicsMenu, groupMenu
+
+		characteristicsMenu := Menu()
+
+		if (this.SelectedCharacteristics.Length < kMaxCharacteristics) {
+			characteristicLabels := toMap(getMultiMapValues(this.Definition, "Workbench.Characteristics.Labels")
+										, SetupWorkbench.LabelsMap)
+
+			menuIndex := 1
+
+			groups := getMultiMapValues(this.Definition, "Workbench.Characteristics")
+			translatedGroups := CaseInsenseMap()
+
+			for group, definition in groups
+				translatedGroups[characteristicLabels[group]] := group
+
+			for ignore, group in translatedGroups {
+				definition := groups[group]
+
+				groupMenu := ("SubMenu" . menuIndex++)
+				groupEmpty := true
+
+				dynamicMenus[groupMenu] := Menu()
+
+				for ignore, groupOption in string2Values(";", definition) {
+					if InStr(groupOption, ":") {
+						groupOption := string2Values(":", groupOption)
+						optionMenu := ("SubMenu" . menuIndex++)
+						optionEmpty := true
+
+						dynamicMenus[optionMenu] := Menu()
+
+						for ignore, option in string2Values(",", groupOption[2]) {
+							characteristic := factPath(group, groupOption[1], option)
+
+							if (inList(this.Characteristics, characteristic) && !inList(this.SelectedCharacteristics, characteristic)) {
+								dynamicMenus[optionMenu].Add(characteristicLabels[option]
+														   , ObjBindMethod(this, "addCharacteristic", characteristic, 50, 33, true))
+
+								optionEmpty := false
+							}
+						}
+
+						if !optionEmpty {
+							dynamicMenus[groupMenu].Add(characteristicLabels[groupOption[1]], dynamicMenus[optionMenu])
+
+							groupEmpty := false
+						}
+					}
+					else {
+						characteristic := factPath(group, groupOption)
+
+						if (inList(this.Characteristics, characteristic) && !inList(this.SelectedCharacteristics, characteristic)) {
+							dynamicMenus[groupMenu].Add(characteristicLabels[groupOption]
+													  , ObjBindMethod(this, "addCharacteristic", characteristic, 50, 33, true))
+
+							groupEmpty := false
+						}
+					}
+				}
+
+				if !groupEmpty
+					characteristicsMenu.Add(characteristicLabels[group], dynamicMenus[groupMenu])
+			}
+
+			characteristicsMenu.Add()
+		}
+
+		label := translate("Analyzer...")
+
+		characteristicsMenu.Add(label, (*) => this.startIssueAnalyzer())
+
+		if !isDebug()
+			if (!this.SimulatorDefinition || !getMultiMapValue(this.SimulatorDefinition, "Simulator", "Analyzer", false)
+										  || !inList(simulators, this.SelectedSimulator))
+				characteristicsMenu.Disable(label)
+
+		label := translate("Telemetry...")
+
+		characteristicsMenu.Add(label, (*) => this.openTelemetryViewer())
+
+		if !isDebug() {
+			if ((this.SelectedSimulator[false] == true) || (this.SelectedCar[false] == true) || (this.SelectedTrack[false] == true))
+				characteristicsMenu.Disable(label)
+
+			if (!this.SimulatorDefinition || !getMultiMapValue(this.SimulatorDefinition, "Simulator", "Analyzer", false)
+										  || !inList(simulators, this.SelectedSimulator))
+				characteristicsMenu.Disable(label)
+		}
+
+		characteristicsMenu.Add()
+
+		label := translate("Engineer...")
+
+		characteristicsMenu.Add(label, (*) => this.openSetupEngineer())
+
+		if (!this.SimulatorDefinition || !inList(simulators, this.SelectedSimulator)
+									  || (this.SelectedSimulator[false] == true)
+									  || (this.SelectedCar[false] == true)
+									  || (this.SelectedTrack[false] == true))
+			characteristicsMenu.Disable(label)
+
+		characteristicsMenu.Show()
+	}
+
+	updateCharacteristic(characteristic, value1, value2) {
+		this.updateRecommendations()
+	}
+
+	updateRecommendations(draw := true, update := true) {
+		local knowledgeBase := this.KnowledgeBase
+		local noIssue, ignore, characteristic, widgets, value1, value2, settings
+		local setting, delta
+		local characteristicLabels, ignore, characteristic, issues
+
+		this.Window.Block()
+
+		try {
+			noIssue := true
+
+			if knowledgeBase {
+				issues := []
+
+				characteristicLabels := toMap(getMultiMapValues(this.Definition
+															  , "Workbench.Characteristics.Labels")
+											, SetupWorkbench.LabelsMap)
+
+				for ignore, characteristic in this.SelectedCharacteristics {
+					noIssue := false
+
+					widgets := this.SelectedCharacteristicsWidgets[characteristic]
+
+					value1 := widgets[1].Value
+					value2 := widgets[2].Value
+
+					knowledgeBase.setFact(characteristic . ".Weight", value1, true)
+					knowledgeBase.setFact(characteristic . ".Value", value2, true)
+
+					issues.Push(characteristicLabels[characteristic] . "=" . value1 . "/" . value2)
+				}
+
+				if !noIssue {
+					knowledgeBase.setFact("Calculate", true)
+
+					this.KnowledgeBase.produce()
+
+					if this.Debug[kDebugKnowledgeBase]
+						this.dumpKnowledgeBase(this.KnowledgeBase)
+
+					this.logLogbook("Issues", values2String("`n", issues*))
+				}
+			}
+
+			if draw {
+				if knowledgeBase {
+					settings := []
+
+					for ignore, setting in this.Settings {
+						delta := knowledgeBase.getValue(setting . ".Delta", translate("n/a"))
+
+						if (isNumber(delta) && (delta != 0))
+							settings.Push(Array(this.getLabel(setting), Round(delta, 2)))
+					}
+				}
+
+				if noIssue
+					this.showSettingsChart(false)
+				else
+					this.showSettingsDeltas(settings)
+			}
+
+			if update
+				this.updateState()
+		}
+		finally {
+			this.Window.Unblock()
+		}
+	}
+
+	browseLogbooks() {
+		withBlockedWindows(() {
+			LogbookBrowser(this, this.LogbookDirectory).browseLogbooks(this.Logbook)
+		})
+	}
+
+	editSetup() {
+		local editorClass := getMultiMapValue(this.SimulatorDefinition, "Setup", "Editor", false)
+
+		if editorClass
+			%editorClass%(this).editSetup(this.Setup)
+	}
+
+	openedSetupEditor(setupEditor) {
+		this.SetupEditors.Push(setupEditor)
+	}
+
+	closedSetupEditor(setupEditor) {
+		this.iSetupEditors := remove(this.iSetupEditors, setupEditor)
+	}
+
+	editSettings() {
+		local window := this.Window
+		local configuration
+
+		window.Block()
+
+		try {
+			configuration := WorkbenchSettingsEditor(this
+												   , readMultiMap(kUserConfigDirectory
+																. "Setup Workbench.ini")).editSettings(window)
+
+			if configuration
+				writeMultiMap(kUserConfigDirectory . "Setup Workbench.ini", configuration)
+		}
+		finally {
+			window.Unblock()
+		}
+	}
+}
+
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; IssueAnalyzer                                                           ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class IssueAnalyzer {
+	iWorkbench := false
+	iSimulator := false
+
+	Workbench {
+		Get {
+			return this.iWorkbench
+		}
+	}
+
+	Simulator {
+		Get {
+			return this.iSimulator
+		}
+	}
+
+	__New(workbench, simulator) {
+		this.iWorkbench := workbench
+		this.iSimulator := simulator
+	}
+
+	createCharacteristics() {
+		throw "Virtual method IssueAnalyzer.createCharacteristics must be implemented in a subclass..."
+	}
+}
+
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; Setup                                                                   ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class Setup {
+	iEditor := false
+	iOriginalSetup := ""
+	iModifiedSetup := ""
+
+	iEnabledSettings := CaseInsenseMap()
+
+	Editor {
+		Get {
+			return this.iEditor
+		}
+
+		Set {
+			return (this.iEditor := value)
+		}
+	}
+
+	Name {
+		Get {
+			throw "Virtual property Setup.Name must be implemented in a subclass..."
+		}
+	}
+
+	Enabled[setting] {
+		Get {
+			return this.iEnabledSettings.Has(setting)
+		}
+	}
+
+	Setup[original := false] {
+		Get {
+			return ((original || !this.iModifiedSetup) ? this.iOriginalSetup : this.iModifiedSetup)
+		}
+
+		Set {
+			return (original ? (this.iOriginalSetup := value) : (this.iModifiedSetup := value))
+		}
+	}
+
+	__New(editor) {
+		this.iEditor := editor
+	}
+
+	getInitializationArguments() {
+		return []
+	}
+
+	reset() {
+		this.iModifiedSetup := false
+	}
+
+	valueAvailable(setting, original := false) {
+		return true
+	}
+
+	getValue(setting, original := false, default := false) {
+		throw "Virtual method Setup.getValue must be implemented in a subclass..."
+	}
+
+	setValue(setting, value) {
+		throw "Virtual method Setup.setValue must be implemented in a subclass..."
+	}
+
+	enable(setting) {
+		this.iEnabledSettings[setting] := true
+	}
+
+	disable(setting) {
+		if setting {
+			if this.iEnabledSettings.Has(setting)
+				this.iEnabledSettings.Delete(setting)
+		}
+		else
+			this.iEnabledSettings := CaseInsenseMap()
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; FileSetup                                                               ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class FileSetup extends Setup {
+	iOriginalFileName := false
+	iModifiedFileName := false
+
+	Name {
+		Get {
+			local fileName := this.FileName[true]
+
+			SplitPath(fileName, , , , &fileName)
+
+			return fileName
+		}
+	}
+
+	FileName[original := false] {
+		Get {
+			return (original ? this.iOriginalFileName : (this.iModifiedFileName ? this.iModifiedFileName : this.iOriginalFileName))
+		}
+
+		Set {
+			return (original ? (this.iOriginalFileName := value) : (this.iModifiedFileName := value))
+		}
+	}
+
+	__New(editor, originalFileName := false, modifiedFileName := false, read := true) {
+		local setup
+
+		super.__New(editor)
+
+		this.iOriginalFileName := originalFileName
+		this.iModifiedFileName := modifiedFileName
+
+		if read {
+			if (originalFileName && FileExist(originalFileName)) {
+				setup := FileRead(originalFileName)
+
+				this.iOriginalSetup := setup
+			}
+
+			if (modifiedFileName && FileExist(modifiedFileName)) {
+				setup := FileRead(modifiedFileName)
+
+				this.iModifiedSetup := setup
+			}
+		}
+	}
+
+	getInitializationArguments() {
+		return [this.FileName[true], this.FileName[false]]
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SettingHandler                                                          ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SettingHandler {
+	validValue(displayValue) {
+		throw "Virtual method SettingHandler.validValue must be implemented in a subclass..."
+	}
+
+	formatValue(value) {
+		return value
+	}
+
+	convertToDisplayValue(value) {
+		throw "Virtual method SettingHandler.convertToDisplayValue must be implemented in a subclass..."
+	}
+
+	convertToRawValue(value) {
+		throw "Virtual method SettingHandler.convertToRawValue must be implemented in a subclass..."
+	}
+
+	increaseValue(displayValue) {
+		throw "Virtual method SettingHandler.increaseValue must be implemented in a subclass..."
+	}
+
+	decreaseValue(displayValue) {
+		throw "Virtual method SettingHandler.decreaseValue must be implemented in a subclass..."
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; NumberHandler                                                           ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class NumberHandler extends SettingHandler {
+	MinValue {
+		Get {
+			return -2147483648
+		}
+	}
+
+	MaxValue {
+		Get {
+			return 2147483647
+		}
+	}
+
+	Reverse {
+		Get {
+			return false
+		}
+	}
+
+	validValue(displayValue) {
+		if this.Reverse
+			return ((displayValue >= this.MaxValue) && (displayValue <= this.MinValue))
+		else
+			return ((displayValue >= this.MinValue) && (displayValue <= this.MaxValue))
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; DiscreteValuesHandler                                                   ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class DiscreteValuesHandler extends NumberHandler {
+	iZero := false
+	iIncrement := false
+	iStep := false
+
+	iMinValue := kUndefined
+	iMaxValue := kUndefined
+
+	iReverse := false
+
+	Zero {
+		Get {
+			return this.iZero
+		}
+	}
+
+	Increment {
+		Get {
+			return this.iIncrement
+		}
+	}
+
+	Step {
+		Get {
+			return this.iStep
+		}
+	}
+
+	Reverse {
+		Get {
+			return this.iReverse
+		}
+	}
+
+	MinValue {
+		Get {
+			return ((this.iMinValue != kUndefined) ? this.iMinValue : super.MinValue)
+		}
+	}
+
+	MaxValue {
+		Get {
+			return ((this.iMaxValue != kUndefined) ? this.iMaxValue : super.MaxValue)
+		}
+	}
+
+	__New(zero := 0, increment := 1, minValue := kUndefined, maxValue := kUndefined) {
+		this.iZero := zero
+		this.iMinValue := minValue
+		this.iMaxValue := maxValue
+		this.iReverse := ((isNumber(minValue) && isNumber(maxValue)) && (maxValue < minValue))
+		this.iIncrement := increment
+		this.iStep := Abs(increment)
+	}
+
+	convertToDisplayValue(rawValue) {
+		return this.formatValue(this.Zero + (rawValue * this.Increment))
+	}
+
+	convertToRawValue(displayValue) {
+		if this.Reverse
+			return Round((this.Zero - displayValue) / this.Step)
+		else
+			return Round((displayValue - this.Zero) / this.Step)
+	}
+
+	increaseValue(displayValue) {
+		local value := (displayValue + this.Increment)
+
+		if this.validValue(value)
+			return value
+		else if this.Reverse
+			return Max(this.MaxValue, Min(this.MinValue, displayValue))
+		else
+			return Min(this.MaxValue, Max(this.MinValue, displayValue))
+	}
+
+	decreaseValue(displayValue) {
+		local value := (displayValue - this.Increment)
+
+		if this.validValue(value)
+			return value
+		else if this.Reverse
+			return Max(this.MaxValue, Min(this.MinValue, displayValue))
+		else
+			return Min(this.MaxValue, Max(this.MinValue, displayValue))
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; RawHandler                                                              ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class RawHandler extends DiscreteValuesHandler {
+	iValues := false
+
+	Values {
+		Get {
+			return this.iValues
+		}
+	}
+
+	__New(increment := 1, minValue := kUndefined, maxValue := kUndefined, values*) {
+		if (values.Length > 0) {
+			values.InsertAt(1, maxValue)
+			values.InsertAt(1, minValue)
+
+			this.iValues := values
+
+			super.__New(minValue, increment, minValue, values[values.Length])
+		}
+		else
+			super.__New(0, increment, minValue, maxValue)
+	}
+
+	valueIndex(rawValue) {
+		local index, candidate
+
+		try {
+			return inList(this.Values, rawValue)
+		}
+		catch Any {
+			for index, candidate in this.Values
+				if ((rawValue - candidate) < 0.00001)
+					return index
+
+			return false
+		}
+	}
+
+	validValue(displayValue) {
+		if this.Values
+			return (this.valueIndex(this.convertToRawValue(displayValue)) != false)
+		else
+			return super.validValue(displayValue)
+	}
+
+	convertToDisplayValue(rawValue) {
+		local index
+
+		if this.Values {
+			index := this.valueIndex(rawValue)
+
+			return (index ? this.Values[index] : false)
+		}
+		else
+			return rawValue
+	}
+
+	convertToRawValue(displayValue) {
+		local index
+
+		if this.Values {
+			index := this.valueIndex(displayValue)
+
+			return (index ? this.Values[index] : false)
+		}
+		else
+			return displayValue
+	}
+
+	increaseValue(displayValue) {
+		local index
+
+		if this.Values {
+			index := this.ValueIndex(this.convertToRawValue(displayValue))
+
+			return (index ? this.Values[Min(this.Values.Length, index + 1)] : displayValue)
+		}
+		else
+			return super.increaseValue(displayValue)
+	}
+
+	decreaseValue(displayValue) {
+		local index
+
+		if this.Values {
+			index := this.ValueIndex(this.convertToRawValue(displayValue))
+
+			return (index ? this.Values[Max(1, index - 1)] : displayValue)
+		}
+		else
+			return super.increaseValue(displayValue)
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; IntegerHandler                                                          ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class IntegerHandler extends DiscreteValuesHandler {
+	validValue(displayValue) {
+		local rawValue := this.convertToRawValue(displayValue)
+
+		return (super.validValue(displayValue) && (Round(rawValue) = rawValue))
+	}
+
+	formatValue(value) {
+		return Round(value)
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; DecimalHandler                                                          ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class DecimalHandler extends DiscreteValuesHandler {
+	iPrecision := false
+
+	Precision {
+		Get {
+			return this.iPrecision
+		}
+	}
+
+	__New(zero := 0.0, increment := 1.0, precision := 0, minValue := kUndefined, maxValue := kUndefined) {
+		this.iPrecision := precision
+
+		super.__New(zero, increment, minValue, maxValue)
+	}
+
+	validValue(displayValue) {
+		local rawValue := this.convertToRawValue(displayValue)
+
+		return (super.validValue(displayValue) && (Round(rawValue) = rawValue))
+	}
+
+	formatValue(value) {
+		return Round(value, this.Precision)
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; FloatHandler                                                            ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class FloatHandler extends NumberHandler {
+	iIncrement := false
+	iPrecision := false
+
+	iMinValue := kUndefined
+	iMaxValue := kUndefined
+
+	iBase := false
+	iMultiplier := false
+	iPlaces := kUndefined
+
+	iReverse := false
+
+	Increment {
+		Get {
+			return this.iIncrement
+		}
+	}
+
+	Precision {
+		Get {
+			return this.iPrecision
+		}
+	}
+
+	MinValue {
+		Get {
+			return ((this.iMinValue != kUndefined) ? this.iMinValue : super.MinValue)
+		}
+	}
+
+	MaxValue {
+		Get {
+			return ((this.iMaxValue != kUndefined) ? this.iMaxValue : super.MaxValue)
+		}
+	}
+
+	Base {
+		Get {
+			return this.iBase
+		}
+	}
+
+	Multiplier {
+		Get {
+			return this.iMultiplier
+		}
+	}
+
+	Places {
+		Get {
+			return this.iPlaces
+		}
+	}
+
+	Reverse {
+		Get {
+			return this.iReverse
+		}
+	}
+
+	__New(increment := 1, precision := 0, minValue := kUndefined, maxValue := kUndefined
+		, base := kUndefined, multiplier := 1, places := kUndefined) {
+		this.iMinValue := minValue
+		this.iMaxValue := maxValue
+		this.iReverse := ((isNumber(minValue) && isNumber(maxValue)) && (maxValue < minValue))
+
+		this.iIncrement := increment
+		this.iPrecision := precision
+
+		if (base == kUndefined) {
+			if (minValue != kUndefined)
+				base := minValue
+			else
+				base := 0
+
+			places := precision
+		}
+
+		this.iBase := base
+		this.iMultiplier := multiplier
+		this.iPlaces := places
+	}
+
+	formatValue(value) {
+		return Round(value, this.Precision)
+	}
+
+	convertToDisplayValue(rawValue) {
+		return this.formatValue(((rawValue - this.Base) / this.Multiplier) + this.MinValue)
+	}
+
+	convertToRawValue(displayValue) {
+		local value := (this.Base + ((displayValue - this.MinValue) * this.Multiplier))
+
+		return ((this.Places != kUndefined) ? Round(value, this.Places) : value)
+	}
+
+	increaseValue(displayValue) {
+		local value := (displayValue + this.Increment)
+
+		if this.validValue(value)
+			return value
+		else if this.Reverse
+			return Max(this.MaxValue, Min(this.MinValue, displayValue))
+		else
+			return Min(this.MaxValue, Max(this.MinValue, displayValue))
+	}
+
+	decreaseValue(displayValue) {
+		local value := (displayValue - this.Increment)
+
+		if this.validValue(value)
+			return value
+		else if this.Reverse
+			return Max(this.MaxValue, Min(this.MinValue, displayValue))
+		else
+			return Min(this.MaxValue, Max(this.MinValue, displayValue))
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; ClicksHandler                                                           ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class ClicksHandler extends IntegerHandler {
+	iValues := false
+
+	Values {
+		Get {
+			return this.iValues
+		}
+	}
+
+	__New(minValue := 0, maxValue := kUndefined, values*) {
+		if (values.Length > 0) {
+			values.InsertAt(1, maxValue)
+
+			this.iValues := values
+
+			super.__New(minValue, 1, minValue, minValue + values.Length - 1)
+		}
+		else
+			super.__New(minValue, 1, minValue, maxValue)
+	}
+
+	valueIndex(rawValue) {
+		local index, candidate
+
+		try {
+			return inList(this.Values, rawValue)
+		}
+		catch Any {
+			for index, candidate in this.Values
+				if ((rawValue - candidate) < 0.00001)
+					return index
+
+			return false
+		}
+	}
+
+	validValue(displayValue) {
+		if this.Values
+			return (this.valueIndex(this.convertToRawValue(displayValue)) != false)
+		else
+			return super.validValue(displayValue)
+	}
+
+	convertToDisplayValue(rawValue) {
+		local index
+
+		if this.Values {
+			index := this.valueIndex(rawValue)
+
+			return (this.MinValue + (index ? (index - 1) : 0))
+		}
+		else
+			return super.convertToDisplayValue(rawValue)
+	}
+
+	convertToRawValue(displayValue) {
+		if this.Values {
+			try {
+				return this.Values[Round(displayValue - this.MinValue + 1)]
+			}
+			catch Any {
+				return this.Values[1]
+			}
+		}
+		else
+			return super.convertToRawValue(displayValue)
+	}
+
+	increaseValue(displayValue) {
+		if this.Values {
+			if this.Values.Has(Round(displayValue - this.MinValue + this.Increment + 1))
+				return super.increaseValue(displayValue)
+			else
+				return displayValue
+		}
+		else
+			return super.increaseValue(displayValue)
+	}
+
+	decreaseValue(displayValue) {
+		if this.Values {
+			if this.Values.Has(Round(displayValue - this.MinValue - this.Increment + 1))
+				return super.decreaseValue(displayValue)
+			else
+				return displayValue
+		}
+		else
+			return super.decreaseValue(displayValue)
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; ValuesHandler                                                           ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class ValuesHandler extends NumberHandler {
+	iValues := false
+
+	Values {
+		Get {
+			return this.iValues
+		}
+	}
+
+	__New(values*) {
+		this.iValues := values
+	}
+
+	valueIndex(rawValue) {
+		local index, candidate
+
+		try {
+			return inList(this.Values, rawValue)
+		}
+		catch Any {
+			for index, candidate in this.Values
+				if ((rawValue - candidate) < 0.00001)
+					return index
+
+			return false
+		}
+	}
+
+	validValue(displayValue) {
+		return (this.valueIndex(this.convertToRawValue(displayValue)) != false)
+	}
+
+	convertToDisplayValue(rawValue) {
+		return rawValue
+	}
+
+	convertToRawValue(displayValue) {
+		return displayValue
+	}
+
+	increaseValue(displayValue) {
+		try {
+			return this.convertToDisplayValue(this.Values[this.valueIndex(this.convertToRawValue(displayValue)) + 1])
+		}
+		catch Any {
+			return displayValue
+		}
+	}
+
+	decreaseValue(displayValue) {
+		try {
+			return this.convertToDisplayValue(this.Values[this.valueIndex(this.convertToRawValue(displayValue)) - 1])
+		}
+		catch Any {
+			return displayValue
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; EnumerationHandler                                                      ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class EnumerationHandler extends SettingHandler {
+	iZero := 0
+	iIncrement := 1
+	iValues := []
+
+	Zero {
+		Get {
+			return this.iZero
+		}
+	}
+
+	Increment {
+		Get {
+			return this.iIncrement
+		}
+	}
+
+	Values[key?] {
+		Get {
+			return (isSet(key) ? this.iValues[key] : this.iValues)
+		}
+	}
+
+	__New(zero := 0, increment := 1, values*) {
+		this.iZero := zero
+		this.iIncrement := increment
+		this.iValues := values
+	}
+
+	validValue(displayValue) {
+		return inList(this.Values, displayValue)
+	}
+
+	convertToDisplayValue(value) {
+		local index := Round(this.Zero + ((value / this.Increment) + 1))
+
+		return (this.Values.Has(index) ? this.Values[index] : "-")
+	}
+
+	convertToRawValue(value) {
+		return (this.Zero + (this.Increment * (inList(this.Values, value) - 1)))
+	}
+
+	increaseValue(displayValue) {
+		local index := (inList(this.Values, displayValue) + 1)
+
+		if this.Values.Has(index)
+			return this.Values[index]
+		else if this.validValue(displayValue)
+			return displayValue
+		else if (this.Values.Length > 0)
+			return this.Values[1]
+		else
+			return "-"
+	}
+
+	decreaseValue(displayValue) {
+		local index := (inList(this.Values, displayValue) - 1)
+
+		if this.Values.Has(index)
+			return this.Values[index]
+		else if this.validValue(displayValue)
+			return displayValue
+		else if (this.Values.Length > 0)
+			return this.Values[1]
+		else
+			return "-"
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; ScriptHandler                                                           ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class ScriptHandler extends SettingHandler {
+	iScript := false
+	iArguments := []
+
+	Script {
+		Get {
+			return this.iScript
+		}
+	}
+
+	Arguments {
+		Get {
+			return this.iArguments
+		}
+	}
+
+	__New(script, arguments*) {
+		this.iScript := substituteVariables(script)
+		this.iArguments := arguments
+	}
+
+	runScript(command, value) {
+		local context := scriptOpenContext()
+		local script, scriptFileName
+
+		try {
+			script := FileRead(this.Script)
+
+			script .= ("`n`n" . FileRead(getFileName("SettingHandlerExecutor.script"
+												   , kUserHomeDirectory . "Garage\Scripts\"
+												   , kResourcesDirectory . "Garage\Scripts\")))
+
+			scriptFileName := temporaryFileName("Setting Handler", "script")
+
+			try {
+				FileAppend(script, scriptFileName)
+
+				if !scriptLoad(context, scriptFileName, &message)
+					throw message
+			}
+			finally {
+				if !isDebug()
+					deleteFile(scriptFileName)
+			}
+
+			scriptPushArray(context, this.Arguments)
+			scriptSetGlobal(context, "Arguments")
+
+			scriptPushValue(context, command)
+			scriptSetGlobal(context, "__COMMAND")
+			scriptPushValue(context, value)
+			scriptSetGlobal(context, "__VALUE")
+
+			scriptPushValue(context, (c) {
+				return scriptExternHandler(c)
+			})
+			scriptSetGlobal(context, "extern")
+
+			if scriptExecute(context, &message)
+				return scriptGetValue(context)
+			else
+				throw message
+		}
+		finally {
+			scriptCloseContext(context)
+		}
+	}
+
+	formatValue(value) {
+		return this.runScript("FORMAT", value)
+	}
+
+	convertToDisplayValue(value) {
+		return this.runScript("TO_DISPLAY", value)
+	}
+
+	convertToRawValue(value) {
+		return this.runScript("TO_RAW", value)
+	}
+
+	increaseValue(value) {
+		return this.runScript("INCREASE", value)
+	}
+
+	decreaseValue(value) {
+		return this.runScript("DECREASE", value)
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SetupEditor                                                             ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SetupEditor extends ConfigurationItem {
+	iWindow := false
+
+	iWorkbench := false
+	iSetup := false
+
+	iComparator := false
+
+	iSettings := CaseInsenseMap()
+	iSettingsListView := false
+
+	iClosed := false
+
+	class EditorWindow extends Window {
+		iEditor := false
+
+		Editor {
+			Get {
+				return this.iEditor
+			}
+		}
+
+		__New(editor) {
+			this.iEditor := editor
+
+			super.__New({Descriptor: "Setup Workbench.Setup Editor", Resizeable: true, Closeable: true}, "Setup Editor")
+		}
+
+		Close(*) {
+			this.Editor.close()
+		}
+	}
+
+	Window {
+		Get {
+			return this.iWindow
+		}
+	}
+
+	Control[name] {
+		Get {
+			return this.Window[name]
+		}
+	}
+
+	Workbench {
+		Get {
+			return this.iWorkbench
+		}
+	}
+
+	Comparator {
+		Get {
+			return this.iComparator
+		}
+	}
+
+	SetupClass {
+		Get {
+			throw "Virtual property FileSetupComparator.SetupClass must be implemented in a subclass..."
+		}
+	}
+
+	Setup {
+		Get {
+			return this.iSetup
+		}
+
+		Set {
+			return (this.iSetup := value)
+		}
+	}
+
+	Settings[key?] {
+		Get {
+			return (isSet(key) ? this.iSettings[key] : this.iSettings)
+		}
+
+		Set {
+			return (isSet(key) ? (this.iSettings[key] := value) : (this.iSettings := value))
+		}
+	}
+
+	SettingsListView {
+		Get {
+			return this.iSettingsListView
+		}
+	}
+
+	MaxIncrement {
+		Get {
+			return this.Control["applyIncrementEdit"].Text
+		}
+	}
+
+	__New(workbench, configuration := false) {
+		local simulator, car, fileName
+
+		this.iWorkbench := workbench
+
+		if !configuration {
+			simulator := workbench.SelectedSimulator
+			car := workbench.SelectedCar[false]
+
+			configuration := readMultiMap(kResourcesDirectory . "Garage\Definitions\" . simulator . ".ini")
+
+			addMultiMapValues(configuration, readMultiMap(kResourcesDirectory . "Garage\Definitions\Cars\" . simulator . ".Generic.ini"))
+
+			if (car != true) {
+				fileName := ("Garage\Definitions\Cars\" . simulator . "." . car . ".ini")
+
+				addMultiMapValues(configuration, readMultiMap(getFileName(fileName, kResourcesDirectory, kUserHomeDirectory)))
+			}
+		}
+
+		super.__New(configuration)
+	}
+
+	createGui(configuration) {
+		local editor := this
+		local settingsListView, editorGui
+
+		validateInteger(minValue, maxValue, field, operation, value?) {
+			if (operation = "Validate")
+				return (isInteger(value) && (value >= minValue) && (value <= maxValue))
+		}
+
+		closeEditor(*) {
+			editor.close()
+		}
+
+		chooseSetupFile(*) {
+			editor.chooseSetup()
+		}
+
+		resetSetup(*) {
+			editor.resetSetup()
+		}
+
+		navSetting(listView, line, selected) {
+			if selected
+				selectSetting(listView, line)
+		}
+
+		selectSetting(*) {
+			editor.updateState()
+		}
+
+		increaseSetting(*) {
+			editor.increaseSetting()
+		}
+
+		decreaseSetting(*) {
+			editor.decreaseSetting()
+		}
+
+		compareSetup(*) {
+			editor.compareSetup()
+		}
+
+		applyRecommendations(*) {
+			editor.applyRecommendations(editorGui["applyStrengthSlider"].Value)
+		}
+
+		saveModifiedSetup(*) {
+			if editor.saveSetup()
+				editor.Workbench.logSave(this, this.Setup)
+		}
+
+		editorGui := SetupEditor.EditorWindow(this)
+
+		this.iWindow := editorGui
+
+		editorGui.SetFont("s10 Bold", "Arial")
+
+		editorGui.Add("Text", "w784 Center H:Center", translate("Modular Simulator Controller System")).OnEvent("Click", moveByMouse.Bind(editorGui, "Setup Workbench.Setup Editor"))
+
+		editorGui.SetFont("s9 Norm", "Arial")
+
+		editorGui.Add("Documentation", "x308 YP+20 w184 Center H:Center", translate("Setup Editor")
+					, "https://github.com/SeriousOldMan/Simulator-Controller/wiki/Setup-Workbench#managing-car-setups")
+
+		editorGui.SetFont("s8 Norm", "Arial")
+
+		editorGui.Add("Text", "x8 yp+30 w800 0x10 W:Grow Section")
+
+		editorGui.Add("Button", "x16 ys+10 w100", translate("Setup:")).OnEvent("Click", chooseSetupFile)
+		editorGui.Add("Text", "x120 ys+14 w250 vsetupNameViewer")
+		editorGui.Add("Button", "x380 ys+10 w80 X:Move(0.5) vresetSetupButton", translate("&Reset")).OnEvent("Click", resetSetup)
+
+		this.iSettingsListView := editorGui.Add("ListView", "x16 ys+40 w444 h320 H:Grow W:Grow(0.5) -Multi -LV0x10 Checked AltSubmit NoSort NoSortHdr", collect(["Category", "Setting", "Value", "Unit"], translate))
+		this.iSettingsListView.OnEvent("Click", selectSetting)
+		this.iSettingsListView.OnEvent("DoubleClick", selectSetting)
+		this.iSettingsListView.OnEvent("ItemSelect", navSetting)
+
+		editorGui.Add("Button", "x16 yp+324 w80 Disabled Y:Move vdecreaseSettingButton", translate("Decrease")).OnEvent("Click", decreaseSetting)
+		editorGui.Add("Button", "x380 yp w80 Y:Move X:Move(0.5) Disabled vincreaseSettingButton", translate("Increase")).OnEvent("Click", increaseSetting)
+
+		editorGui.Add("Button", "x380 yp+29 w80 Y:Move X:Move(0.5)", translate("Compare...")).OnEvent("Click", compareSetup)
+
+		editorGui.Add("Button", "x16 ys+420 w80 Y:Move", translate("&Apply")).OnEvent("Click", applyRecommendations)
+		editorGui.Add("Slider", "x100 ys+422 w60 Thick15 0x10 Y:Move Range20-100 ToolTip vapplyStrengthSlider", 100)
+		editorGui.Add("Text", "x162 ys+425 Y:Move", translate("%"))
+
+		editorGui.Add("Text", "x178 ys+425 Y:Move", translate("/"))
+
+		editorGui.Add("Edit", "x190 ys+422 w40 Number Y:Move vapplyIncrementEdit", 3).OnValidate("LoseFocus", validateInteger.Bind(1, 10))
+		editorGui.Add("UpDown", "x217 yp w30 0x80 Range1-10 Y:Move", 3)
+
+		editorGui.Add("Button", "x380 ys+420 w80 Y:Move X:Move(0.5)", translate("&Save...")).OnEvent("Click", saveModifiedSetup)
+
+		editorGui.Add("Edit", "x474 ys+10 w323 h433 T8 X:Move(0.5) W:Grow(0.5) H:Grow ReadOnly -Wrap HScroll vsetupViewer")
+
+		/*
+		editorGui.Add("Text", "x8 y506 w800 0x10 Y:Move W:Grow")
+
+		editorGui.Add("Button", "x374 y514 w80 h23 Y:Move H:Center", translate("Close")).OnEvent("Click", closeEditor)
+		*/
+	}
+
+	show() {
+		local window := this.Window
+		local x, y, w, h
+
+		if getWindowPosition("Setup Workbench.Setup Editor", &x, &y)
+			window.Show("x" . x . " y" . y)
+		else
+			window.Show()
+
+		if getWindowSize("Setup Workbench.Setup Editor", &w, &h)
+			window.Resize("Initialize", w, h)
+
+		this.loadSetup()
+
+		this.Workbench.openedSetupEditor(this)
+	}
+
+	close() {
+		if this.Workbench
+			this.Workbench.closedSetupEditor(this)
+
+		this.destroy()
+
+		if this.Setup {
+			this.Workbench.Setup := this.Setup
+
+			this.Setup.Editor := false
+		}
+
+		this.iClosed := true
+	}
+
+	destroy() {
+		if this.Window
+			this.Window.Destroy()
+	}
+
+	displaySetup(setup) {
+		local viewer := this.Control["setupViewer"]
+		local scrollPos
+
+		if setup {
+			scrollPos := getScrollPosition(viewer)
+
+			viewer.Value := setup.Setup
+
+			setScrollPosition(viewer, scrollPos)
+		}
+		else
+			viewer.Value := ""
+	}
+
+	editableSetup(car) {
+		return (FileExist(kResourcesDirectory . "Garage\Definitions\Cars\" . this.Workbench.SelectedSimulator . "." . this.Workbench.SelectedCar . ".ini")
+			 || FileExist(kUserHomeDirectory . "Garage\Definitions\Cars\" . this.Workbench.SelectedSimulator . "." . this.Workbench.SelectedCar . ".ini"))
+	}
+
+	editSetup(setup := false) {
+		this.Setup := (setup ? setup.Clone() : Setup())
+		this.Setup.Editor := this
+
+		this.createGui(this.Configuration)
+
+		this.show()
+	}
+
+	updateState() {
+		local setup := this.Setup
+		local enabled := []
+		local changed := false
+		local row, label, sIndex, sEnabled, ignore, setting
+
+		if this.SettingsListView.GetNext(0) {
+			this.Control["increaseSettingButton"].Enabled := true
+			this.Control["decreaseSettingButton"].Enabled := true
+		}
+		else {
+			this.Control["increaseSettingButton"].Enabled := false
+			this.Control["decreaseSettingButton"].Enabled := false
+		}
+
+		if setup {
+			row := this.SettingsListView.GetNext(0, "C")
+
+			while row {
+				label := this.SettingsListView.GetText(row, 2)
+
+				enabled.Push(this.Settings[label])
+
+				row := this.SettingsListView.GetNext(row, "C")
+			}
+
+			for ignore, setting in this.Workbench.Settings {
+				sIndex := inList(enabled, setting)
+				sEnabled := setup.Enabled[setting]
+
+				if (sIndex && !sEnabled) {
+					setup.enable(setting)
+
+					changed := true
+				}
+				else if (!sIndex && sEnabled) {
+					setup.disable(setting)
+
+					changed := true
+				}
+			}
+
+			if changed
+				this.displaySetup(this.Setup)
+		}
+	}
+
+	createSettingHandler(setting) {
+		local handler := getMultiMapValue(this.Configuration, "Setup.Settings.Handler", setting, false)
+		local handlerClass
+
+		if (handler && (handler != "")) {
+			handler := string2Values("(", SubStr(handler, 1, StrLen(handler) - 1))
+
+			handlerClass := handler[1]
+
+			return %handlerClass%(string2Values(",", handler[2])*)
+		}
+		else
+			throw ("Unknown handler encountered for " . setting . " in SetupEditor.createSettingHandler...")
+	}
+
+	chooseSetup() {
+		throw "Virtual method SetupEditor.chooseSetup must be implemented in a subclass..."
+	}
+
+	getSettings() {
+		local settings := []
+		local setup := this.Setup
+		local ignore, setting
+
+		for ignore, setting in this.Workbench.Settings
+			if (setup.valueAvailable(setting, true) && setup.valueAvailable(setting, false))
+				settings.Push(setting)
+
+		return settings
+	}
+
+	getLabel(setting) {
+		local settingsLabels := toMap(getMultiMapValues(this.Configuration, "Setup.Settings.Labels")
+									, SetupWorkbench.LabelsMap)
+
+		if settingsLabels.Has(setting)
+			return settingsLabels[setting]
+		else {
+			settingsLabels := toMap(getMultiMapValues(this.Workbench.Definition, "Workbench.Settings.Labels")
+								  , SetupWorkbench.LabelsMap)
+
+			return (settingsLabels.Has(setting) ? settingsLabels[setting] : setting)
+		}
+	}
+
+	getUnit(setting) {
+		local settingsUnits := getMultiMapValues(this.Configuration, "Setup.Settings.Units." . getLanguage())
+
+		if (settingsUnits.Count = 0)
+			settingsUnits := getMultiMapValues(this.Configuration, "Setup.Settings.Units.EN")
+
+		return (settingsUnits.Has(setting) ? settingsUnits[setting] : translate("Clicks"))
+	}
+
+	loadSetup(&setup := false, log := true) {
+		local categories, categoriesLabels
+		local ignore, setting, handler, modifiedValue, originalValue, unit, value, category, candidate, settings
+		local cSetting, label, lastCategory
+
+		if !setup
+			setup := this.Setup
+		else
+			this.Setup := setup
+
+		this.Control["setupNameViewer"].Text := (setup ? setup.Name : "")
+
+		this.displaySetup(setup)
+
+		categories := getMultiMapValues(this.Workbench.Definition, "Workbench.Categories")
+
+		categoriesLabels := toMap(getMultiMapValues(this.Workbench.Definition, "Workbench.Categories.Labels")
+								, SetupWorkbench.LabelsMap)
+
+		this.SettingsListView.Delete()
+
+		this.Settings := CaseInsenseMap()
+
+		setup.disable(false)
+
+		for ignore, setting in this.Workbench.Settings
+			if (setup.valueAvailable(setting, true) && setup.valueAvailable(setting, false)) {
+				handler := this.createSettingHandler(setting)
+
+				if handler {
+					unit := this.getUnit(setting)
+
+					originalValue := handler.convertToDisplayValue(setup.getValue(setting, true))
+					modifiedValue := handler.convertToDisplayValue(setup.getValue(setting, false))
+
+					if (isNumber(originalValue) && isNumber(modifiedValue)) {
+						if (originalValue = modifiedValue) {
+							value := handler.formatValue(originalValue)
+
+							if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure")))
+								value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+
+							value := displayValue("Float", value)
+						}
+						else {
+							value := handler.formatValue(Abs(originalValue - modifiedValue))
+
+							if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+								originalValue := convertUnit("Pressure", convertUnit("Pressure", originalValue, unit, false))
+								modifiedValue := convertUnit("Pressure", convertUnit("Pressure", modifiedValue, unit, false))
+								value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+							}
+
+							if (modifiedValue > originalValue)
+								value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "+"
+										. displayValue("Float", value) . translate(")"))
+							else
+								value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "-"
+										. displayValue("Float", value) . translate(")"))
+
+							setup.enable(setting)
+						}
+					}
+					else {
+						if (originalValue = modifiedValue)
+							value := originalValue
+						else {
+							value := modifiedValue
+
+							setup.enable(setting)
+						}
+					}
+
+					category := ""
+
+					for candidate, settings in categories {
+						for ignore, cSetting in string2Values(";", settings)
+							if (InStr(setting, cSetting) == 1) {
+								category := candidate
+
+								break
+							}
+
+						if (category != "")
+							break
+					}
+
+					label := this.getLabel(setting)
+
+					if inList(kPressureUnits, unit)
+						unit := getUnit("Pressure")
+
+					this.SettingsListView.Add((originalValue = modifiedValue) ? "" : "Check"
+											, categoriesLabels[category], label, value, translate(unit))
+
+					this.Settings[setting] := label
+					this.Settings[label] := setting
+				}
+			}
+
+		this.SettingsListView.ModifyCol()
+
+		this.SettingsListView.ModifyCol(1, "AutoHdr Sort 80")
+		this.SettingsListView.ModifyCol(2, "AutoHdr")
+		this.SettingsListView.ModifyCol(3, "AutoHdr")
+		this.SettingsListView.ModifyCol(4, "AutoHdr")
+
+		lastCategory := ""
+
+		loop this.SettingsListView.GetCount() {
+			category := this.SettingsListView.GetText(A_Index)
+
+			if (category = lastCategory)
+				this.SettingsListView.Modify(A_Index, "", "")
+
+			lastCategory := category
+		}
+
+		if log
+			this.Workbench.logLoad(this, this.Setup)
+
+		this.updateState()
+	}
+
+	saveSetup() {
+		throw "Virtual method SetupEditor.saveSetup must be implemented in a subclass..."
+	}
+
+	increaseSetting(setting := false) {
+		local handler, label, row, candidate
+
+		if setting {
+			label := this.Settings[setting]
+			row := false
+
+			loop {
+				candidate := this.SettingsListView.GetText(A_Index, 2)
+
+				if (label = candidate) {
+					row := A_Index
+
+					break
+				}
+			}
+		}
+		else
+			row := this.SettingsListView.GetNext(0)
+
+		if row {
+			label := this.SettingsListView.GetText(row, 2)
+
+			setting := this.Settings[label]
+			handler := this.createSettingHandler(setting)
+
+			this.updateSetting(setting, handler.convertToRawValue(handler.increaseValue(handler.convertToDisplayValue(this.Setup.getValue(setting)))))
+
+			this.displaySetup(this.Setup)
+		}
+
+		this.updateState()
+	}
+
+	decreaseSetting(setting := false) {
+		local label, row, candidate, handler
+
+		if setting {
+			label := this.Settings[setting]
+			row := false
+
+			loop {
+				candidate := this.SettingsListView.GetText(A_Index, 2)
+
+				if (label = candidate) {
+					row := A_Index
+
+					break
+				}
+			}
+		}
+		else
+			row := this.SettingsListView.GetNext(0)
+
+		if row {
+			label := this.SettingsListView.GetText(row, 2)
+
+			setting := this.Settings[label]
+			handler := this.createSettingHandler(setting)
+
+			this.updateSetting(setting, handler.convertToRawValue(handler.decreaseValue(handler.convertToDisplayValue(this.Setup.getValue(setting)))))
+
+			this.displaySetup(this.Setup)
+		}
+
+		this.updateState()
+	}
+
+	applyRecommendations(percentage) {
+		local knowledgeBase := this.Workbench.KnowledgeBase
+		local settings := CaseInsenseMap()
+		local theMin := 1
+		local ignore, setting, delta, increment
+
+		this.resetSetup()
+
+		for ignore, setting in this.Workbench.Settings {
+			delta := knowledgeBase.getValue(setting . ".Delta", kUndefined)
+
+			if (delta != kUndefined)
+				if (delta != 0) {
+					theMin := Min(Abs(delta), theMin)
+
+					settings[setting] := delta
+				}
+		}
+
+		for setting, delta in settings {
+			increment := Max(- this.MaxIncrement, Min(this.MaxIncrement, Round((delta / theMin) * (percentage / 100))))
+
+			if (increment != 0) {
+				if getMultiMapValue(this.Configuration, "Setup.Settings", setting . ".Reverse", false)
+					increment *= -1
+
+				if (increment < 0) {
+					loop Abs(increment)
+						this.decreaseSetting(setting)
+				}
+				else
+					loop Abs(increment)
+						this.increaseSetting(setting)
+			}
+		}
+	}
+
+	resetSetup() {
+		local setup := this.Setup
+
+		this.Setup.reset()
+
+		this.loadSetup(&setup, false)
+	}
+
+	updateSetting(setting, newValue) {
+		local setup := this.Setup
+		local label := this.Settings[setting]
+		local row := false
+		local candidate, handler, unit, originalValue, modifiedValue, value
+
+		setup.setValue(setting, newValue)
+
+		loop {
+			candidate := this.SettingsListView.GetText(A_Index, 2)
+
+			if (label = candidate) {
+				row := A_Index
+
+				break
+			}
+		}
+
+		unit := this.getUnit(setting)
+
+		handler := this.createSettingHandler(setting)
+		originalValue := handler.convertToDisplayValue(setup.getValue(setting, true))
+		modifiedValue := handler.convertToDisplayValue(setup.getValue(setting, false))
+
+		if (isNumber(originalValue) && isNumber(modifiedValue)) {
+			if (originalValue = modifiedValue) {
+				value := handler.formatValue(originalValue)
+
+				if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure")))
+					value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+
+				value := displayValue("Float", value)
+
+				setup.disable(setting)
+			}
+			else {
+				value := handler.formatValue(Abs(originalValue - modifiedValue))
+
+				if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+					originalValue := convertUnit("Pressure", convertUnit("Pressure", originalValue, unit, false))
+					modifiedValue := convertUnit("Pressure", convertUnit("Pressure", modifiedValue, unit, false))
+					value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+				}
+
+				 if (modifiedValue > originalValue)
+					value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "+"
+							. displayValue("Float", value) . translate(")"))
+				else
+					value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "-"
+							. displayValue("Float", value) . translate(")"))
+
+				setup.enable(setting)
+			}
+		}
+		else {
+			if (originalValue = modifiedValue) {
+				value := originalValue
+
+				setup.disable(setting)
+			}
+			else {
+				value := modifiedValue
+
+				setup.enable(setting)
+			}
+		}
+
+		this.SettingsListView.Modify(row, "Vis Col3", value)
+		this.SettingsListView.Modify(row, (originalValue = modifiedValue) ? "-Check" : "Check")
+		this.SettingsListView.ModifyCol(3, "AutoHdr")
+	}
+
+	compareSetup() {
+		local comparatorClass := getMultiMapValue(this.Configuration, "Setup", "Comparator", false)
+		local comparator, newSetup
+
+		if comparatorClass {
+			comparator := %comparatorClass%(this)
+
+			this.iComparator := comparator
+
+			this.Window.Block()
+
+			try {
+				newSetup := comparator.compareSetup()
+
+				if newSetup
+					this.loadSetup(&newSetup)
+			}
+			finally {
+				this.iComparator := false
+
+				this.Window.Unblock()
+			}
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SetupComparator                                                         ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SetupComparator extends ConfigurationItem {
+	iWindow := false
+
+	iEditor := false
+
+	iSetupA := false
+	iSetupB := false
+	iSetupAB := false
+
+	iSettingsListView := false
+
+	iSettings := CaseInsenseMap()
+
+	iClosed := false
+
+	class ComparatorWindow extends Window {
+		iComparator := false
+
+		Comparator {
+			Get {
+				return this.iComparator
+			}
+		}
+
+		__New(comparator) {
+			this.iComparator := comparator
+
+			super.__New({Descriptor: "Setup Workbench.Setup Comparator"
+					  , Resizeable: true, Closeable: true, Options: "-MaximizeBox -MinimizeBox"}, translate("Setup Editor"))
+		}
+
+		Close(*) {
+			this.Comparator.close()
+		}
+	}
+
+	Window {
+		Get {
+			return this.iWindow
+		}
+	}
+
+	Control[name] {
+		Get {
+			return this.Window[name]
+		}
+	}
+
+	Workbench {
+		Get {
+			return this.Editor.Workbench
+		}
+	}
+
+	Editor {
+		Get {
+			return this.iEditor
+		}
+	}
+
+	SetupClass {
+		Get {
+			return this.Editor.SetupClass
+		}
+	}
+
+	SetupA {
+		Get {
+			return this.iSetupA
+		}
+
+		Set {
+			return (this.iSetupA := value)
+		}
+	}
+
+	SetupB {
+		Get {
+			return this.iSetupB
+		}
+
+		Set {
+			return (this.iSetupB := value)
+		}
+	}
+
+	SetupAB {
+		Get {
+			return this.iSetupAB
+		}
+
+		Set {
+			return (this.iSetupAB := value)
+		}
+	}
+
+	Settings[key?] {
+		Get {
+			return (isSet(key) ? this.iSettings[key] : this.iSettings)
+		}
+
+		Set {
+			return (isSet(key) ? (this.iSettings[key] := value) : (this.iSettings := value))
+		}
+	}
+
+	SettingsListView {
+		Get {
+			return this.iSettingsListView
+		}
+	}
+
+	__New(editor, configuration := false) {
+		local workbench, simulator, car, fileName
+
+		this.iEditor := editor
+		this.iSetupA := editor.Setup
+
+		if !configuration {
+			workbench := this.Workbench
+
+			simulator := workbench.SelectedSimulator
+			car := workbench.SelectedCar[false]
+
+			configuration := readMultiMap(kResourcesDirectory . "Garage\Definitions\" . simulator . ".ini")
+
+			addMultiMapValues(configuration, readMultiMap(kResourcesDirectory . "Garage\Definitions\Cars\" . simulator . ".Generic.ini"))
+
+			if (car != true) {
+				fileName := ("Garage\Definitions\Cars\" . simulator . "." . car . ".ini")
+
+				addMultiMapValues(configuration, readMultiMap(getFileName(fileName, kResourcesDirectory, kUserHomeDirectory)))
+			}
+		}
+
+		super.__New(configuration)
+	}
+
+	createGui(configuration) {
+		local comparator := this
+		local settingsListView, comparatorGui
+
+		applyComparator(*) {
+			comparator.close(true)
+		}
+
+		closeComparator(*) {
+			comparator.close()
+		}
+
+		chooseSetupAFile(*) {
+			comparator.chooseSetup("A")
+		}
+
+		chooseSetupBFile(*) {
+			comparator.chooseSetup("B")
+		}
+
+		navABSetting(listView, line, selected) {
+			if selected
+				selectABSetting(listView, line)
+		}
+
+		selectABSetting(*) {
+			comparator.updateState()
+		}
+
+		increaseABSetting(*) {
+			comparator.increaseSetting()
+		}
+
+		decreaseABSetting(*) {
+			comparator.decreaseSetting()
+		}
+
+		mixSetups(*) {
+			local ignore1 := false
+			local ignore2 := false
+
+			comparator.loadSetups(&ignore1, &ignore2, comparatorGui["applyMixSlider"].Value)
+		}
+
+		comparatorGui := SetupComparator.ComparatorWindow(this)
+
+		this.iWindow := comparatorGui
+
+		comparatorGui.SetFont("s10 Bold", "Arial")
+
+		comparatorGui.Add("Text", "w784 Center H:Center", translate("Modular Simulator Controller System")).OnEvent("Click", moveByMouse.Bind(comparatorGui, "Setup Workbench.Setup Comparator"))
+
+		comparatorGui.SetFont("s9 Norm", "Arial")
+
+		comparatorGui.Add("Documentation", "x308 YP+20 w184 Center H:Center", translate("Setup Comparator")
+						, "https://github.com/SeriousOldMan/Simulator-Controller/wiki/Setup-Workbench#comparing-car-setups")
+
+		comparatorGui.SetFont("s8 Norm", "Arial")
+
+		comparatorGui.Add("Text", "x8 yp+30 w800 0x10 W:Grow Section")
+
+		comparatorGui.Add("Button", "x16 ys+10 w100", translate("Setup A:")).OnEvent("Click", chooseSetupAFile)
+		comparatorGui.Add("Text", "x120 ys+14 w250 vsetupNameAViewer")
+		comparatorGui.Add("Button", "x16 ys+34 w100", translate("Setup B:")).OnEvent("Click", chooseSetupBFile)
+		comparatorGui.Add("Text", "x120 ys+38 w250 vsetupNameBViewer")
+
+		this.iSettingsListView := comparatorGui.Add("ListView", "x16 ys+64 w784 h350 W:Grow H:Grow -Multi -LV0x10 AltSubmit NoSort NoSortHdr", collect(["Category", "Setting", "Value (A)", "Value (B)", "Value (A/B)", "Unit"], translate))
+		this.iSettingsListView.OnEvent("Click", selectABSetting)
+		this.iSettingsListView.OnEvent("DoubleClick", selectABSetting)
+		this.iSettingsListView.OnEvent("ItemSelect", navABSetting)
+
+		comparatorGui.Add("Button", "x16 yp+354 w80 Disabled Y:Move vdecreaseABSettingButton", translate("Decrease")).OnEvent("Click", decreaseABSetting)
+		comparatorGui.Add("Button", "x720 yp w80 Disabled X:Move Y:Move vincreaseABSettingButton", translate("Increase")).OnEvent("Click", increaseABSetting)
+
+		comparatorGui.Add("Slider", "x316 yp w200 0x10 Thick15 Range-100-100 Y:Move X:Move(0.5) ToolTip vapplyMixSlider", 0).OnEvent("Change", mixSetups)
+		comparatorGui.Add("Text", "x201 yp+3 w100 Y:Move X:Move(0.5) Right", translate("Setup A"))
+		comparatorGui.Add("Text", "x529 yp w100 X:Move(0.5) Y:Move", translate("Setup B"))
+
+		comparatorGui.Add("Text", "x8 y506 w800 0x10 Y:Move W:Grow")
+
+		comparatorGui.Add("Button", "x322 y514 w80 h23 Y:Move X:Move(0.5)", translate("&Apply")).OnEvent("Click", applyComparator)
+		comparatorGui.Add("Button", "x426 y514 w80 h23 Default Y:Move X:Move(0.5)", translate("Close")).OnEvent("Click", closeComparator)
+	}
+
+	show() {
+		local window := this.Window
+		local x, y, w, h
+
+		if getWindowPosition("Setup Workbench.Setup Comparator", &x, &y)
+			window.Show("x" . x . " y" . y)
+		else
+			window.Show()
+
+		if getWindowSize("Setup Workbench.Setup Comparator", &w, &h)
+			window.Resize("Initialize", w, h)
+
+		this.loadSetups()
+	}
+
+	close(apply := false) {
+		this.iClosed := (apply ? "Apply" : "Close")
+	}
+
+	destroy() {
+		if this.Window
+			this.Window.Destroy()
+	}
+
+	getLabel(setting) {
+		local settingsLabels := toMap(getMultiMapValues(this.Configuration, "Setup.Settings.Labels")
+									, SetupWorkbench.LabelsMap)
+
+		if settingsLabels.Has(setting)
+			return settingsLabels[setting]
+		else {
+			settingsLabels := getMultiMapValues(this.Workbench.Definition, "Workbench.Settings.Labels")
+
+			return (settingsLabels.Has(setting) ? settingsLabels[setting] : setting)
+		}
+	}
+
+	getUnit(setting) {
+		local settingsUnits := getMultiMapValues(this.Configuration, "Setup.Settings.Units." . getLanguage())
+
+		if (settingsUnits.Count = 0)
+			settingsUnits := getMultiMapValues(this.Configuration, "Setup.Settings.Units.EN")
+
+		return (settingsUnits.Has(setting) ? settingsUnits[setting] : translate("Clicks"))
+	}
+
+	loadSetups(&setupA := false, &setupB := false, mix := 0) {
+		local setupClass, setupAB, categories, categoriesLabels
+		local ignore, setting, handler, unit, value, valueA, valueB, category, candidate, settings, cSetting
+		local targetAB, valueAB, lastValueAB, delta, label, lastCategory
+
+		if !setupA
+			setupA := this.SetupA
+		else
+			this.SetupA := setupA
+
+		if !setupB
+			setupB := this.SetupB
+		else
+			this.SetupB := setupB
+
+		this.Control["setupNameAViewer"].Text := (setupA ? setupA.Name : "")
+		this.Control["setupNameBViewer"].Text := (setupB ? setupB.Name : "")
+
+		setupClass := this.SetupClass
+
+		setupAB := %setupClass%(this.Editor, setupA.getInitializationArguments()*)
+
+		setupAB.Setup[false] := setupA.Setup[false]
+
+		this.SetupAB := setupAB
+
+		categories := getMultiMapValues(this.Workbench.Definition, "Workbench.Categories")
+
+		categoriesLabels := toMap(getMultiMapValues(this.Workbench.Definition, "Workbench.Categories.Labels")
+								, SetupWorkbench.LabelsMap)
+
+		this.SettingsListView.Delete()
+
+		this.Settings := CaseInsenseMap()
+
+		for ignore, setting in this.Workbench.Settings {
+			handler := this.Editor.createSettingHandler(setting)
+
+			if handler {
+				unit := this.getUnit(setting)
+
+				valueA := handler.convertToDisplayValue(setupA.getValue(setting, false))
+				valueB := handler.convertToDisplayValue(setupB.getValue(setting, true))
+
+				category := ""
+
+				for candidate, settings in categories {
+					for ignore, cSetting in string2Values(";", settings)
+						if (InStr(setting, cSetting) == 1) {
+							category := candidate
+
+							break
+						}
+
+					if (category != "")
+						break
+				}
+
+				if (isNumber(valueB) && isNumber(valueA)) {
+					targetAB := ((valueA * (((mix * -1) + 100) / 200)) + (valueB * (mix + 100) / 200))
+					valueAB := (!handler.Reverse ? ((valueA < valueB) ? valueA : valueB)
+											     : ((valueA < valueB) ? valueB: valueA))
+					lastValueAB := kUndefined
+
+					loop {
+						if ((!handler.Reverse && (valueAB >= targetAB))
+						 || (handler.Reverse && (valueAB < targetAB))) {
+							if (lastValueAB != kUndefined) {
+								delta := (valueAB - lastValueAB)
+
+								if ((lastValueAB + (delta / 2)) > targetAB)
+									valueAB := lastValueAB
+							}
+
+							break
+						}
+						else {
+							lastValueAB := valueAB
+
+							valueAB := handler.increaseValue(valueAB)
+
+							if (valueAB = lastValueAB)
+								break
+						}
+					}
+
+					setupAB.setValue(setting, handler.convertToRawValue(valueAB))
+
+					valueAB := handler.formatValue(valueAB)
+
+					if (valueB > valueA) {
+						value := handler.formatValue(Abs(valueA - valueB))
+
+						if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+							value := convertUnit("Pressure", convertUnit("Pressure", valueAB, unit, false))
+							valueB := convertUnit("Pressure", convertUnit("Pressure", valueB, unit, false))
+						}
+
+						valueB := (displayValue("Float", valueB) . A_Space . translate("(") . "+"
+								 . displayValue("Float", value) . translate(")"))
+					}
+					else if (valueB < valueA) {
+						value := handler.formatValue(Abs(valueA - valueB))
+
+						if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+							value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+							valueB := convertUnit("Pressure", convertUnit("Pressure", valueB, unit, false))
+						}
+
+						valueB := (displayValue("Float", valueB) . A_Space . translate("(") . "-"
+								 . displayValue("Float", value) . translate(")"))
+					}
+					else {
+						valueB := displayValue("Float", valueB)
+
+						if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure")))
+							valueB := convertUnit("Pressure", convertUnit("Pressure", valueB, unit, false))
+					}
+
+					if (valueAB > valueA) {
+						value := handler.formatValue(Abs(valueA - valueAB))
+
+						if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+							value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+							valueAB := convertUnit("Pressure", convertUnit("Pressure", valueAB, unit, false))
+						}
+
+						valueAB := (displayValue("Float", valueAB) . A_Space . translate("(") . "+"
+								  . displayValue("Float", value) . translate(")"))
+					}
+					else if (valueAB < valueA) {
+						value := handler.formatValue(Abs(valueA - valueAB))
+
+						if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+							value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+							valueAB := convertUnit("Pressure", convertUnit("Pressure", valueAB, unit, false))
+						}
+
+						valueAB := (displayValue("Float", valueAB) . A_Space . translate("(") . "-"
+								  . displayValue("Float", value) . translate(")"))
+					}
+					else {
+						if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure")))
+							valueAB := convertUnit("Pressure", convertUnit("Pressure", valueAB, unit, false))
+
+						valueAB := displayValue("Float", valueAB)
+					}
+
+					if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure")))
+						valueA := convertUnit("Pressure", convertUnit("Pressure", valueA, unit, false))
+				}
+				else {
+					if (mix < 0)
+						valueAB := valueA
+					else
+						valueAB := valueB
+				}
+
+				label := this.getLabel(setting)
+
+				if inList(kPressureUnits, unit)
+					unit := getUnit("Pressure")
+
+				this.SettingsListView.Add("", categoriesLabels[category]
+											, label, isNumber(valueA) ? displayValue("Float", valueA) : valueA, valueB, valueAB, translate(unit))
+
+				this.Settings[setting] := label
+				this.Settings[label] := setting
+			}
+		}
+
+		this.SettingsListView.ModifyCol()
+
+		this.SettingsListView.ModifyCol(1, "AutoHdr Sort")
+		this.SettingsListView.ModifyCol(2, "AutoHdr")
+		this.SettingsListView.ModifyCol(3, "AutoHdr")
+		this.SettingsListView.ModifyCol(4, "AutoHdr")
+		this.SettingsListView.ModifyCol(5, "AutoHdr")
+
+		lastCategory := ""
+
+		loop this.SettingsListView.GetCount() {
+			category := this.SettingsListView.GetText(A_Index)
+
+			if (category = lastCategory)
+				this.SettingsListView.Modify(A_Index, "", "")
+
+			lastCategory := category
+		}
+
+		this.updateState()
+	}
+
+	compareSetup(setup := false) {
+		this.SetupB := (setup ? setup : Setup())
+
+		this.createGui(this.Configuration)
+
+		this.show()
+
+		try {
+			while !this.iClosed
+				Sleep(200)
+		}
+		finally {
+			this.destroy()
+		}
+
+		return ((this.iClosed = "Apply") ? this.SetupAB : false)
+	}
+
+	updateSetting(setting, newValue) {
+		local setup := this.SetupAB
+		local label, row, candidate, handler, unit, originalValue, modifiedValue, value
+
+		setup.setValue(setting, newValue)
+
+		label := this.Settings[setting]
+		row := false
+
+		loop {
+			candidate := this.SettingsListView.GetText(A_Index, 2)
+
+			if (label = candidate) {
+				row := A_Index
+
+				break
+			}
+		}
+
+		unit := this.getUnit(setting)
+
+		handler := this.Editor.createSettingHandler(setting)
+		originalValue := handler.convertToDisplayValue(this.SetupA.getValue(setting, false))
+		modifiedValue := handler.convertToDisplayValue(setup.getValue(setting, false))
+
+		if (isNumber(originalValue) && isNumber(modifiedValue)) {
+			if (originalValue = modifiedValue) {
+				value := handler.formatValue(originalValue)
+
+				if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure")))
+					value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+
+				value := displayValue("Float", value)
+			}
+			else if (modifiedValue > originalValue) {
+				value := handler.formatValue(Abs(originalValue - modifiedValue))
+
+				if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+					modifiedValue := convertUnit("Pressure", convertUnit("Pressure", modifiedValue, unit, false))
+					value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+				}
+
+				value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "+"
+						. displayValue("Float", value) . translate(")"))
+			}
+			else {
+				value := handler.formatValue(Abs(originalValue - modifiedValue))
+
+				if (inList(kPressureUnits, unit) && (unit != getUnit("Pressure"))) {
+					modifiedValue := convertUnit("Pressure", convertUnit("Pressure", modifiedValue, unit, false))
+					value := convertUnit("Pressure", convertUnit("Pressure", value, unit, false))
+				}
+
+				value := (displayValue("Float", modifiedValue) . A_Space . translate("(") . "-"
+						. displayValue("Float", value) . translate(")"))
+			}
+		}
+		else {
+			if (originalValue = modifiedValue)
+				value := originalValue
+			else
+				value := modifiedValue
+		}
+
+		this.SettingsListView.Modify(row, "Vis Col5", value)
+		this.SettingsListView.ModifyCol(5, "AutoHdr")
+	}
+
+	increaseSetting(setting := false) {
+		local row, candidate, label, handler
+
+		if setting {
+			label := this.Settings[setting]
+			row := false
+
+			loop {
+				candidate := this.SettingsListView.GetText(A_Index, 2)
+
+				if (label = candidate) {
+					row := A_Index
+
+					break
+				}
+			}
+		}
+		else
+			row := this.SettingsListView.GetNext(0)
+
+		if row {
+			label := this.SettingsListView.GetText(row, 2)
+
+			setting := this.Settings[label]
+			handler := this.Editor.createSettingHandler(setting)
+
+			this.updateSetting(setting, handler.convertToRawValue(handler.increaseValue(handler.convertToDisplayValue(this.SetupAB.getValue(setting)))))
+		}
+
+		this.updateState()
+	}
+
+	decreaseSetting(setting := false) {
+		local label, row, candidate, handler
+
+		if setting {
+			label := this.Settings[setting]
+			row := false
+
+			loop {
+				candidate := this.SettingsListView.GetText(A_Index, 2)
+
+				if (label = candidate) {
+					row := A_Index
+
+					break
+				}
+			}
+		}
+		else
+			row := this.SettingsListView.GetNext(0)
+
+		if row {
+			label := this.SettingsListView.GetText(row, 2)
+
+			setting := this.Settings[label]
+			handler := this.Editor.createSettingHandler(setting)
+
+			this.updateSetting(setting, handler.convertToRawValue(handler.decreaseValue(handler.convertToDisplayValue(this.SetupAB.getValue(setting)))))
+		}
+
+		this.updateState()
+	}
+
+	updateState() {
+		if this.SettingsListView.GetNext(0) {
+			this.Control["increaseABSettingButton"].Enabled := true
+			this.Control["decreaseABSettingButton"].Enabled := true
+		}
+		else {
+			this.Control["increaseABSettingButton"].Enabled := false
+			this.Control["decreaseABSettingButton"].Enabled := false
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; FileSetupEditor                                                         ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class FileSetupEditor extends SetupEditor {
+	editSetup(theSetup := false) {
+		if !theSetup
+			theSetup := this.chooseSetup(false)
+
+		if theSetup
+			return super.editSetup(theSetup)
+		else {
+			this.destroy()
+
+			return false
+		}
+	}
+
+	chooseSetup(load := true) {
+		throw "Virtual method FileSetupEditor.chooseSetup must be implemented in a subclass..."
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; FileSetupComparator                                                     ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class FileSetupComparator extends SetupComparator {
+	chooseSetup(type, load := true) {
+		throw "Virtual method FileSetupComparator.chooseSetup must be implemented in a subclass..."
+	}
+
+	compareSetup(theSetup := false) {
+		if !theSetup
+			theSetup := this.chooseSetup("B", false)
+
+		if theSetup
+			return super.compareSetup(theSetup)
+		else {
+			this.destroy()
+
+			return false
+		}
+	}
+
+	loadSetups(&setupA := false, &setupB := false, mix := 0) {
+		super.loadSetups(&setupA, &setupB, mix)
+
+		if this.SetupAB
+			this.SetupAB.FileName[false] := setupA.FileName[false]
+	}
+}
+
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; LogbookBrowser                                                          ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class LogbookBrowser {
+	iWorkbench := false
+	iLogbookDirectory := false
+
+	iWindow := false
+
+	iLogbooksListView := false
+	iEntriesListView := false
+
+	iAvailableLogbooks := []
+	iAvailableEntries := []
+
+	iSelectedLogbook := false
+	iSelectedEntry := false
+
+	iContent := false
+
+	iResult := false
+
+	class BrowserWindow extends Window {
+		iBrowser := false
+
+		__New(browser, arguments*) {
+			this.iBrowser := browser
+
+			super.__New(arguments*)
+		}
+
+		Close(*) {
+			this.iBrowser.close()
+		}
+	}
+
+	class BrowserResizer extends Window.Resizer {
+		iBrowser := false
+		iRedraw := false
+
+		__New(browser, arguments*) {
+			this.iBrowser := browser
+
+			super.__New(browser.Window, arguments*)
+
+			Task.startTask(ObjBindMethod(this, "RedrawBrowser"), 500, kHighPriority)
+		}
+
+		Resize(deltaWidth, deltaHeight) {
+			this.iRedraw := true
+		}
+
+		RedrawBrowser() {
+			local ignore, button
+
+			if this.iRedraw {
+				for ignore, button in ["LButton", "MButton", "RButton"]
+					if GetKeyState(button)
+						return Task.CurrentTask
+
+				this.iRedraw := false
+
+				this.iBrowser.Control["htmlViewer"].Resized()
+
+				this.iBrowser.windowResized()
+
+				try {
+					WinRedraw(this.iBrowser.Window)
+				}
+				catch Any as exception {
+					logError(exception)
+
+					return false
+				}
+			}
+
+			return Task.CurrentTask
+		}
+	}
+
+	Workbench {
+		Get {
+			return this.iWorkbench
+		}
+	}
+
+	LogbookDirectory {
+		Get {
+			return this.iLogbookDirectory
+		}
+	}
+
+	Window {
+		Get {
+			return this.iWindow
+		}
+	}
+
+	Control[name] {
+		Get {
+			return this.Window[name]
+		}
+	}
+
+	LogbooksListView {
+		Get {
+			return this.iLogbooksListView
+		}
+	}
+
+	EntriesListView {
+		Get {
+			return this.iEntriesListView
+		}
+	}
+
+	AvailableLogbooks {
+		Get {
+			return this.iAvailableLogbooks
+		}
+	}
+
+	AvailableEntries {
+		Get {
+			return this.iAvailableEntries
+		}
+	}
+
+	SelectedLogbook {
+		Get {
+			return this.iSelectedLogbook
+		}
+	}
+
+	SelectedEntry {
+		Get {
+			return this.iSelectedEntry
+		}
+	}
+
+	__New(setupWorkbench, logbookDirectory) {
+		this.iWorkbench := setupWorkbench
+		this.iLogbookDirectory := logbookDirectory
+	}
+
+	createGui() {
+		local browserGui
+
+		selectLogbook(listView, line, *) {
+			this.selectLogbook(line ? this.AvailableLogbooks[line] : false)
+		}
+
+		selectEntry(listView, line, *) {
+			this.selectEntry(line ? this.SelectedLogbook.Entries[line] : false)
+		}
+
+		browserGui := LogbookBrowser.BrowserWindow(this, {Descriptor: "Setup Workbench.Logbook Browser"
+														, Resizeable:  "Deferred", Scrollable: false}
+													   , translate("Logbook"))
+
+		this.iWindow := browserGui
+
+		browserGui.SetFont("s10 Bold", "Arial")
+
+		browserGui.Add("Text", "x8 w480 Center H:Center", translate("Modular Simulator Controller System")).OnEvent("Click", moveByMouse.Bind(browserGui, "Setup Workbench.Logbook Browser"))
+
+		browserGui.SetFont("s9 Norm", "Arial")
+
+		browserGui.Add("Documentation", "x158 YP+20 w180 Center H:Center", translate("Logbook")
+					   , "https://github.com/SeriousOldMan/Simulator-Controller/wiki/Setup-Workbench#logbook-browser")
+
+		browserGui.SetFont("s8 Norm", "Arial")
+
+		browserGui.Add("Text", "x8 yp+30 w480 0x10 W:Grow")
+
+		this.iLogbooksListView := browserGui.Add("ListView", "x16 yp+10 w130 h320 Section -Multi -LV0x10 AltSubmit NoSort NoSortHdr", collect(["Date", "Time", "#"], translate))
+		this.iLogbooksListView.OnEvent("Click", selectLogbook)
+		this.iLogbooksListView.OnEvent("DoubleClick", selectLogbook)
+		this.iLogbooksListView.OnEvent("ItemSelect", selectLogbook)
+
+		this.iEntriesListView := browserGui.Add("ListView", "x16 yp+325 w130 h140 H:Grow -Multi -LV0x10 AltSubmit NoSort NoSortHdr", collect(["Actions"], translate))
+		this.iEntriesListView.OnEvent("Click", selectEntry)
+		this.iEntriesListView.OnEvent("DoubleClick", selectEntry)
+		this.iEntriesListView.OnEvent("ItemSelect", selectEntry)
+
+		browserGui.Add("Button", "x66 yp+144 w80 h24 Y:Move vaddNotesButton", translate("Notes") . translate("...")).OnEvent("Click", (*) => this.addNotes())
+
+		browserGui.Add("HTMLViewer", "x150 ys w330 h493 H:Grow W:Grow Border vhtmlViewer")
+
+		browserGui.Add(LogbookBrowser.BrowserResizer(this))
+
+		this.updateState()
+	}
+
+	loadLogbooks() {
+		local logbooks := []
+		local name, date, time
+
+		loop Files, this.LogbookDirectory . "*.logbook", "F" {
+			lBook := Logbook.readLogbook(A_LoopFileFullPath)
+
+			if (!lBook.superfluous() || (A_LoopFileFullPath = this.Workbench.Logbook)) {
+				logbooks.Push(lBook)
+
+				SplitPath(A_LoopFileName, , , , &name)
+
+				date := FormatTime(name, "ShortDate")
+				time := FormatTime(name, "HH:mm")
+
+				this.LogbooksListView.Add("", date, time, lBook.Entries.Length)
+			}
+			else
+				deleteFile(A_LoopFileFullPath)
+		}
+
+		this.LogbooksListView.ModifyCol()
+
+		loop 2
+			this.LogbooksListView.ModifyCol(A_Index, "AutoHdr")
+
+		this.iAvailableLogbooks := logbooks
+	}
+
+	loadLogbook(logbook) {
+		local ignore, entry
+
+		this.EntriesListView.Delete()
+
+		if logbook
+			for ignore, entry in logbook.Entries
+				this.EntriesListView.Add("", translate(entry.Type))
+
+		this.EntriesListView.ModifyCol()
+
+		loop 1
+			this.EntriesListView.ModifyCol(A_Index, "AutoHdr")
+
+		loadEntry(false)
+	}
+
+	loadEntry(entry) {
+		this.showEntry(entry ? entry.HTML : "")
+	}
+
+	showEntry(content) {
+		local viewer := this.Control["htmlViewer"]
+		local height := (viewer.getHeight() - 4)
+		local html := ""
+		local document, height, ignore, tag
+
+		getCSS() {
+			local script
+
+			script := "
+			(
+				.table-std, .th-std, .td-std {
+					border-collapse: collapse;
+					padding: .3em .5em;
+				}
+
+				.th-std, .td-std {
+					text-align: center;
+					color: #%textColor%;
+				}
+
+				.th-std, .caption-std {
+					background-color: #%headerBackColor%;
+					color: #%textColor%;
+					border: thin solid #%frameColor%;
+				}
+
+				.td-std {
+					border-left: thin solid #%frameColor%;
+					border-right: thin solid #%frameColor%;
+				}
+
+				.th-left {
+					text-align: left;
+				}
+
+				.td-left {
+					text-align: left;
+				}
+
+				.th-right {
+					text-align: right;
+				}
+
+				.td-right {
+					text-align: right;
+				}
+
+				table, th, td {
+					border-collapse: collapse;
+					padding: .3em .5em;
+				}
+
+				th, td {
+					color: #%textColor%;
+				}
+
+				th, caption {
+					font-size: 12px;
+					background-color: #%headerBackColor%;
+					color: #%textColor%;
+					border: thin solid #%frameColor%;
+				}
+
+				td {
+					font-size: 12px;
+					border-left: thin solid #%frameColor%;
+					border-right: thin solid #%frameColor%;
+				}
+
+				tfoot {
+					border-bottom: thin solid #%frameColor%;
+				}
+
+				caption {
+					font-size: 1.5em;
+					border-radius: .5em .5em 0 0;
+					padding: .5em 0 0 0
+				}
+
+				table tbody tr:nth-child(even) {
+					background-color: #%evenRowColor%;
+				}
+
+				table tbody tr:nth-child(odd) {
+					background-color: #%evenRowColor%;
+				}
+
+				h1, h2, h3, h4, h5, p, ul, ol {
+					font-family: Arial;
+					color: #%textColor%;
+				}
+			)"
+
+			return substituteVariables(script, {evenRowColor: this.Window.Theme.ListBackColor["EvenRow"]
+											  , oddRowColor: this.Window.Theme.ListBackColor["OddRow"]
+											  , altBackColor: this.Window.AltBackColor, backColor: this.Window.BackColor
+											  , textColor: this.Window.Theme.TextColor
+											  , headerBackColor: this.Window.Theme.TableColor["Header"], frameColor: this.Window.Theme.TableColor["Frame"]})
+		}
+
+		this.iContent := content
+
+		if !content {
+			width := viewer.getWidth() - 10
+
+			document := "
+			(
+			<html>
+				<meta charset='utf-8'>
+				<head>
+				</head>
+				<body style='background-color: #%backColor%' style='overflow: auto' leftmargin='0' topmargin='0' rightmargin='0' bottommargin='0'>
+					<style> table, p, div { color: #%fontColor% } </style>
+					<div style="width: %width%px; height: %height%px; text-align: center">
+						<p style="font-family: Arial; font-size: 16px; height: %height%px; margin: auto">
+							<br>
+							<br>
+							<br>
+							<br>
+							%html%
+						</p>
+					</div>
+				</body>
+			</html>
+			)"
+		}
+		else {
+			width := viewer.getWidth() - 35
+
+			document := "
+			(
+			<html>
+				<meta charset='utf-8'>
+				<head>
+					<style>
+						.headerStyle { height: 25; font-size: 11px; font-weight: 500; background-color: #%headerBackColor%; }
+						.rowStyle { font-size: 11px; color: #%fontColor%; background-color: #%evenRowBackColor%; }
+						.oddRowStyle { font-size: 11px; color: #%fontColor%; background-color: #%oddRowBackColor%; }
+						%CSS%
+					</style>
+				</head>
+				<body style='background-color: #%backColor%' style='overflow: auto' leftmargin='5' topmargin='5' rightmargin='5' bottommargin='5'>
+					<div style="width: %width%px; font-family: Arial; font-size: 12px">
+						<p style="font-family: Arial; font-size: 12px; margin: auto">
+							%html%
+						</p>
+					</div>
+				</body>
+			</html>
+			)"
+		}
+
+		content := StrReplace(content, "%", "\%")
+
+		for ignore, tag in ["<html>", "</html>", "<body>", "</body>"]
+			content := StrReplace(content, tag, "")
+
+		viewer.document.open()
+		viewer.document.write(substituteVariables(document
+												, {fontColor: this.Window.Theme.TextColor
+												 , headerBackColor: this.Window.Theme.ListBackColor["Header"]
+												 , evenRowBackColor: this.Window.Theme.ListBackColor["EvenRow"]
+												 , oddRowBackColor: this.Window.Theme.ListBackColor["OddRow"]
+												 , CSS: getCSS()
+												 , width: width, height: height, html: content
+												 , backColor: this.Window.AltBackColor}))
+		viewer.document.close()
+	}
+
+	selectLogbook(logbook, force := false) {
+		local ignore, candidate
+
+		if ((!this.SelectedLogbook || (this.SelectedLogbook != logbook)) || force) {
+			this.iSelectedLogbook := logbook
+
+			for ignore, candidate in this.AvailableLogbooks
+				if (logbook = candidate) {
+					this.LogbooksListView.Modify(A_Index, "Select Vis")
+
+					break
+				}
+
+			this.loadLogbook(logbook)
+
+			if (logbook && (logbook.Entries.Length > 0))
+				this.selectEntry(logbook.Entries[1])
+			else
+				this.selectEntry(false)
+
+			this.updateState()
+		}
+	}
+
+	selectEntry(entry, force := false) {
+		local ignore, candidate
+
+		if ((!this.SelectedEntry || (this.SelectedEntry != entry)) || force) {
+			this.iSelectedEntry := entry
+
+			for ignore, candidate in this.SelectedLogbook.Entries
+				if (entry = candidate) {
+					this.EntriesListView.Modify(A_Index, "Select Vis")
+
+					break
+				}
+
+			this.loadEntry(entry)
+
+			this.updateState()
+		}
+	}
+
+	addNotes() {
+		local newNotes := editNotes(this, "")
+		local newLogbook
+
+		if newNotes {
+			this.Workbench.logLogbook("Notes", newNotes)
+
+			newLogbook := Logbook.readLogbook(this.SelectedLogbook.FileName)
+
+			this.AvailableLogbooks[inList(this.AvailableLogbooks, this.SelectedLogbook)] := newLogbook
+
+			this.selectLogbook(newLogbook)
+			this.selectEntry(newLogbook.Entries[newLogbook.Entries.Length])
+		}
+	}
+
+	updateState() {
+		if (this.SelectedEntry && (this.SelectedLogbook.FileName = this.Workbench.Logbook))
+			this.Control["addNotesButton"].Enabled := true
+		else
+			this.Control["addNotesButton"].Enabled := false
+	}
+
+	windowResized() {
+		this.showEntry(this.iContent)
+	}
+
+	browseLogbooks(fileName) {
+		local window, x, y, w, h
+
+		this.createGui()
+
+		window := this.Window
+
+		try {
+			window.Opt("+Owner" . this.Workbench.Window.Hwnd)
+
+			if getWindowPosition("Setup Workbench.Logbook Browser", &x, &y)
+				window.Show("x" . x . " y" . y)
+			else
+				window.Show()
+
+			if getWindowSize("Setup Workbench.Logbook Browser", &w, &h)
+				this.Window.Resize("Initialize", w, h)
+
+			this.loadLogbooks()
+
+			this.selectLogbook(first(this.AvailableLogbooks, (d) => (d.FileName = fileName)))
+
+			loop
+				Sleep(200)
+			until this.iResult
+		}
+		finally {
+			window.Destroy()
+		}
+	}
+
+	close() {
+		this.iResult := true
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; SetupEngineer                                                           ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class SetupEngineer extends ConfigurationItem {
+	iWorkbench := false
+
+	iWindow := false
+
+	iTelemetriesListView := false
+	iAnalysisViewer := false
+
+	iUpdateTask := false
+
+	iAnalysis := false
+	iContent := ""
+
+	iOptions := CaseInsenseMap()
+
+	iConnector := false
+	iConnectionState := "Active"
+
+	iTemplates := false
+
+	iInstructions := CaseInsenseWeakMap()
+
+	iMode := "Analysis"
+
+	iIssues := false
+	iResolution := 1000
+
+	class EngineerWindow extends Window {
+		iEngineer := false
+
+		__New(engineer, arguments*) {
+			this.iEngineer := engineer
+
+			super.__New(arguments*)
+		}
+
+		Close(*) {
+			this.iEngineer.close()
+		}
+	}
+
+	class EngineerResizer extends Window.Resizer {
+		iEngineer := false
+		iRedraw := false
+
+		__New(engineer, arguments*) {
+			this.iEngineer := engineer
+
+			super.__New(engineer.Window, arguments*)
+
+			Task.startTask(ObjBindMethod(this, "RedrawEngineer"), 500, kHighPriority)
+		}
+
+		Resize(deltaWidth, deltaHeight) {
+			this.iRedraw := true
+		}
+
+		RedrawEngineer() {
+			local ignore, button
+
+			if this.iRedraw {
+				for ignore, button in ["LButton", "MButton", "RButton"]
+					if GetKeyState(button)
+						return Task.CurrentTask
+
+				this.iRedraw := false
+
+				this.iEngineer.AnalysisViewer.Resized()
+
+				this.iEngineer.windowResized()
+
+				try {
+					WinRedraw(this.iEngineer.Window)
+				}
+				catch Any as exception {
+					logError(exception)
+
+					return false
+				}
+			}
+
+			return Task.CurrentTask
+		}
+	}
+
+	Workbench {
+		Get {
+			return this.iWorkbench
+		}
+	}
+
+	Window {
+		Get {
+			return this.iWindow
+		}
+	}
+
+	TelemetriesListView {
+		Get {
+			return this.iTelemetriesListView
+		}
+	}
+
+	AnalysisViewer {
+		Get {
+			return this.iAnalysisViewer
+		}
+	}
+
+	Simulator {
+		Get {
+			return this.Workbench.SelectedSimulator[false]
+		}
+	}
+
+	Car {
+		Get {
+			return this.Workbench.SelectedCar[false]
+		}
+	}
+
+	Track {
+		Get {
+			return this.Workbench.SelectedTrack[false]
+		}
+	}
+
+	Providers {
+		Get {
+			return LLMConnector.Providers
+		}
+	}
+
+	Options[key?] {
+		Get {
+			return (isSet(key) ? this.iOptions[key] : this.iOptions)
+		}
+
+		Set {
+			return (isSet(key) ? (this.iOptions[key] := value) : (this.iOptions := value))
+		}
+	}
+
+	Templates[language?] {
+		Get {
+			local templates, fileName, code, ignore
+
+			if !this.iTemplates {
+				templates := CaseInsenseMap()
+
+				for code, ignore in availableLanguages() {
+					fileName := getFileName("Setup Workbench.instructions." . code, kResourcesDirectory . "Instructions\")
+
+					if FileExist(fileName) {
+						templates[code] := readMultiMap(fileName)
+
+						fileName := getFileName("Setup Workbench.instructions." . code, kUserHomeDirectory . "Instructions\")
+
+						if FileExist(fileName)
+							addMultiMapValues(templates[code], readMultiMap(fileName))
+					}
+					else {
+						fileName := getFileName("Setup Workbench.instructions." . code, kUserHomeDirectory . "Instructions\")
+
+						if FileExist(fileName)
+							templates[code] := readMultiMap(fileName)
+					}
+				}
+
+				this.iTemplates := templates
+			}
+
+			if (isSet(language) && !this.iTemplates.Has(language))
+				language := "en"
+
+			return (isSet(language) ? this.iTemplates[language] : this.iTemplates)
+		}
+	}
+
+	Instructions[type?] {
+		Get {
+			local instructions
+
+			if isSet(type) {
+				if (type == true)
+					instructions := ["Character", "Simulation", "Geometry", "Handling", "Analysis", "Recommendations"]
+				else
+					instructions := (this.iInstructions.Has(type) ? this.iInstructions[type] : false)
+			}
+			else
+				instructions := this.iInstructions
+
+			return instructions
+		}
+
+		Set {
+			return (isSet(type) ? (this.iInstructions[type] := value) : (this.iInstructions := value))
+		}
+	}
+
+	Connector {
+		Get {
+			return this.iConnector
+		}
+	}
+
+	ConnectionState {
+		Get {
+			return this.iConnectionState
+		}
+
+		Set {
+			return (this.iConnectionState := value)
+		}
+	}
+
+	Mode {
+		Get {
+			return this.iMode
+		}
+	}
+
+	Analysis {
+		Get {
+			return this.iAnalysis
+		}
+	}
+
+	Issues {
+		Get {
+			return this.iIssues
+		}
+	}
+
+	Resolution {
+		Get {
+			return this.iResolution
+		}
+	}
+
+	__New(setupWorkbench, configuration) {
+		this.iWorkbench := setupWorkbench
+
+		super.__New(configuration)
+
+		this.loadInstructions(configuration)
+	}
+
+	loadFromConfiguration(configuration) {
+		local options
+
+		super.loadFromConfiguration(configuration)
+
+		options := this.Options
+
+		options["Setup Engineer.Service"] := getMultiMapValue(configuration, "Setup Engineer Service", "Service", getMultiMapValue(configuration, "Setup Engineer", "Service", false))
+		options["Setup Engineer.Model"] := getMultiMapValue(configuration, "Setup Engineer Service", "Model", false)
+		options["Setup Engineer.MaxTokens"] := getMultiMapValue(configuration, "Setup Engineer Service", "MaxTokens", 2048)
+		options["Setup Engineer.Temperature"] := getMultiMapValue(configuration, "Setup Engineer Personality", "Temperature", 0.5)
+
+		if (string2Values("|", options["Setup Engineer.Service"], 2)[1] = "LLM Runtime")
+			options["Setup Engineer.GPULayers"] := getMultiMapValue(configuration, "Setup Engineer Service", "GPULayers", 0)
+	}
+
+	createGui() {
+		local engineerGui
+
+		validateInteger(minValue, maxValue, field, operation, value?) {
+			if (operation = "Validate")
+				return (isInteger(value) && (value >= minValue) && (value <= maxValue))
+		}
+
+		selectTelemetry := (*) => this.updateState()
+
+		engineerGui := SetupEngineer.EngineerWindow(this, {Descriptor: "Setup Workbench.Setup Engineer"
+														 , Resizeable:  "Deferred", Scrollable: false}
+														, translate("Setup Engineer"))
+
+		this.iWindow := engineerGui
+
+		engineerGui.SetFont("s10 Bold", "Arial")
+
+		engineerGui.Add("Text", "x8 w480 Center H:Center", translate("Modular Simulator Controller System")).OnEvent("Click", moveByMouse.Bind(engineerGui, "Setup Workbench.Setup Engineer"))
+
+		engineerGui.SetFont("s9 Norm", "Arial")
+
+		engineerGui.Add("Documentation", "x158 YP+20 w180 Center H:Center", translate("Setup Engineer")
+					   , "https://github.com/SeriousOldMan/Simulator-Controller/wiki/Setup-Workbench#setup-engineer")
+
+		engineerGui.SetFont("s8 Norm", "Arial")
+
+		engineerGui.Add("Text", "x8 yp+30 w480 0x10 W:Grow")
+
+		this.iTelemetriesListView := engineerGui.Add("ListView", "x16 yp+10 w464 h120 H:Grow(0.1) W:Grow -Multi -LV0x10 AltSubmit NoSort NoSortHdr", collect(["Lap", "Driver", "Lap Time", "Date"], translate))
+		this.iTelemetriesListView.OnEvent("Click", selectTelemetry)
+		this.iTelemetriesListView.OnEvent("DoubleClick", selectTelemetry)
+		this.iTelemetriesListView.OnEvent("ItemSelect", selectTelemetry)
+
+		engineerGui.Add("Text", "x16 yp+130 w120 Y:Move(0.1) Section", translate("Analyze Issues"))
+		engineerGui.Add("DropDownList", "x130 yp-4 w50 Y:Move(0.1) Choose2 vissuesDropDown", [translate("Yes"), translate("No")]).OnEvent("Change", (*) {
+			this.iIssues := (engineerGui["issuesDropDown"].Value == 1)
+		})
+
+		engineerGui.Add("Text", "x16 yp+28 w120 Y:Move(0.1)", translate("Resolution"))
+		engineerGui.Add("DropDownList", "x130 yp-4 w50 Y:Move(0.1) Choose2 vresolutionDropDown", [500, 1000, 2000, 4000]).OnEvent("Change", (*) {
+			this.iResolution := [500, 1000, 2000, 4000][engineerGui["resolutionDropDown"].Value]
+		})
+		engineerGui.Add("Text", "x184 yp+4 w80 Y:Move(0.1)", translate("Samples"))
+
+		engineerGui.Add("Button", "x382 ys-4 w48 h48 X:Move Y:Move(0.1) vanalyzeButton").OnEvent("Click", (*) => this.analyzeTelemetry())
+		setButtonIcon(engineerGui["analyzeButton"], kIconsDirectory . "Assistant.ico", 1, "W42 H42")
+
+		engineerGui.Add("Button", "x432 yp w48 h48 X:Move Y:Move(0.1) vsetupButton").OnEvent("Click", (*) => this.recommendSetup())
+		setButtonIcon(engineerGui["setupButton"], kIconsDirectory . "Car Setup.ico", 1, "W42 H42")
+
+		engineerGui.Add("Text", "x16 yp+52 w80 h21 Y:Move(0.1)", translate("Analysis"))
+		engineerGui.Add("Text", "x96 yp+7 w" . (480 - 96) . " 0x10 Y:Move(0.1) W:Grow")
+
+		this.iAnalysisViewer := engineerGui.Add("HTMLViewer", "x16 yp+17 w464 h400 W:Grow Y:Move(0.1) H:Grow(0.9) Border vanalysisViewer")
+
+		engineerGui.Add(SetupEngineer.EngineerResizer(this))
+
+		this.updateState()
+	}
+
+	show() {
+		local x, y, w, h
+
+		this.createGui()
+
+		if getWindowPosition("Setup Workbench.Setup Engineer", &x, &y)
+			this.Window.Show("x" . x . " y" . y)
+		else
+			this.Window.Show()
+
+		if getWindowSize("Setup Workbench.Setup Engineer", &w, &h)
+			this.Window.Resize("Initialize", w, h)
+
+		this.iUpdateTask := PeriodicTask(() => this.updateTelemetries(), 1000, kLowPriority)
+
+		this.iUpdateTask.start()
+
+		this.showAnalysis(translate("Choose a lap for a detailed analysis."), false)
+	}
+
+	close() {
+		if this.iUpdateTask
+			this.iUpdateTask.stop()
+
+		this.stopInteraction()
+
+		if this.Workbench
+			this.Workbench.closedSetupEngineer()
+
+		this.Window.Destroy()
+	}
+
+	updateState() {
+		if ((this.Simulator == true) || (this.Car == true) || (this.Track == true))
+			this.Window["analyzeButton"].Enabled := false
+		else if !this.TelemetriesListView.GetNext(0)
+			this.Window["analyzeButton"].Enabled := false
+		else
+			this.Window["analyzeButton"].Enabled := true
+
+		this.Window["setupButton"].Enabled := (this.Analysis && this.Workbench.SetupEditors.Length == 1)
+	}
+
+	updateTelemetries() {
+		local telemetries := []
+		local loadedTelemetries := []
+		local availableTelemetries := []
+		local removedTelemetries := []
+		local initialize := (this.TelemetriesListView.GetCount() = 0)
+		local info, lapTime, name, driver, date
+
+		loop Files, kTempDirectory . "Setup Workbench\Telemetry\*.telemetry", "F"
+			telemetries.Push(A_LoopFileFullPath)
+
+		loop Files, kTempDirectory . "Setup Workbench\Telemetry\Imported\*.telemetry", "F"
+			telemetries.Push(A_LoopFileFullPath)
+
+		loop this.TelemetriesListView.GetCount()
+			loadedTelemetries.Push(this.TelemetriesListView.GetText(A_Index))
+
+		availableTelemetries := collect(telemetries, (t) {
+			local name
+
+			SplitPath(t, , , , &name)
+
+			return name
+		})
+
+		this.TelemetriesListView.Opt("-Redraw")
+
+		try {
+			do(availableTelemetries, (name) {
+				if !inList(loadedTelemetries, name)
+					this.TelemetriesListView.Add("", name)
+			})
+
+			do(telemetries, (fileName) {
+				SplitPath(fileName, , , , &name)
+
+				if FileExist(fileName . ".info") {
+					info := readMultiMap(fileName . ".info")
+
+					lapTime := getMultiMapValue(info, "Info", "LapTime", getMultiMapValue(info, "Lap", "LapTime", translate("-")))
+
+					driver := getMultiMapValue(info, "Lap", "Driver", false)
+
+					if !driver
+						if getMultiMapValue(info, "Info", "Driver", getMultiMapValue(info, "Telemetry", "Driver", false)) {
+							driver := getMultiMapValue(info, "Telemetry", "Driver", false)
+
+							if driver
+								driver := SessionDatabase.getDriverName(this.Simulator, driver)
+							else
+								driver := getMultiMapValue(info, "Info", "Driver", false)
+						}
+
+					if !driver
+						driver := SessionDatabase.getName("Creator")
+
+					try {
+						date := FormatTime(getMultiMapValue(info, "Telemetry", "Date"), "ShortDate")
+					}
+					catch Any {
+						date := FormatTime(A_Now, "ShortDate")
+					}
+				}
+				else {
+					info := false
+
+					lapTime := translate("-")
+					driver := translate("-")
+					date := FormatTime(A_Now, "ShortDate")
+				}
+
+
+				loop this.TelemetriesListView.GetCount()
+					if (this.TelemetriesListView.GetText(A_Index) = name) {
+						this.TelemetriesListView.Modify(A_Index, "Col2", driver, lapTimeDisplayValue(lapTime), date)
+
+						break
+					}
+			})
+
+			loop this.TelemetriesListView.GetCount()
+				if !inList(availableTelemetries, this.TelemetriesListView.GetText(A_Index))
+					removedTelemetries.Push(A_Index)
+
+			do(reverse(removedTelemetries), (t) => this.TelemetriesListView.Delete(t))
+
+			if initialize {
+				this.TelemetriesListView.ModifyCol()
+
+				loop 4
+					this.TelemetriesListView.ModifyCol(A_Index, "AutoHdr")
+			}
+		}
+		finally {
+			this.TelemetriesListView.Opt("+Redraw")
+		}
+
+		this.updateState()
+	}
+
+	windowResized() {
+		this.showAnalysis(this.iContent, InStr(this.iContent, "`n"))
+	}
+
+	loadInstructions(configuration) {
+		local options, laps, ignore, instruction
+
+		options := this.Options
+
+		for ignore, instruction in this.Instructions[true]
+			if hasMultiMapValue(configuration, "Setup Engineer Personality", "Instructions." . instruction)
+				options["Setup Engineer.Instructions." . instruction] := getMultiMapValue(configuration, "Setup Engineer Personality", "Instructions." . instruction, false)
+			else
+				options["Setup Engineer.Instructions." . instruction] := getMultiMapValue(this.Templates[getLanguage()], "Instructions", instruction)
+	}
+
+	connectorState(state, reason := false, arguments*) {
+		local oldState := this.ConnectionState
+
+		if (state = "Active")
+			this.ConnectionState := state
+		else if (state = "Error")
+			this.ConnectionState := (state . (reason ? (":" . reason) : ""))
+		else
+			this.ConnectionState := "Unknown"
+	}
+
+	getInstruction(category) {
+		local simulator := this.Simulator
+		local car := this.Car
+		local track := this.Track
+		local workbench, issues, characteristicLabels, ignore, characteristic, widgets, setupEditor
+		local steerLock, steerRatio, trackWidth, wheelbase
+
+		switch category, false {
+			case "Character":
+				return this.Instructions["Character"]
+			case "Simulation":
+				return substituteVariables(this.Instructions["Simulation"]
+										 , {simulator: SessionDatabase.getSimulatorName(simulator)
+										  , car: SessionDatabase.getCarName(simulator, car)
+										  , track: SessionDatabase.getTrackName(simulator, track)})
+			case "Geometry":
+				if (this.Mode = "Analysis") {
+					steerLock := getCarSteerLock(simulator, car)
+					steerRatio := getCarSteerRatio(simulator, car)
+					wheelbase := getCarWheelbase(simulator, car)
+					trackWidth := getCarTrackWidth(simulator, car)
+
+					if (steerLock || steerRatio || wheelbase || trackWidth)
+						return substituteVariables(this.Instructions["Geometry"]
+												 , {steerLock: (steerLock ? ("Steer Lock: " . steerLock . " Degrees") : "")
+												  , steerRatio: (steerRatio ? ("Steer Ratio: " . steerRatio) : "")
+												  , trackWidth: (trackWidth ? ("Track Width: " . trackWidth . " cm") : "")
+												  , wheelbase: (wheelbase ? ("Wheelbase: " . wheelbase . " cm") : "")})
+				}
+			case "Handling":
+				if ((this.Mode = "Analysis") && this.Issues) {
+					workbench := this.Workbench
+					issues := []
+
+					characteristicLabels := toMap(getMultiMapValues(workbench.Definition
+																  , "Workbench.Characteristics.Labels")
+												, SetupWorkbench.LabelsMap)
+
+					for ignore, characteristic in workbench.SelectedCharacteristics {
+						widgets := workbench.SelectedCharacteristicsWidgets[characteristic]
+
+						issues.Push({Issue: characteristicLabels[characteristic]
+								   , Frequency: widgets[1].Value . "\%"
+								   , Severity: widgets[2].Value . "\%"})
+					}
+
+					return substituteVariables(this.Instructions["Handling"], {handling: JSON.print(issues, "  ")})
+				}
+			case "Analysis":
+				if (this.Mode = "Analysis")
+					return this.Instructions["Analysis"]
+			case "Recommendations":
+				if (this.Mode = "Recommendations") {
+					try {
+						setupEditor := this.Workbench.SetupEditors[1]
+
+						return substituteVariables(this.Instructions["Recommendations"]
+												 , {settings: values2String("`n", setupEditor.getSettings()*)})
+					}
+					catch Any as exception {
+						logError(exception)
+					}
+				}
+		}
+
+		return false
+	}
+
+	getInstructions() {
+		return choose(collect(this.Instructions[true], ObjBindMethod(this, "getInstruction"))
+					, (instruction) => (instruction && (Trim(instruction) != "")))
+	}
+
+	getTools() {
+		changeSetting(arguments*) {
+			local setupEditor, name, increment
+
+			try {
+				name := arguments[1]
+				increment := arguments[2]
+
+				setupEditor := this.Workbench.SetupEditors[1]
+
+				loop Abs(increment)
+					if (increment < 0)
+						setupEditor.decreaseSetting(name)
+					else
+						setupEditor.increaseSetting(name)
+			}
+			catch Any as exception {
+				logError(exception)
+			}
+		}
+
+		if (this.Mode = "Recommendations")
+			return [LLMTool.Function("change_setting"
+								   , "Call this function to change the value of a setting in the car setup."
+								   , [LLMTool.Function.Parameter("name"
+															   , "The name of the setting that should be altered."
+															   , "String")
+									, LLMTool.Function.Parameter("increment"
+															   , "The relative increment to the setting by clicks. +1 corresponds to an increase of one click and -1 to the decrease of the setting by one click."
+															   , "Integer")]
+								   , changeSetting)]
+		else
+			return []
+	}
+
+	startInteraction() {
+		local service := this.Options["Setup Engineer.Service"]
+		local ignore, instruction
+
+		if service {
+			service := string2Values("|", service, 3)
+
+			if !inList(this.Providers, service[1])
+				throw "Unsupported service detected in SetupEngineer.startInteraction..."
+
+			try {
+				if (!this.Options["Setup Engineer.Model"] || (Trim(this.Options["Setup Engineer.Model"]) = ""))
+					throw "Empty model detected in SetupEngineer.startInteraction..."
+				else if (service[1] = "LLM Runtime")
+					this.iConnector := LLMConnector.LLMRuntimeConnector(this, this.Options["Setup Engineer.Model"]
+																			, this.Options["Setup Engineer.GPULayers"])
+				else {
+					try {
+						this.iConnector := LLMConnector.%StrReplace(service[1], A_Space, "")%Connector(this, this.Options["Setup Engineer.Model"])
+					}
+					catch Any {
+						this.iConnector := %StrReplace(service[1], A_Space, "")%Connector(this, this.Options["Setup Engineer.Model"])
+					}
+
+					this.Connector.Connect(service[2], service[3])
+
+					this.connectorState("Active")
+				}
+			}
+			catch Any as exception {
+				logError(exception)
+
+				this.iConnector := false
+
+				this.connectorState("Error", "Configuration")
+
+				return false
+			}
+
+			this.Connector.MaxTokens := this.Options["Setup Engineer.MaxTokens"]
+			this.Connector.Temperature := this.Options["Setup Engineer.Temperature"]
+
+			this.Connector.History := false
+			this.Connector.MaxHistory := 0
+
+			for ignore, instruction in this.Instructions[true] {
+				this.Instructions[instruction] := this.Options["Setup Engineer.Instructions." . instruction]
+
+				if !this.Instructions[instruction]
+					this.Instructions[instruction] := ""
+			}
+
+			return true
+		}
+		else {
+			this.connectorState("Error", "Configuration")
+
+			return false
+		}
+	}
+
+	stopInteraction() {
+		if this.Connector {
+			this.Connector.Disconnect()
+
+			this.iConnector := false
+		}
+	}
+
+	restartInteraction() {
+		if this.Connector {
+			this.Connector.Restart()
+
+			this.Connector.History := false
+		}
+	}
+
+	createTelemetry(telemetry) {
+		local result := ""
+		local columns := []
+		local data := []
+		local lastDistance := 0
+		local lastTime := 0
+		local columnNr, distance, time, count, skip
+
+		loop telemetry.Data[1].Length {
+			columnNr := A_Index
+
+			for ignore, channel in kTelemetryChannels
+				if ((channel.Indices.Length = 1) && (channel.Indices[1] == columnNr)) {
+					columns.Push(channel.Name . " (" . channel.Units[1] . ")")
+
+					break
+				}
+
+			if (columns.Length < columnNr)
+				columns.Push("Unknown")
+		}
+
+		loop telemetry.Data.Length {
+			time := telemetry.getValue(A_Index, "Time")
+			distance := telemetry.getValue(A_Index, "Distance")
+
+			if ((lastTime != time) || (lastDistance != distance)) {
+				data.Push(values2String(";", telemetry.Data[A_Index]*))
+
+				lastTime := time
+				lastDistance := distance
+			}
+		}
+
+		result := (values2String(";", columns*) . "`n")
+
+		skip := Round(data.Length / this.Resolution)
+
+		if skip {
+			count := 0
+
+			loop data.Length {
+				if (++count != 1) {
+					if (count > skip)
+						count := 0
+
+					continue
+				}
+
+				result .= (data[A_Index] . "`n")
+			}
+		}
+		else
+			loop data.Length
+				result .= (data[A_Index] . "`n")
+
+		return result
+	}
+
+	showAnalysis(content, analysis := false) {
+		local height := (this.AnalysisViewer.getHeight() - 4)
+		local html := ""
+		local document, height, ignore, tag
+
+		getCSS() {
+			local script
+
+			script := "
+			(
+				table, th, td {
+					border-collapse: collapse;
+					padding: .3em .5em;
+				}
+
+				th, td {
+					color: #%textColor%;
+				}
+
+				th, caption {
+					font-size: 12px;
+					background-color: #%headerBackColor%;
+					color: #%textColor%;
+					border: thin solid #%frameColor%;
+				}
+
+				td {
+					font-size: 12px;
+					border-left: thin solid #%frameColor%;
+					border-right: thin solid #%frameColor%;
+				}
+
+				tfoot {
+					border-bottom: thin solid #%frameColor%;
+				}
+
+				caption {
+					font-size: 1.5em;
+					border-radius: .5em .5em 0 0;
+					padding: .5em 0 0 0
+				}
+
+				table tbody tr:nth-child(even) {
+					background-color: #%evenRowColor%;
+				}
+
+				table tbody tr:nth-child(odd) {
+					background-color: #%evenRowColor%;
+				}
+
+				h1, h2, h3, h4, h5, p, ul, ol {
+					font-family: Arial;
+					color: #%textColor%;
+				}
+			)"
+
+			return substituteVariables(script, {evenRowColor: this.Window.Theme.ListBackColor["EvenRow"]
+											  , oddRowColor: this.Window.Theme.ListBackColor["OddRow"]
+											  , altBackColor: this.Window.AltBackColor, backColor: this.Window.BackColor
+											  , textColor: this.Window.Theme.TextColor
+											  , headerBackColor: this.Window.Theme.TableColor["Header"], frameColor: this.Window.Theme.TableColor["Frame"]})
+		}
+
+		this.iContent := content
+
+		if !analysis {
+			width := this.AnalysisViewer.getWidth() - 10
+
+			document := "
+			(
+			<html>
+				<meta charset='utf-8'>
+				<head>
+				</head>
+				<body style='background-color: #%backColor%' style='overflow: auto' leftmargin='0' topmargin='0' rightmargin='0' bottommargin='0'>
+					<style> table, p, div { color: #%fontColor% } </style>
+					<div style="width: %width%px; height: %height%px; text-align: center">
+						<p style="font-family: Arial; font-size: 16px; height: %height%px; margin: auto">
+							<br>
+							<br>
+							<br>
+							<br>
+							%html%
+						</p>
+					</div>
+				</body>
+			</html>
+			)"
+		}
+		else {
+			width := this.AnalysisViewer.getWidth() - 20
+
+			document := "
+			(
+			<html>
+				<meta charset='utf-8'>
+				<head>
+					<style>
+						.headerStyle { height: 25; font-size: 11px; font-weight: 500; background-color: #%headerBackColor%; }
+						.rowStyle { font-size: 11px; color: #%fontColor%; background-color: #%evenRowBackColor%; }
+						.oddRowStyle { font-size: 11px; color: #%fontColor%; background-color: #%oddRowBackColor%; }
+						%CSS%
+					</style>
+				</head>
+				<body style='background-color: #%backColor%' style='overflow: auto' leftmargin='0' topmargin='0' rightmargin='0' bottommargin='0'>
+					<div style="width: %width%px; font-family: Arial; font-size: 12px">
+						<p style="font-family: Arial; font-size: 12px; margin: auto">
+							%html%
+						</p>
+					</div>
+				</body>
+			</html>
+			)"
+		}
+
+		content := StrReplace(content, "%", "\%")
+
+		for ignore, tag in ["<html>", "</html>", "<body>", "</body>"]
+			content := StrReplace(content, tag, "")
+
+		this.AnalysisViewer.document.open()
+		this.AnalysisViewer.document.write(substituteVariables(document
+															 , {fontColor: this.Window.Theme.TextColor
+															  , headerBackColor: this.Window.Theme.ListBackColor["Header"]
+															  , evenRowBackColor: this.Window.Theme.ListBackColor["EvenRow"]
+															  , oddRowBackColor: this.Window.Theme.ListBackColor["OddRow"]
+															  , CSS: getCSS()
+															  , width: width, height: height, html: content
+															  , backColor: this.Window.AltBackColor}))
+		this.AnalysisViewer.document.close()
+	}
+
+	analyzeTelemetry() {
+		local selected := this.TelemetriesListView.GetNext(0)
+		local analysis := false
+		local fileName
+
+		if selected
+			selected := this.TelemetriesListView.GetText(selected)
+
+		if selected {
+			fileName := (kTempDirectory . "Setup Workbench\Telemetry\" . selected . ".telemetry")
+
+			if !FileExist(fileName)
+				fileName := (kTempDirectory . "Setup Workbench\Telemetry\Imported\" . selected . ".telemetry")
+
+			this.Window.Block()
+
+			try {
+				withBlockedWindows(() {
+					withTask(ProgressTask(StrReplace(translate("Analyzing lap..."), "...", "")), () {
+						local driver := false
+						local lapTime := false
+						local sectorTimes := false
+						local hasLapTime := true
+						local telemetry
+
+						if FileExist(fileName . ".info") {
+							info := readMultiMap(fileName . ".info")
+
+							driver := getMultiMapValue(info, "Lap", "Driver"
+														   , getMultiMapValue(info, "Info", "Driver", false))
+
+							lapTime := getMultiMapValue(info, "Lap", "LapTime"
+															, getMultiMapValue(info, "Info", "LapTime", false))
+							sectorTimes := getMultiMapValue(info, "Lap", "SectorTimes"
+																, getMultiMapValue(info, "Info", "SectorTimes", false))
+
+							if sectorTimes
+								sectorTimes := string2Values(",", sectorTimes)
+						}
+
+						if !driver
+							driver := SessionDatabase.getName("Creator")
+
+						if !lapTime {
+							lapTime := translate("-")
+
+							hasLapTime := false
+						}
+
+						if !sectorTimes
+							sectorTimes := ["-"]
+
+						telemetry := TelemetryAnalyzer(this.Simulator
+													 , this.Track).createTelemetry(false, fileName
+																				 , driver, lapTime, sectorTimes)
+
+						if (!hasLapTime && telemetry && telemetry.Data) {
+							lapTime := telemetry.getValue(telemetry.Data.Length, "Time", kUndefined)
+
+							if (lapTime != kUndefined)
+								telemetry := TelemetryAnalyzer(this.Simulator
+															 , this.Track).createTelemetry(false, fileName
+																						 , driver, lapTime, sectorTimes)
+						}
+
+						analysis := this.createAnalysis(telemetry)
+					})
+				})
+
+				if analysis {
+					this.iAnalysis := analysis
+
+					this.showAnalysis(analysis, true)
+				}
+				else
+					this.showAnalysis(translate("No detailed analysis available."), false)
+			}
+			finally {
+				this.Window.Unblock()
+			}
+		}
+	}
+
+	recommendSetup() {
+		local setupEditor
+
+		try {
+			setupEditor := this.Workbench.SetupEditors[1]
+
+			withBlockedWindows(() {
+				withTask(ProgressTask(StrReplace(translate("Applying recommendations..."), "...", "")), () {
+					this.applyRecommendations(this.Analysis)
+				})
+			})
+
+			WinActivate(setupEditor.Window)
+		}
+		catch Any as exception {
+			logError(exception)
+		}
+	}
+
+	createAnalysis(telemetry) {
+		local answer := false
+
+		static report := true
+
+		try {
+			if (this.Connector || this.startInteraction()) {
+				this.iMode := "Analysis"
+
+				answer := this.Connector.Ask(this.createTelemetry(telemetry))
+
+				if answer
+					report := true
+			}
+		}
+		catch Any as exception {
+			if report {
+				report := false
+
+				logError(exception, true)
+
+				logMessage(kLogCritical, substituteVariables(translate("Cannot connect to GPT service (%service%) - please check the configuration")
+														   , {service: this.Options["Setup Engineer.Service"]}))
+
+				if !kSilentMode
+					showMessage(substituteVariables(translate("Cannot connect to GPT service (%service%) - please check the configuration...")
+												  , {service: this.Options["Setup Engineer.Service"]})
+							  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+			}
+		}
+
+		if answer
+			try {
+				FileAppend("###------###------###"
+						 . "Type=Analysis`n"
+						 . "Lap=" . telemetry.Name . "`n"
+						 . "Lap Time=" . lapTimeDisplayValue(telemetry.LapTime) . "`n"
+						 . "###++++++###++++++###"
+						 . answer, this.Workbench.Logbook, "UTF-16")
+			}
+			catch Any as exception {
+				logError(exception)
+			}
+
+		return answer
+	}
+
+	applyRecommendations(analysis) {
+		local calls
+
+		static report := true
+
+		printChange(call) {
+			local arguments := call[2].Clone()
+
+			loop arguments.Length {
+				if !arguments.Has(A_Index)
+					arguments[A_Index] := ""
+
+				if ((A_Index = 1) && arguments.Has(A_Index))
+					arguments[1] := this.Workbench.getLabel(arguments[1])
+			}
+
+			return values2String("=", arguments*)
+		}
+
+		try {
+			if (this.Connector || this.startInteraction()) {
+				this.iMode := "Recommendations"
+
+				this.Connector.Ask(analysis, , , &calls := [])
+
+				try {
+					FileAppend("###------###------###"
+							 . "Type=Recommendations`n"
+							 . "###++++++###++++++###"
+							 . values2String("`n", collect(calls, printChange)*)
+							 , this.Workbench.Logbook, "UTF-16")
+				}
+				catch Any as exception {
+					logError(exception, true)
+				}
+			}
+		}
+		catch Any as exception {
+			if report {
+				report := false
+
+				logError(exception, true)
+
+				logMessage(kLogCritical, substituteVariables(translate("Cannot connect to GPT service (%service%) - please check the configuration")
+														   , {service: this.Options["Setup Engineer.Service"]}))
+
+				if !kSilentMode
+					showMessage(substituteVariables(translate("Cannot connect to GPT service (%service%) - please check the configuration...")
+												  , {service: this.Options["Setup Engineer.Service"]})
+							  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+			}
+		}
+	}
+}
+
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+;;; WorkbenchSettingsEditor                                                 ;;;
+;;;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -;;;
+
+class WorkbenchSettingsEditor extends ConfiguratorPanel {
+	iSetupWorkbench := false
+
+	iResult := false
+
+	iWindow := false
+
+	iProviderConfigurations := CaseInsenseMap()
+	iCurrentProvider := false
+
+	iInstructions := newMultiMap()
+	iTemplates := false
+
+	SetupWorkbench {
+		Get {
+			return this.iSetupWorkbench
+		}
+	}
+
+	Window {
+		Get {
+			return this.iWindow
+		}
+	}
+
+	Providers {
+		Get {
+			return LLMConnector.Providers
+		}
+	}
+
+	Models[provider] {
+		Get {
+			try {
+				return LLMConnector.%StrReplace(provider, A_Space, "")%Connector.Models
+			}
+			catch Any {
+				try {
+					return %StrReplace(provider, A_Space, "")%Connector.Models
+				}
+				catch Any {
+					return []
+				}
+			}
+		}
+	}
+
+	Instructions[qualified := true] {
+		Get {
+			if qualified
+				return ["Instructions.Character", "Instructions.Simulation", "Instructions.Geometry"
+					  , "Instructions.Handling", "Instructions.Analysis", "Instructions.Recommendations"]
+			else
+				return ["Character", "Simulation", "Geometry", "Handling", "Analysis", "Recommendations"]
+		}
+	}
+
+	Templates[language?] {
+		Get {
+			local templates, fileName, code, ignore
+
+			if !this.iTemplates {
+				templates := CaseInsenseMap()
+
+				for code, ignore in availableLanguages() {
+					fileName := getFileName("Setup Workbench.instructions." . code, kResourcesDirectory . "Instructions\")
+
+					if FileExist(fileName) {
+						templates[code] := readMultiMap(fileName)
+
+						fileName := getFileName("Setup Workbench.instructions." . code, kUserHomeDirectory . "Instructions\")
+
+						if FileExist(fileName)
+							addMultiMapValues(templates[code], readMultiMap(fileName))
+					}
+					else {
+						fileName := getFileName("Setup Workbench.instructions." . code, kUserHomeDirectory . "Instructions\")
+
+						if FileExist(fileName)
+							templates[code] := readMultiMap(fileName)
+					}
+				}
+
+				this.iTemplates := templates
+			}
+
+			return (isSet(language) ? this.iTemplates[language] : this.iTemplates)
+		}
+	}
+
+	__New(setupWorkbench, configuration := false) {
+		this.iSetupWorkbench := setupWorkbench
+
+		super.__New(configuration)
+	}
+
+	createGui(configuration) {
+		local choices := []
+		local chosen := 0
+		local x := 8
+		local width := 460
+		local editorGui, x0, x1, x2, w1, w2, x3, w3, x4, w4
+		local x0, x1, x2, x3, x4, x5, x6, w1, w2, w3, w4, lineX, lineW, button
+
+		validateTemperature(field, operation, value?) {
+			if (operation = "Validate")
+				return (isInteger(value) && (value >= 0) && (value <= 100))
+		}
+
+		validateInteger(minValue, field, operation, value?) {
+			if (operation = "Validate")
+				return (isInteger(value) && (value >= minValue))
+		}
+
+		validatePercentage(fieldName, field, operation, value?) {
+			if (operation = "Validate")
+				try {
+					return (isInteger(value) && (value >= 0) && (value <= 100))
+				}
+				finally {
+					Task.startTask(() => this.updateState(), 100)
+				}
+		}
+
+		validateTokens(fieldName, field, operation, value?) {
+			if (operation = "Validate")
+				return (isInteger(value) && (value >= 32))
+		}
+
+		chooseProvider(*) {
+			this.saveProviderConfiguration()
+
+			this.loadProviderConfiguration(editorGui["providerDropDown"].Text)
+
+			this.updateState()
+		}
+
+		chooseLogbookPath(*) {
+			local directory
+
+			editorGui.Opt("+OwnDialogs")
+
+			OnMessage(0x44, translateSelectCancelButtons)
+			directory := withBlockedWindows(FileSelect, "D1", editorGui["logbookPathEdit"].Text, translate("Select Logbook Folder..."))
+			OnMessage(0x44, translateSelectCancelButtons, 0)
+
+			if (directory != "")
+				editorGui["logbookPathEdit"].Text := directory
+		}
+
+		chooseModelPath(field, *) {
+			local fileName
+
+			editorGui.Opt("+OwnDialogs")
+
+			OnMessage(0x44, translateSelectCancelButtons)
+			fileName := withBlockedWindows(FileSelect, 1, "", translate("Select model file..."), "GGUF (*.GGUF)")
+			OnMessage(0x44, translateSelectCancelButtons, 0)
+
+			if (fileName != "")
+				editorGui[field].Text := fileName
+		}
+
+		chooseInstructions(*) {
+			local value := this.Value[this.Instructions[true][editorGui["instructionsDropDown"].Value]]
+
+			editorGui["instructionsEdit"].Value := ((value != false) ? value : "")
+
+			this.updateState()
+		}
+
+		updateInstructions(*) {
+			this.Value[this.Instructions[true][editorGui["instructionsDropDown"].Value]] := ((Trim(editorGui["instructionsEdit"].Value) != "") ? editorGui["instructionsEdit"].Value : false)
+		}
+
+		reloadInstructions(*) {
+			local chosenSetting := this.Instructions[true][editorGui["instructionsDropDown"].Value]
+			local setting, oldValue
+
+			for ignore, setting in (GetKeyState("Ctrl") ? this.Instructions[true] : [chosenSetting]) {
+				oldValue := this.Value[setting]
+
+				this.Value[setting] := ""
+
+				if (this.iCurrentProvider = "LLM Runtime")
+					this.initializeInstructions(this.iCurrentProvider, editorGui["llmRTModelEdit"].Text, setting, true)
+				else
+					this.initializeInstructions(this.iCurrentProvider, editorGui["modelDropDown"].Text, setting, true)
+
+				if (setting = chosenSetting)
+					editorGui["instructionsEdit"].Value := ((this.Value[setting] != false) ? this.Value[setting] : "")
+			}
+		}
+
+		loadModels(*) {
+			local provider := this.iCurrentProvider
+			local configuration
+
+			if provider {
+				configuration := this.iProviderConfigurations[provider]
+
+				this.loadModels(provider, this.Control["serviceURLEdit"].Text
+										, this.Control["serviceKeyEdit"].Text
+										, this.Control[(provider = "LLM Runtime") ? ("modelEdit")
+																				  : ("modelDropDown")].Text)
+			}
+			else
+				this.loadModels(false)
+		}
+
+		editorGui := Window({Descriptor: "Setup Workbench.Settings Editor", Options: "0x400000"})
+
+		this.iWindow := editorGui
+
+		editorGui.SetFont("Bold", "Arial")
+
+		editorGui.Add("Text", "w468 H:Center Center", translate("Modular Simulator Controller System")).OnEvent("Click", moveByMouse.Bind(editorGui, "Setup Workbench.Settings Editor"))
+
+		editorGui.SetFont("Norm", "Arial")
+
+		editorGui.Add("Documentation", "x158 YP+20 w168 H:Center Center", translate("Settings")
+					, "https://github.com/SeriousOldMan/Simulator-Controller/wiki/Setup-Workbench#settings")
+
+		editorGui.SetFont("Norm", "Arial")
+
+		editorGui.Add("Text", "x8 yp+30 w468 W:Grow 0x10")
+
+		x0 := x + 16
+		x1 := x + 132
+		x2 := x + 172
+		x3 := x + 176
+
+		w1 := width - (x1 - x + 8)
+		w3 := width - (x3 - x + 16) + 10
+
+		w2 := w1 - 24
+		x4 := x1 + w2 + 1
+
+		w4 := w1 - 24
+		x6 := x1 + w4 + 1
+
+		editorGui.Add("Text", "x" . (x + 8) . " yp+10 w120 h23 +0x200", translate("Logbook Folder"))
+		editorGui.Add("Edit", "x" . x1 . " yp w" . w2 . " h21 W:Grow VlogbookPathEdit")
+		editorGui.Add("Button", "x" . x4 . " yp-1 w23 h23 X:Move", translate("...")).OnEvent("Click", chooseLogbookPath)
+
+		editorGui.SetFont("Norm", "Arial")
+		editorGui.SetFont("Bold Italic", "Arial")
+		editorGui.Add("Text", "x8 yp+35 w468 h23 Center", translate("Setup Engineer"))
+		editorGui.SetFont("Norm", "Arial")
+
+		editorGui.SetFont("Italic", "Arial")
+		editorGui.Add("Text", "x" . (x + 8) . " yp+19 w100 h23", translate("Service "))
+		editorGui.Add("Text", "x120 yp+7 w" . (width + 8 - 120) . " 0x10 W:Grow")
+		editorGui.SetFont("Norm", "Arial")
+
+		editorGui.Add("Text", "x" . x0 . " yp+20 w110 h23 +0x200 vproviderLabel", translate("Provider / URL"))
+
+		editorGui.Add("DropDownList", "x" . x1 . " yp w100 Choose1 vproviderDropDown", concatenate([translate("Disabled")], this.Providers)).OnEvent("Change", chooseProvider)
+
+		editorGui.Add("Edit", "x" . (x1 + 102) . " yp w" . (w1 - 102) . " h23 vserviceURLEdit").OnEvent("Change", loadModels)
+
+		editorGui.Add("Text", "x" . x0 . " yp+24 w110 h23 +0x200 Section vserviceKeyLabel", translate("Service Key"))
+		editorGui.Add("Edit", "x" . x1 . " yp w" . w1 . " h23 Password vserviceKeyEdit").OnEvent("Change", loadModels)
+
+		editorGui.Add("Text", "x" . x0 . " yp+30 w110 h23 +0x200 vmodelLabel", translate("Model / # Tokens"))
+		editorGui.Add("ComboBox", "x" . x1 . " yp w" . (w1 - 64) . " vmodelDropDown")
+		editorGui.Add("Edit", "x" . (x1 + (w1 - 60)) . " yp-1 w60 h23 Number vmaxTokensEdit").OnValidate("LoseFocus", validateTokens.Bind("maxTokensEdit"))
+		editorGui.Add("UpDown", "x" . (x1 + (w1 - 60)) . " yp w60 h23 0x80 Range32-131072 vmaxTokensRange")
+
+		editorGui.Add("Text", "x" . x0 . " ys+6 w110 h23 +0x200 vllmRTModelLabel Hidden", translate("Model"))
+		editorGui.Add("Edit", "x" . x1 . " yp w" . (w1 - 24) . " vllmRTModelEdit Hidden")
+		editorGui.Add("Button", "x" . (x1 + (w1 - 23)) . " yp h23 w23 vllmRTModelButton Hidden", translate("...")).OnEvent("Click", chooseModelPath.Bind("llmRTModelEdit"))
+
+		editorGui.Add("Text", "x" . x0 . " yp+24 w120 h23 +0x200 vllmRTTokensLabel Hidden", translate("# Tokens / # GPULayers"))
+		editorGui.Add("Edit", "x" . x1 . " yp-1 w60 h23 Number vllmRTMaxTokensEdit Hidden").OnValidate("LoseFocus", validateTokens.Bind("llmRTMaxTokensEdit"))
+		editorGui.Add("UpDown", "x" . x1 . " yp w60 h23 0x80 Range32-131072 vllmRTMaxTokensRange Hidden")
+		editorGui.Add("Edit", "x" . (x1 + 62) . " yp w60 h23 Number Limit2 vllmRTGPULayersEdit Hidden").OnValidate("LoseFocus", validateInteger.Bind(0))
+		editorGui.Add("UpDown", "x" . (x1 + 62) . " yp w60 h23 Range0-99 vllmRTGPULayersRange Hidden")
+
+		editorGui.SetFont("Italic", "Arial")
+		editorGui.Add("Text", "x" . (x + 8) . " yp+30 w100 h23", translate("Personality"))
+		editorGui.Add("Text", "x120 yp+7 w" . (width + 8 - 120) . " 0x10 W:Grow")
+		editorGui.SetFont("Norm", "Arial")
+
+		editorGui.Add("Text", "x" . (x + 16) . " yp+20 w112 h23 +0x200", translate("Creativity"))
+		editorGui.Add("Edit", "x" . x1 . " yp w60 Number Limit3 vtemperatureEdit").OnValidate("LoseFocus", validateTemperature)
+		editorGui.Add("UpDown", "x" . x1 . " yp w60 h23 Range0-100")
+		editorGui.Add("Text", "x" . (x1 + 65) . " yp w100 h23 +0x200", translate("%"))
+
+		editorGui.Add("Text", "x" . (x + 16) . " yp+24 w112 h23 +0x200", translate("Instructions"))
+
+		editorGui.Add("DropDownList", "x" . x1 . " yp w180 vinstructionsDropDown", collect(this.Instructions[false], translate)).OnEvent("Change", chooseInstructions)
+
+		height := 190
+
+		editorGui.Add("Edit", "x" . x1 . " yp+24 w" . w1 . " h" . height . " Section Multi H:Grow W:Grow vinstructionsEdit").OnEvent("Change", updateInstructions)
+
+		button := editorGui.Add("Button", "x" . (x1 + w1 - 23) . " yp-25 w23 h23 X:Move")
+		button.OnEvent("Click", reloadInstructions)
+		setButtonIcon(button, kIconsDirectory . "Renew.ico", 1)
+
+		editorGui.Add("Text", "x8 ys+200 w468 W:Grow 0x10")
+
+		editorGui.Add("Button", "x160 yp+10 w80 h23 Default", translate("Ok")).OnEvent("Click", (*) => this.iResult := kOk)
+		editorGui.Add("Button", "x246 yp w80 h23", translate("&Cancel")).OnEvent("Click", (*) => this.iResult := kCancel)
+	}
+
+	loadModels(provider, serviceURL, serviceKey, model) {
+		local connector, index, models
+
+		if !model
+			model := ""
+
+		if (provider = "LLM Runtime")
+			this.Control["llmRTModelEdit"].Text := model
+		else {
+			if provider {
+				try {
+					connector := LLMConnector.%StrReplace(provider, A_Space, "")%Connector(this, model)
+
+					if isInstance(connector, LLMConnector.APIConnector) {
+						connector.Connect(serviceURL, serviceKey)
+
+						models := connector.Models
+					}
+					else
+						models := this.Models[provider]
+				}
+				catch Any as exception {
+					models := this.Models[provider]
+				}
+			}
+			else
+				models := []
+
+			if model {
+				index := inList(models, model)
+
+				if !index {
+					index := inList(models, StrReplace(model, A_Space, "-"))
+
+					if index
+						model := models[index]
+				}
+
+				if !index
+					models := concatenate(models, [model])
+			}
+
+			this.Control["modelDropDown"].Delete()
+			this.Control["modelDropDown"].Add(models)
+
+			if model
+				this.Control["modelDropDown"].Choose(inList(models, model))
+			else
+				this.Control["modelDropDown"].Choose((models.Length > 0) ? 1 : 0)
+		}
+	}
+
+	initializeInstructions(provider, model, setting, edit := false) {
+		local providerConfiguration := this.iProviderConfigurations[provider]
+		local language, value, instructions, configuration, thePlugin, translated
+
+		value := (edit ? this.Value[setting] : providerConfiguration[setting])
+
+		if (value = "") {
+			language := getLanguage()
+
+			if edit
+				this.Value[setting] := getMultiMapValue(this.Templates[this.Templates.Has(language) ? language : "EN"], "Instructions", StrReplace(setting, "Instructions.", ""))
+			else
+				providerConfiguration[setting] := getMultiMapValue(this.Templates[this.Templates.Has(language) ? language : "EN"], "Instructions", StrReplace(setting, "Instructions.", ""))
+		}
+	}
+
+	normalizeConfiguration(configuration) {
+		local language, ignore, provider, setting, providerConfiguration, template
+
+		language := getLanguage()
+
+		for ignore, provider in this.Providers {
+			providerConfiguration := this.iProviderConfigurations[provider]
+
+			for ignore, setting in this.Instructions {
+				template := this.Templates[this.Templates.Has(language) ? language : "EN"]
+
+				if (getMultiMapValue(configuration, "Setup Engineer Personality", provider . "." . setting)
+				  = getMultiMapValue(template, "Instructions", StrReplace(setting, "Instructions.", "")))
+					removeMultiMapValue(configuration, "Setup Engineer Personality", provider . "." . setting)
+
+				if (provider = this.iCurrentProvider)
+					if (getMultiMapValue(configuration, "Setup Engineer Personality", setting)
+					  = getMultiMapValue(template, "Instructions", StrReplace(setting, "Instructions.", "")))
+						removeMultiMapValue(configuration, "Setup Engineer Personality", setting)
+			}
+		}
+	}
+
+	loadFromConfiguration(configuration) {
+		local service, ignore, provider, setting, providerConfiguration
+		local serviceURL, serviceKey, model
+
+		static defaults := CaseInsenseWeakMap("ServiceURL", false, "Model", "", "MaxTokens", 8192
+											, "Temperature", 0.5, "GPULayers", 0)
+
+		super.loadFromConfiguration(configuration)
+
+		this.Value["LogbookPath"] := getMultiMapValue(configuration, "Setup Workbench", "Logbook"
+													, getMultiMapValue(configuration
+																	 , "Setup Workbench", "Diary", ""))
+
+		service := getMultiMapValue(configuration, "Setup Engineer Service", "Service", false)
+
+		if !service
+			this.iCurrentProvider := "OpenAI"
+		else
+			this.iCurrentProvider := string2Values("|", service)[1]
+
+		for ignore, provider in this.Providers {
+			providerConfiguration := CaseInsenseMap()
+
+			for ignore, setting in ["ServiceURL", "ServiceKey", "Model", "MaxTokens"]
+				providerConfiguration[setting] := getMultiMapValue(configuration, "Setup Engineer Service", provider . "." . setting, defaults[setting])
+
+			if (!providerConfiguration["MaxTokens"] || (Trim(providerConfiguration["MaxTokens"]) = ""))
+				providerConfiguration["MaxTokens"] := 2048
+
+			if (provider = "LLM Runtime")
+				providerConfiguration["GPULayers"] := getMultiMapValue(configuration, "Setup Engineer Service", provider . ".GPULayers", defaults["GPULayers"])
+
+			try {
+				try {
+					LLMConnector.%StrReplace(provider, A_Space, "")%Connector.GetDefaults(&serviceURL, &serviceKey, &model)
+				}
+				catch Any {
+					%StrReplace(provider, A_Space, "")%Connector.GetDefaults(&serviceURL, &serviceKey, &model)
+				}
+			}
+			catch Any {
+				serviceURL := ""
+				serviceKey := ""
+				model := ""
+			}
+
+			if !providerConfiguration["ServiceURL"]
+				providerConfiguration["ServiceURL"] := serviceURL
+
+			if !providerConfiguration["ServiceKey"]
+				providerConfiguration["ServiceKey"] := serviceKey
+
+			if (providerConfiguration["Model"] = "")
+				providerConfiguration["Model"] := model
+
+			for ignore, setting in concatenate(["Temperature"], this.Instructions)
+				if getMultiMapValue(configuration, "Setup Engineer Personality", provider . "." . setting . ".Active", true)
+					providerConfiguration[setting] := getMultiMapValue(configuration, "Setup Engineer Personality", provider . "." . setting, defaults[setting])
+				else
+					providerConfiguration[setting] := false
+
+			this.iProviderConfigurations[provider] := providerConfiguration
+
+			for ignore, setting in this.Instructions
+				this.initializeInstructions(provider, providerConfiguration["Model"], setting)
+		}
+	}
+
+	saveToConfiguration(configuration) {
+		local provider, value
+
+		super.saveToConfiguration(configuration)
+
+		value := this.Control["logbookPathEdit"].Text
+
+		setMultiMapValue(configuration, "Setup Workbench", "Logbook", (Trim(value) != "") ? Trim(value) : false)
+
+		this.saveProviderConfiguration()
+
+		for ignore, provider in this.Providers {
+			providerConfiguration := this.iProviderConfigurations[provider]
+
+			if (!providerConfiguration["MaxTokens"] || (Trim(providerConfiguration["MaxTokens"]) = ""))
+				providerConfiguration["MaxTokens"] := 8192
+
+			for ignore, setting in ["ServiceURL", "ServiceKey", "Model", "MaxTokens"]
+				setMultiMapValue(configuration, "Setup Engineer Service", provider . "." . setting, providerConfiguration[setting])
+
+			if (provider = "LLM Runtime") {
+				setMultiMapValue(configuration, "Setup Engineer Service", provider . ".GPULayers", providerConfiguration["GPULayers"])
+
+				if (provider = this.iCurrentProvider)
+					setMultiMapValue(configuration, "Setup Engineer Service", "GPULayers", providerConfiguration["GPULayers"])
+			}
+
+			for ignore, setting in ["Temperature"] {
+				setMultiMapValue(configuration, "Setup Engineer Personality", provider . "." . setting, providerConfiguration[setting])
+
+				if (provider = this.iCurrentProvider)
+					setMultiMapValue(configuration, "Setup Engineer Personality", setting, providerConfiguration[setting])
+			}
+
+			for ignore, setting in this.Instructions {
+				setMultiMapValue(configuration, "Setup Engineer Personality", provider . "." . setting, (providerConfiguration[setting] != false) ? providerConfiguration[setting] : "")
+				setMultiMapValue(configuration, "Setup Engineer Personality", provider . "." . setting . ".Active", (Trim(providerConfiguration[setting]) != false))
+
+				if (provider = this.iCurrentProvider)
+					setMultiMapValue(configuration, "Setup Engineer Personality", setting, providerConfiguration[setting])
+			}
+		}
+
+		provider := this.iCurrentProvider
+		providerConfiguration := this.iProviderConfigurations[provider]
+
+		for ignore, setting in ["Model", "MaxTokens"]
+			setMultiMapValue(configuration, "Setup Engineer Service", setting, providerConfiguration[setting])
+
+		if (provider = "LLM Runtime") {
+			setMultiMapValue(configuration, "Setup Engineer Service", "Service", provider)
+			setMultiMapValue(configuration, "Setup Engineer Service", "GPULayers", providerConfiguration["GPULayers"])
+		}
+		else
+			setMultiMapValue(configuration, "Setup Engineer Service", "Service"
+										  , values2String("|", provider, Trim(providerConfiguration["ServiceURL"])
+																	   , Trim(providerConfiguration["ServiceKey"])))
+
+		this.normalizeConfiguration(configuration)
+	}
+
+	loadProviderConfiguration(provider := false) {
+		local configuration
+
+		if !provider
+			provider := this.Control["providerDropDown"].Text
+
+		this.iCurrentProvider := provider
+
+		if !this.iProviderConfigurations.Has(this.iCurrentProvider) {
+			this.iCurrentProvider := this.Providers[1]
+
+			provider := this.iCurrentProvider
+		}
+
+		if provider {
+			this.Control["providerDropDown"].Delete()
+			this.Control["providerDropDown"].Add(this.Providers)
+			this.Control["providerDropDown"].Choose(inList(this.Providers, provider))
+
+			configuration := this.iProviderConfigurations[this.iCurrentProvider]
+
+			for ignore, setting in ["ServiceURL", "ServiceKey"]
+				this.Control[setting . "Edit"].Text := configuration[setting]
+
+			if (provider = "LLM Runtime") {
+				this.Control["llmRTGPULayersEdit"].Text := configuration["GPULayers"]
+				this.Control["llmRTMaxTokensEdit"].Text := configuration["MaxTokens"]
+			}
+			else
+				this.Control["maxTokensEdit"].Text := configuration["MaxTokens"]
+
+			if ((provider = "GPT4All") && (Trim(this.Control["serviceKeyEdit"].Text) = ""))
+				this.Control["serviceKeyEdit"].Text := "Any text will do the job"
+
+			if ((provider = "Ollama") && (Trim(this.Control["serviceKeyEdit"].Text) = ""))
+				this.Control["serviceKeyEdit"].Text := "Ollama"
+
+			this.Control["temperatureEdit"].Text := Round(configuration["Temperature"] * 100)
+
+			this.loadModels(this.iCurrentProvider, configuration["ServiceURL"]
+												 , configuration["ServiceKey"]
+												 , configuration["Model"])
+
+			this.Control["instructionsDropDown"].Choose(1)
+			this.Control["instructionsEdit"].Value := ((configuration["Instructions.Character"] != false) ? configuration["Instructions.Character"] : "")
+
+			for ignore, setting in this.Instructions
+				this.Value[setting] := configuration[setting]
+		}
+	}
+
+	saveProviderConfiguration() {
+		local providerConfiguration, value, ignore, setting
+
+		if this.iProviderConfigurations.Has(this.iCurrentProvider) {
+			providerConfiguration := this.iProviderConfigurations[this.iCurrentProvider]
+
+			providerConfiguration["ServiceURL"] := Trim(this.Control["serviceURLEdit"].Text)
+			providerConfiguration["ServiceKey"] := Trim(this.Control["serviceKeyEdit"].Text)
+
+			if (this.iCurrentProvider = "LLM Runtime")
+				value := this.Control["llmRTModelEdit"].Text
+			else
+				value := this.Control["modelDropDown"].Text
+
+			providerConfiguration["Model"] := ((Trim(value) != "") ? Trim(value) : false)
+
+			if (this.iCurrentProvider = "LLM Runtime")
+				providerConfiguration["MaxTokens"] := this.Control["llmRTMaxTokensEdit"].Text
+			else
+				providerConfiguration["MaxTokens"] := this.Control["maxTokensEdit"].Text
+
+			if (this.iCurrentProvider = "LLM Runtime")
+				providerConfiguration["GPULayers"] := this.Control["llmRTGPULayersEdit"].Text
+
+			providerConfiguration["Temperature"] := Round(this.Control["temperatureEdit"].Text / 100, 2)
+
+			for ignore, setting in this.Instructions
+				providerConfiguration[setting] := ((Trim(this.Value[setting]) != "") ? this.Value[setting] : false)
+		}
+	}
+
+	loadConfigurator(configuration, simulators := false) {
+		this.loadFromConfiguration(configuration)
+
+		this.Control["logbookPathEdit"].Text := (this.Value["LogbookPath"] ? this.Value["LogbookPath"] : "")
+
+		this.loadProviderConfiguration(this.iCurrentProvider)
+
+		this.updateState()
+	}
+
+	updateState() {
+		local ignore, field, llmRuntime
+
+		this.Control["serviceURLEdit"].Enabled := (this.Control["providerDropDown"].Text != "LLM Runtime")
+		this.Control["serviceKeyEdit"].Enabled := !inList(["GPT4All", "Ollama", "LLM Runtime"], this.Control["providerDropDown"].Text)
+
+		llmRuntime := (this.iCurrentProvider = "LLM Runtime")
+
+		for ignore, field in ["serviceKeyLabel", "serviceKeyEdit", "modelLabel", "modelDropDown"
+							, "serviceURLEdit", "maxTokensEdit", "maxTokensRange"]
+			this.Control[field].Visible := !llmRuntime
+
+		this.Control["providerLabel"].Text := (llmRuntime ? translate("Provider") : translate("Provider / URL"))
+
+		for ignore, field in ["llmRTModelLabel", "llmRTModelEdit", "llmRTModelButton"
+							, "llmRTTokensLabel", "llmRTMaxTokensEdit", "llmRTMaxTokensRange"
+							, "llmRTGPULayersEdit", "llmRTGPULayersRange"]
+			this.Control[field].Visible := llmRuntime
+	}
+
+	editSettings(owner := false) {
+		local window, x, y, w, h, configuration
+
+		this.createGui(this.Configuration)
+
+		window := this.Window
+
+		if owner
+			window.Opt("+Owner" . owner.Hwnd)
+
+		if getWindowPosition("Setup Workbench.Settings", &x, &y)
+			window.Show("x" . x . " y" . y)
+		else
+			window.Show()
+
+		this.loadConfigurator(this.Configuration)
+
+		loop
+			Sleep(200)
+		until this.iResult
+
+		try {
+			if (this.iResult = kOk) {
+				configuration := newMultiMap()
+
+				this.saveToConfiguration(configuration)
+
+				return configuration
+			}
+			else
+				return false
+		}
+		finally {
+			window.Destroy()
+		}
+	}
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Private Function Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+editNotes(browserOrCommand, arguments*) {
+	global kOk, kCancel
+
+	local x, y, w, h
+
+	static notesGui, result, notesEdit
+
+	if (browserOrCommand == kOk)
+		result := kOk
+	else if (browserOrCommand == kCancel)
+		result := kCancel
+	else {
+		result := false
+
+		notesGui := Window({Descriptor: "Setup Workbench.Logbook Browser.Notes", Resizeable: true, Options: "0x400000"}, translate("Logbook"))
+
+		notesGui.SetFont("Bold", "Arial")
+
+		notesGui.Add("Text", "w480 Center W:Grow", translate("Modular Simulator Controller System")).OnEvent("Click", moveByMouse.Bind(notesGui, "Setup Workbench.Logbook Browser.Notes"))
+
+		notesGui.SetFont("Norm", "Arial")
+
+		notesGui.Add("Documentation", "x183 YP+20 w130 Center W:Grow", translate("Notes")
+				   , "https://github.com/SeriousOldMan/Simulator-Controller/wiki/Setup-Workbench#logbook-browser")
+
+		notesGui.SetFont("Norm", "Arial")
+
+		choices := []
+
+		notesGui.Add("Edit", "x16 y60 w484 h200 Multi vnotesEdit W:Grow H:Grow", arguments[1])
+
+		notesGui.Add("Button", "x175 yp+210 w80 h23 Default Y:Move X:Move(0.5)", translate("Ok")).OnEvent("Click", editNotes.Bind(kOk))
+		notesGui.Add("Button", "x261 yp w80 h23 Y:Move X:Move(0.5)", translate("&Cancel")).OnEvent("Click", editNotes.Bind(kCancel))
+
+		notesGui.Opt("+Owner" . browserOrCommand.Window.Hwnd)
+
+		notesGui.Show("AutoSize Center")
+
+		if getWindowPosition("Setup Workbench.Logbook Browser.Notes", &x, &y)
+			notesGui.Show("x" . x . " y" . y)
+		else
+			notesGui.Show("AutoSize Center")
+
+		if getWindowSize("Setup Workbench.Logbook Browser.Notes", &w, &h)
+			notesGui.Resize("Initialize", w, h)
+
+		browserOrCommand.Window.Block()
+
+		try {
+			loop
+				Sleep(200)
+			until result
+		}
+		finally {
+			browserOrCommand.Window.Unblock()
+			browserOrCommand.Window.Show("NoActivate")
+		}
+
+		try {
+			if (result == kCancel)
+				return false
+			else if (result == kOk)
+				return notesGui["notesEdit"].Value
+		}
+		finally {
+			notesGui.Destroy()
+		}
+	}
+}
+
+lapTimeDisplayValue(lapTime) {
+	local seconds, fraction, minutes
+
+	if ((lapTime = "-") || isNull(lapTime))
+		return "-"
+	else if isNumber(lapTime)
+		return ((lapTime = 0) ? "-" : displayValue("Time", lapTime))
+	else
+		return lapTime
+}
+
+closeSetupWorkbench(*) {
+	if GetKeyState("Ctrl")
+		SetupWorkbench.Instance.saveIssues()
+
+	ExitApp(0)
+}
+
+factPath(path*) {
+	local result := ""
+
+	loop path.Length
+		result .= ((StrLen(result) > 0) ? ("." . path[A_Index]) : path[A_Index])
+
+	return result
+}
+
+startupSetupWorkbench() {
+	local icon := kIconsDirectory . "Setup.ico"
+	local simulator := getSetting("Setup Workbench", "Simulator", false)
+	local car := getSetting("Setup Workbench", "Car", false)
+	local track := getSetting("Setup Workbench", "Track", false)
+	local weather := false
+	local index := 1
+	local workbench, label
+
+	TraySetIcon(icon, "1")
+	A_IconTip := "Setup Workbench"
+
+	try {
+		while (index < A_Args.Length) {
+			switch A_Args[index], false {
+				case "-Simulator":
+					simulator := A_Args[index + 1]
+					index += 2
+				case "-Car":
+					car := A_Args[index + 1]
+					index += 2
+				case "-Track":
+					track := A_Args[index + 1]
+					index += 2
+				case "-Weather":
+					weather := A_Args[index + 1]
+					index += 2
+				default:
+					index += 1
+			}
+		}
+
+		if car
+			car := SessionDatabase.getCarName(simulator, car)
+
+		workbench := SetupWorkbench(simulator, car, track, weather)
+
+		SupportMenu.Insert("1&")
+
+		label := translate("Debug Rule System")
+
+		SupportMenu.Insert("1&", label, ObjBindMethod(workbench, "toggleDebug", kDebugRules))
+
+		if workbench.Debug[kDebugRules]
+			SupportMenu.Check(label)
+
+		label := translate("Debug Knowledgebase")
+
+		SupportMenu.Insert("1&", label, ObjBindMethod(workbench, "toggleDebug", kDebugKnowledgeBase))
+
+		if workbench.Debug[kDebugKnowledgebase]
+			SupportMenu.Check(label)
+
+		workbench.createGui(workbench.Configuration)
+
+		workbench.show()
+
+		if !GetKeyState("Ctrl") {
+			if simulator {
+				workbench.Window.Block()
+
+				try {
+					workbench.loadSimulator(simulator, true)
+
+					if inList(workbench.AvailableCars, car)
+						workbench.loadCar(car, false)
+
+					if track
+						workbench.loadTrack(track, false)
+
+					if weather
+						workbench.loadWeather(weather, false)
+				}
+				finally {
+					workbench.Window.Unblock()
+				}
+			}
+			else
+				workbench.loadSimulator(true, true)
+
+			workbench.logLogbook("Selection")
+		}
+		else
+			Task.startTask(ObjBindMethod(workbench, "restoreState"), 100)
+
+		startupApplication()
+	}
+	catch Any as exception {
+		logError(exception, true)
+
+		withBlockedWindows(MsgDlg, substituteVariables(translate("Cannot start %application% due to an internal error..."), {application: "Setup Workbench"}), translate("Error"), 262160)
+
+		ExitApp(1)
+	}
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Plugin Include Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+if kLogStartup
+	logMessage(kLogOff, "Loading plugins...")
+
+#Include "..\Plugins\Simulator Providers.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Editor Include Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "Libraries\GenericIssueAnalyzer.ahk"
+#Include "Libraries\IRCIssueAnalyzer.ahk"
+#Include "Libraries\R3EIssueAnalyzer.ahk"
+#Include "Libraries\PMRIssueAnalyzer.ahk"
+#Include "Libraries\F125IssueAnalyzer.ahk"
+#Include "Libraries\ACCSetupEditor.ahk"
+#Include "Libraries\ACSetupEditor.ahk"
+#Include "Libraries\ACESetupEditor.ahk"
+#Include "Libraries\LMUSetupEditor.ahk"
+#Include "Libraries\RF2SetupEditor.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Initialization Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+startupSetupWorkbench()

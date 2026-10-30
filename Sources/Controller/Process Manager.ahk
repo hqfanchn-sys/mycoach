@@ -1,0 +1,219 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Process Manager                  ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Global Declaration Section                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;@SC-IF %configuration% == Development
+#Include "..\Framework\Development.ahk"
+;@SC-EndIF
+
+;@SC-If %configuration% == Production
+;@SC #Include "..\Framework\Production.ahk"
+;@SC-EndIf
+
+;@Ahk2Exe-SetMainIcon ..\..\Resources\Icons\Observer.ico
+;@Ahk2Exe-ExeName Process Manager.exe
+;@Ahk2Exe-SetCompanyName Oliver Juwig (TheBigO)
+;@Ahk2Exe-SetCopyright TheBigO - Creative Commons - BY-NC-SA
+;@Ahk2Exe-SetProductName Simulator Controller
+;@Ahk2Exe-SetVersion 0.0.0.0
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework\Process.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework\Extensions\Task.ahk"
+#Include "..\Framework\Extensions\Messages.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Private Function Declaration Section                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+getProcesses() {
+	local d := "  |  "  ; string separator
+	local s := 4096  ; size of buffers and arrays (4 KB)
+	local ScriptPID := ProcessExist()  ; The PID of this running script.
+	local ti, r, t, h, n, e, a, c, l
+
+	static hModule := DllCall("LoadLibrary", "Str", "Psapi.dll")  ; Increase performance by preloading the library.
+
+	; Get the handle of this script with PROCESS_QUERY_INFORMATION (0x0400):
+	h := DllCall("OpenProcess", "UInt", 0x0400, "Int", false, "UInt", ScriptPID, "Ptr")
+
+	; Open an adjustable access token with this process (TOKEN_ADJUST_PRIVILEGES = 32):
+	DllCall("Advapi32.dll\OpenProcessToken", "Ptr", h, "UInt", 32, "PtrP", &t := 0)
+
+	; Retrieve the locally unique identifier of the debug privilege:
+	DllCall("Advapi32.dll\LookupPrivilegeValue", "Ptr", 0, "Str", "SeDebugPrivilege", "Int64P", &luid := 0)
+
+	ti := Buffer(16, 0)  ; structure of privileges
+
+	NumPut( "UInt", 1  ; one entry in the privileges array...
+		  , "Int64", luid
+		  , "UInt", 2  ; Enable this privilege: SE_PRIVILEGE_ENABLED = 2
+		  , ti)
+
+	; Update the privileges of this process with the new access token:
+	r := DllCall("Advapi32.dll\AdjustTokenPrivileges", "Ptr", t, "Int", false, "Ptr", ti, "UInt", 0, "Ptr", 0, "Ptr", 0)
+
+	DllCall("CloseHandle", "Ptr", t)  ; Close the access token handle to save memory.
+	DllCall("CloseHandle", "Ptr", h)  ; Close the process handle to save memory.
+
+	a := Buffer(s)  ; An array that receives the list of process identifiers:
+	l := []
+
+	DllCall("Psapi.dll\EnumProcesses", "Ptr", a, "UInt", s, "UIntP", &r)
+
+	loop r // 4 { ; Parse array for identifiers as DWORDs (32 bits):
+		id := NumGet(a, A_Index * 4, "UInt")
+
+		; Open process with: PROCESS_VM_READ (0x0010) | PROCESS_QUERY_INFORMATION (0x0400)
+		h := DllCall("OpenProcess", "UInt", 0x0010 | 0x0400, "Int", false, "UInt", id, "Ptr")
+
+		if !h
+			continue
+
+		n := Buffer(s, 0)  ; A buffer that receives the base name of the module:
+		e := DllCall("Psapi.dll\GetModuleBaseName", "Ptr", h, "Ptr", 0, "Ptr", n, "UInt", s // 2)
+
+		if !e    ; Fall-back method for 64-bit processes when in 32-bit mode:
+			e := DllCall("Psapi.dll\GetProcessImageFileName", "Ptr", h, "Ptr", n, "UInt", s // 2)
+
+		SplitPath StrGet(n), &n
+
+		DllCall("CloseHandle", "Ptr", h)  ; Close the process handle to save memory.
+
+		if (n && e)  ; If image is not null add to list:
+			l.Push([n, id])
+	}
+
+	return l
+}
+
+checkProcessMemory(maxMemory) {
+	local ignore, application, applications
+
+	checkMemory(process, pid) {
+		local memory := getMemoryUsage(pid)
+
+		if (memory > maxMemory) {
+			ProcessClose(pid)
+
+			logMessage(kLogCritical, "Killed " . process . " with memory usage at " . Round((memory / 1024) / 1024, 1) . " MB")
+		}
+	}
+
+	maxMemory := (maxMemory * 1024 * 1024)
+
+	for ignore, processes in [kForegroundApps, kBackgroundApps]
+		for ignore, process in processes {
+			pid := ProcessExist(InStr(process, ".exe") ? process : (process . ".exe"))
+
+			if pid
+				checkMemory(process, pid)
+
+			Sleep(200)
+		}
+}
+
+killZombies() {
+	local provider := choose(getProcesses(), (p) => p[1] = "ACC UDP Provider.exe")
+	local validPIDs
+
+	static validProvider := []
+
+	if (provider.Length <= 2)
+		validProvider := provider
+	else {
+		validPIDs := collect(validProvider, (vp) => vp[2])
+
+		do(provider, (p) {
+			if !inList(validPIDs, p[2]) {
+				ProcessClose(p[2])
+
+				logMessage(kLogCritical, "Killed zombie ACC UDP provider process " . p[2])
+			}
+		})
+	}
+}
+
+startupProcessManager() {
+	local MASTER := StrSplit(FileRead(kConfigDirectory . "MASTER"), "`n", "`r")[1]
+	local settings := readMultiMap(getFileName("Core Settings.ini", kUserConfigDirectory, kConfigDirectory))
+	local icon := kIconsDirectory . "Observer.ico"
+
+	TraySetIcon(icon, "1")
+	A_IconTip := "Process Manager"
+
+	if getMultiMapValue(settings, "Process", "Memory.WatchDog", 10)
+		PeriodicTask(checkProcessMemory.Bind(getMultiMapValue(settings, "Process", "Memory.Max", 2048))
+				   , getMultiMapValue(settings, "Process", "Memory.WatchDog", 10) * 1000, kHighPriority).start()
+
+	Sleep(4000)
+
+	if getMultiMapValue(settings, "Process", "Zombie.WatchDog", 10)
+		PeriodicTask(killZombies, getMultiMapValue(settings, "Process", "Zombie.WatchDog", 10) * 1000, kLowPriority).start()
+
+	startupProcess()
+
+	if !FileExist(kUserHomeDirectory . "Diagnostics\UPLOAD")
+		FileAppend(A_Now, kUserHomeDirectory . "Diagnostics\UPLOAD")
+
+	if (DateAdd(FileGetTime(kUserHomeDirectory . "Diagnostics\UPLOAD", "M"), 1, "Days") < A_Now) {
+		try {
+			deleteFile(kUserHomeDirectory . "Diagnostics\UPLOAD")
+
+			FileAppend(A_Now, kUserHomeDirectory . "Diagnostics\UPLOAD")
+		}
+
+		Task.startTask(() {
+			local ID := StrSplit(FileRead(kUserConfigDirectory . "ID"), "`n", "`r")[1]
+			local fileName := (ID . "." . A_Now . ".log")
+
+			if ftpUpload(MASTER, "SimulatorController", "Sc-1234567890-Sc", kUserHomeDirectory . "Diagnostics\Critical.log", "Diagnostics-Uploads/" . fileName)
+				deleteFile(kUserHomeDirectory . "Diagnostics\Critical.log")
+
+			ftpUpload(MASTER, "SimulatorController", "Sc-1234567890-Sc", kUserHomeDirectory . "Diagnostics\Usage.stat", "Diagnostics-Uploads/" . ID . ".Usage.stat")
+		}, 1000, kLowPriority)
+
+		Task.startTask(() {
+			local processed := []
+			local ignore, directory
+
+			loop Files, kUserHomeDirectory . "Diagnostics\Sessions\*.*", "D"
+				if (DateAdd(FileGetTime(A_LoopFileFullPath, "M"), 2, "Days") < A_Now) {			
+					compress(A_LoopFileFullPath, "*.*", kTempDirectory . A_LoopFileName . ".zip")
+
+					if ftpUpload(MASTER, "SimulatorController", "Sc-1234567890-Sc", kTempDirectory . A_LoopFileName . ".zip", "Session-Uploads/" . A_LoopFileName . ".zip") {
+						deleteFile(kTempDirectory . A_LoopFileName . ".zip")
+
+						processed.Push(A_LoopFileFullPath)
+					}
+				}
+
+			do(processed, deleteDirectory)
+		}, 1000, kLowPriority)
+	}
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Initialization Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+startupProcessManager()

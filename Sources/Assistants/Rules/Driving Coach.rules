@@ -1,0 +1,446 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Driving Coach Rules             ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Global Trigger                              ;;;
+;;;                                                                         ;;;
+;;; Entry points for the surrounding script code. Typically, the rule       ;;;
+;;; will be triggered by setting a target fact and call "produce()" on the  ;;;
+;;; KnowledgeBase instance.                                                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;; Each lap, after all the lap data has been copied to the knowledge base, ;;;
+;;; all target data for race positions, lap times and strategy will be      ;;;
+;;; recomputed upon the data of the last laps, and so on.                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Lap] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; This fact is set for each invocation of the rule engine. It can be used ;;;
+;;; to start periodic tasks.                                                ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Update] => ...
+
+priority: -20, [?Update] => (Clear: Update)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; The race positions and lap times will be recomputed.                    ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Standings] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Pitstop.Lap" must be set to the lap number, where the pitstop has been ;;;
+;;; done.                                                                   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Pitstop.Lap] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Performance.Analyze" starts the telemetry performance analyzer.        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Performance.Analyze] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Performance.Clear" clears the telemetry performance analyzer memory.   ;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Performance.Clear] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;; "Cleanup" can be set to remove unnecessary knowledge from the memory.   ;;;
+;;; Set "Cleanup" to "Laps" to remove all recent laps, that are outside the ;;;
+;;; the statistical window. This is done automatically after a pitstop.     ;;;
+;;; You can also set it to "Standings", which will remove all standings     ;;;
+;;; from the memory, which are "older" than									;;;
+;;; "Session.Settings.Lap.History.Considered".								;;;
+;;;-------------------------------------------------------------------------;;;
+
+; [?Cleanup] => ...
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Lap & Fuel Calculation                         ;;;
+;;;                                                                         ;;;
+;;; Updates the remaining laps with the current amount of fuel and the      ;;;
+;;; remaining stint time for the current driver.                            ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 20, [?Lap] => (ProveAll: updateRemainingLaps(?Lap))
+
+updateRemainingLaps(?lap) <= remainingStintLaps(?lap, Fuel, ?fuelLaps), Set(Lap.Remaining.Fuel, ?fuelLaps)
+updateRemainingLaps(?lap) <= Clear(Lap.Remaining.Energy), remainingStintLaps(?lap, Energy, ?energyLaps), Set(Lap.Remaining.Energy, ?energyLaps)
+updateRemainingLaps(?lap) <= remainingStintLaps(?lap, Driver, ?driverLaps), Set(Lap.Remaining.Stint, ?driverLaps)
+updateRemainingLaps(?lap) <= remainingSessionLaps(?lap, ?sessionLaps), Set(Lap.Remaining.Session, ?sessionLaps)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Fuel, Set(Lap.Remaining.Stint, !Lap.Remaining.Fuel)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Energy, Set(Lap.Remaining.Stint, !Lap.Remaining.Energy)
+updateRemainingLaps(?lap) <= !Lap.Remaining.Stint > !Lap.Remaining.Session, Set(Lap.Remaining.Stint, !Lap.Remaining.Session)
+
+priority: 20, {All: [?Lap.Remaining.Stint <= ?Lap.Remaining.Session]} => (Set: Lap.Remaining, ?Lap.Remaining.Stint)
+priority: 20, {All: [?Lap.Remaining.Session <= ?Lap.Remaining.Stint]} => (Set: Lap.Remaining, ?Lap.Remaining.Session)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                      Position & Lap Delta Calculation                   ;;;
+;;;                                                                         ;;;
+;;; Updates the gaps and lap time deltas for various cars each lap.         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Standings Computations.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Pitstop Performed                           ;;;
+;;;                                                                         ;;;
+;;; After a pitstop has been performed, the pitstop plan is copied to the   ;;;
+;;; history memory as a reference for future calculations.                  ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Pitstop.Lap] => (Prove: updatePitstopLap(?Pitstop.Lap))
+priority: -20, [?Pitstop.Lap] => (Clear: Pitstop.Lap)
+
+updatePitstopLap(?lap) <= Get(Pitstop.Last, ?last), Get(Pitstop, ?last, Lap, ?lap), !
+updatePitstopLap(?lap) <= Get(Pitstop.Last, ?last), ?next = ?last + 1, Set(Pitstop, ?next, Lap, ?lap), Set(Pitstop.Last, ?next), !
+updatePitstopLap(?lap) <= Set(Pitstop.1.Lap, ?lap), Set(Pitstop.Last, 1)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Telemetry Coaching                           ;;;
+;;;                                                                         ;;;
+;;; These rules compute a number of recommendations and instructions for an ;;;
+;;; upcoming corner baesd on data about the last lap and possibly a         ;;;
+;;; reference lap.                                                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+priority: 10, {All: [?Performance.Analyze], {Prove: worsePerformance()}} => (Set: Performance, Worse)
+priority: 10, {All: [?Performance.Analyze], {Prove: betterPerformance()}} => (Set: Performance, Better)
+
+betterPerformance() <= ?lapTime = !Lap.Corner.Time + !Lap.FollowUp.Time,
+					   ?referenceTime = !Reference.Corner.Time + !Reference.FollowUp.Time, !,
+					   ?lapTime < ?referenceTime
+betterPerformance() <= !Lap.Corner.Time < !Reference.Corner.Time
+
+worsePerformance() <= betterPerformance(), !, fail
+worsePerformance()
+
+priority: 10, {All: [?Lap.Corner.Entry.Braking.Start < ?Reference.Corner.Entry.Braking.Start]} =>
+		(Prove: addDriverInput(LateBraking))
+
+priority: 10, {All: [?Lap.Corner.Entry.Braking.Start > ?Reference.Corner.Entry.Braking.Start]} =>
+		(Prove: addDriverInput(EarlyBraking))
+
+priority: 10, {All: [?Lap.Corner.Entry.Brake.Pressure < ?Reference.Corner.Entry.Brake.Pressure]} =>
+		(Prove: addDriverInput(SoftBraking))
+
+priority: 10, {All: [?Lap.Corner.Entry.Brake.Pressure > ?Reference.Corner.Entry.Brake.Pressure]} =>
+		(Prove: addDriverInput(HardBraking))
+
+priority: 10, {All: [?Lap.Corner.Entry.Brake.RampUp < ?Reference.Corner.Entry.Brake.RampUp]} =>
+		(Prove: addDriverInput(FastBraking))
+
+priority: 10, {All: [?Lap.Corner.Entry.Brake.RampUp > ?Reference.Corner.Entry.Brake.RampUp]} =>
+		(Prove: addDriverInput(SlowBraking))
+
+priority: 10, {All: [?Lap.Corner.Exit.Accelerating.Start < ?Reference.Corner.Exit.Accelerating.Start]} =>
+		(Prove: addDriverInput(EarlyAccelerating))
+
+priority: 10, {All: [?Lap.Corner.Exit.Accelerating.Start > ?Reference.Corner.Exit.Accelerating.Start]} =>
+		(Prove: addDriverInput(LateAccelerating))
+
+priority: 10, {All: [?Lap.Corner.Entry.Braking.Distance > ?Reference.Corner.Entry.Braking.Distance],
+					[?Lap.Corner.Entry.ABSActivations > ?Reference.Corner.Entry.ABSActivations]} =>
+		(Prove: addDriverInput(OverBraking))
+
+priority: 10, {All: [?Lap.Corner.Entry.Braking.Distance > ?Reference.Corner.Entry.Braking.Distance],
+					[?Lap.Corner.Entry.ABSActivations < ?Reference.Corner.Entry.ABSActivations]} =>
+		(Prove: addDriverInput(UnderBraking))
+
+priority: 10, [?Lap.Corner.Exit.TCActivations > ?Reference.Corner.Exit.TCActivations] =>
+		(Prove: addDriverInput(OverAccelerating))
+
+priority: 10, [?Lap.Corner.Exit.TCActivations < ?Reference.Corner.Exit.TCActivations] =>
+		(Prove: addDriverInput(UnderAccelerating))
+
+priority: 10, {All: [?Performance = Worse],
+					[?Lap.Corner.Entry.Braking.Start < ?Reference.Corner.Entry.Braking.Start],
+				    {Any: [?Lap.Corner.Entry.ABSActivations > ?Reference.Corner.Entry.ABSActivations],
+						  [?Lap.Corner.Steering.Smoothness < ?Reference.Corner.Steering.Smoothness],
+						  [?Lap.Corner.Entry.Brake.Smoothness < ?Reference.Corner.Entry.Brake.Smoothness]}} =>
+		(Prove: addDriverInput(OverPushing)), (Prove: addDriverInput(OverBraking))
+
+priority: 10, {All: [?Performance = Worse],
+					[?Lap.Corner.Entry.Braking.Start > ?Reference.Corner.Entry.Braking.Start],
+					{Any: [?Lap.Corner.Entry.ABSActivations < ?Reference.Corner.Entry.ABSActivations],
+						  [?Lap.Corner.Steering.Smoothness > ?Reference.Corner.Steering.Smoothness],
+						  [?Lap.Corner.Entry.Brake.Smoothness > ?Reference.Corner.Entry.Brake.Smoothness]}} =>
+		(Prove: addDriverInput(UnderPushing)), (Prove: addDriverInput(UnderBraking))
+
+priority: 10, {All: [?Performance = Worse],
+					[?Lap.Corner.Exit.Accelerating.Start < ?Reference.Corner.Exit.Accelerating.Start],
+				    {Any: [?Lap.Corner.Exit.TCActivations > ?Reference.Corner.Exit.TCActivations],
+						  [?Lap.Corner.Exit.Throttle.Smoothness < ?Reference.Corner.Exit.Throttle.Smoothness],
+						  [?Lap.Corner.Steering.Smoothness < ?Reference.Corner.Steering.Smoothness]}} =>
+		(Prove: addDriverInput(OverPushing)), (Prove: addDriverInput(OverAccelerating))
+
+priority: 10, {All: [?Performance = Worse],
+				    [?Lap.Corner.Exit.Accelerating.Start > ?Reference.Corner.Exit.Accelerating.Start],
+				    {Any: [?Lap.Corner.Exit.TCActivations < ?Reference.Corner.Exit.TCActivations],
+						  [?Lap.Corner.Exit.Throttle.Smoothness > ?Reference.Corner.Exit.Throttle.Smoothness],
+						  [?Lap.Corner.Steering.Smoothness > ?Reference.Corner.Steering.Smoothness]}} =>
+		(Prove: addDriverInput(UnderPushing)), (Prove: addDriverInput(UnderAccelerating))
+
+priority: 20, {None: [?DriverInputs.Count]} => (Set: DriverInputs.Count, 0)
+
+addDriverInput(?input) <= ?count = !DriverInputs.Count + 1,
+						  Set(DriverInputs, ?count, ?input), Set(DriverInputs.Count, ?count)
+
+driverInput(?input, ?count) <= driverInput(?input, !DriverInputs.Count, ?count)
+
+driverInput(?input, 0, 0) <= !
+driverInput(?input, ?index, ?count) <= Get(DriverInputs, ?index, ?input), !, ?nextIndex = ?index - 1,
+									   driverInput(?input, ?nextIndex, ?nextCount), ?count = ?nextCount + 1
+driverInput(?input, ?index, ?count) <= ?nextIndex = ?index - 1, driverInput(?input, ?nextIndex, ?count)
+
+priority: 5, {All: [?Performance], {Prove: driverInput(OverPushing, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.OverPushing, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(UnderPushing, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.UnderPushing, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(OverBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.OverBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(UnderBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.UnderBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(LateBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.LateBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(EarlyBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.EarlyBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(SoftBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.SoftBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(HardBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.HardBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(FastBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.FastBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(SlowBraking, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.SlowBraking, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(LateAccelerating, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.LateAccelerating, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(EarlyAccelerating, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.EarlyAccelerating, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(OverAccelerating, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.OverAccelerating, ?count)
+priority: 5, {All: [?Performance], {Prove: driverInput(UnderAccelerating, ?count)}, {Prove: >(?count, 0)}} =>
+		(Set: Performance.UnderAccelerating, ?count)
+
+{All: [?Performance = Worse], [?Performance.EarlyBraking],
+	  {Any: [?Performance.UnderBraking],
+			{All: {None: [?Performance.UnderBraking]}, {None: [?Performance.OverBraking]}}}} =>
+		(Call: callAssistant(addInstructionHint, BrakeLater))
+
+{All: [?Performance = Worse], [?Performance.LateBraking],
+	  {Any: [?Performance.OverBraking],
+			{All: {None: [?Performance.UnderBraking]}, {None: [?Performance.OverBraking]}}}} =>
+		(Call: callAssistant(addInstructionHint, BrakeEarlier))
+
+{All: [?Performance = Worse], [?Performance.SoftBraking], {None: [?Performance.OverBraking]}} =>
+		(Call: callAssistant(addInstructionHint, BrakeHarder))
+
+{All: [?Performance = Worse], [?Performance.HardBraking], [?Performance.OverBraking]} =>
+		(Call: callAssistant(addInstructionHint, BrakeSofter))
+
+{All: [?Performance = Worse], [?Performance.SlowBraking], {None: [?Performance.OverBraking]}} =>
+		(Call: callAssistant(addInstructionHint, BrakeFaster))
+
+{All: [?Performance = Worse], [?Performance.FastBraking], [?Performance.OverBraking]} =>
+		(Call: callAssistant(addInstructionHint, BrakeSlower))
+
+{All: [?Performance = Worse], {All: [?Performance.OverPushing], {None: [?Performance.UnderPushing]}}} =>
+		(Call: callAssistant(addInstructionHint, PushLess))
+
+{All: [?Performance = Worse], {All: [?Performance.UnderPushing], {None: [?Performance.OverPushing]}}} =>
+		(Call: callAssistant(addInstructionHint, PushMore))
+
+{All: [?Performance = Worse], [?Performance.EarlyAccelerating], [?Performance.OverAccelerating]} =>
+		(Call: callAssistant(addInstructionHint, AccelerateLater))
+
+{All: [?Performance = Worse], [?Performance.LateAccelerating], {None: [?Performance.OverAccelerating]}} =>
+		(Call: callAssistant(addInstructionHint, AccelerateEarlier))
+
+{All: [?Performance = Worse], [?Performance.OverAccelerating]} =>
+		(Call: callAssistant(addInstructionHint, AccelerateSofter))
+
+{All: [?Performance = Worse], {None: [?Performance.EarlyAccelerating]}, {None: [?Performance.OverAccelerating]}} =>
+		(Call: callAssistant(addInstructionHint, AccelerateHarder))
+
+priority: -20,
+[?Performance.Clear] => (ProveAll: clearTelemetry()), (Prove: clearDriverInputs()),
+						(Clear: Performance.Analyze), (Clear: Performance.Clear), (ProveAll: clearPerformance())
+
+clearDriverInputs() <= clearDriverInputs(!DriverInputs.Count), Set(DriverInputs.Count, 0)
+
+clearDriverInputs(0) <= !
+clearDriverInputs(?index) <= Clear(DriverInputs, ?index), ?newIndex = ?index - 1, clearDriverInputs(?newIndex)
+
+clearPerformance() <= Clear(Performance)
+clearPerformance() <= clearPerformance([OverPushing, UnderPushing, OverBraking, Underbraking, EarlyBraking, LateBraking,
+										SoftBraking, HardBraking, FastBraking, SlowBraking, EarlyAccelerating, LateAccelerating,
+										OverAccelerating, UnderAccelerating])
+
+clearPerformance([])
+clearPerformance([?performance | ?performances]) <= Clear(Performance, ?performance), clearPerformance(?performances)
+
+clearTelemetry() <= clearTelemetry(Lap.Corner)
+clearTelemetry() <= clearTelemetry(Lap.FollowUp)
+clearTelemetry() <= clearTelemetry(Reference.Corner)
+clearTelemetry() <= clearTelemetry(Reference.FollowUp)
+
+clearTelemetry(Lap.Corner) <= Clear(Lap.Corner.Nr), Clear(Lap.Corner.Time), Clear(Lap.Corner.Length),
+							  Clear(Lap.Corner.Steering.Corrections), Clear(Lap.Corner.Steering.Smoothness),
+							  clearTelemetry(Lap.Corner, [Entry, Apex, Exit])
+clearTelemetry(Lap.FollowUp) <= Clear(Lap.FollowUp.Nr), Clear(Lap.FollowUp.Type),
+								Clear(Lap.FollowUp.Time), Clear(Lap.FollowUp.Length)
+
+clearTelemetry(Reference.Corner) <= Clear(Reference.Corner.Nr), Clear(Reference.Corner.Time), Clear(Reference.Corner.Length),
+									Clear(Reference.Corner.Steering.Corrections), Clear(Reference.Corner.Steering.Smoothness),
+									clearTelemetry(Reference.Corner, [Entry, Apex, Exit])
+clearTelemetry(Reference.FollowUp) <= Clear(Reference.FollowUp.Nr), Clear(Reference.FollowUp.Type),
+									  Clear(Reference.FollowUp.Time), Clear(Reference.FollowUp.Length),
+
+clearTelemetry(?type, [])
+clearTelemetry(?type, [?phase | ?phases]) <= clearTelemetry(?type, ?phase), clearTelemetry(?type, ?phases)
+
+clearTelemetry(?type, Entry) <= Clear(?type, Entry.Time),
+								Clear(?type, Entry.Braking.Start),
+								Clear(?type, Entry.Braking.Length),
+								Clear(?type, Entry.Brake.Pressure),
+								Clear(?type, Entry.Brake.Rampup),
+								Clear(?type, Entry.Brake.Corrections),
+								Clear(?type, Entry.Brake.Smoothness),
+								Clear(?type, Entry.ABSActivations), !
+
+clearTelemetry(?type, Apex) <= Clear(?type, Apex.Time),
+							   Clear(?type, Apex.Rolling.Start),
+							   Clear(?type, Apex.Rolling.Length),
+							   Clear(?type, Apex.Acceleration.Lateral),
+							   Clear(?type, Apex.Gear),
+							   Clear(?type, Apex.RPM),
+							   Clear(?type, Apex.Speed), !
+
+clearTelemetry(?type, Exit) <= Clear(?type, Exit.Time),
+							   Clear(?type, Exit.Accelerating.Start),
+							   Clear(?type, Exit.Accelerating.Length),
+							   Clear(?type, Exit.Gear),
+							   Clear(?type, Exit.RPM),
+							   Clear(?type, Exit.Speed),
+							   Clear(?type, Exit.Throttle.Corrections),
+							   Clear(?type, Exit.Throttle.Smoothness),
+							   Clear(?type, Exit.TCActivations), !
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                              Memory Cleanup                             ;;;
+;;;                                                                         ;;;
+;;; These rules remove knowledge that is no longer needed.					;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Lap] => (Set: Cleanup, Laps)
+
+priority: -40, [?Cleanup = Laps] => (Prove: clearLaps()), (Set: Cleanup, Standings)
+
+clearLaps() <= ?lap = !Lap - 1, ?clearLap = ?lap - !Session.Settings.Lap.History.Considered, clearLaps(?clearLap)
+
+clearLaps(0) <= !
+clearLaps(?lap) <= ?lap < 0, !
+clearLaps(?lap) <= clearLap(?lap), ?pLap = ?lap - 1, clearLaps(?pLap)
+
+priority: -40, [?Cleanup = Standings] => (Prove: clearStandings()), (Clear: Cleanup)
+
+clearStandings() <= ?lap = !Lap - 1, ?clearLap = ?lap - !Session.Settings.Lap.History.Considered, clearStandings(?clearLap)
+
+clearStandings(0) <= !
+clearStandings(?lap) <= ?lap < 0, !
+clearStandings(?lap) <= clearStanding(?lap), ?pLap = ?lap - 1, clearStandings(?pLap)
+
+clearStanding(?lap) <= Append(Standings.Lap., ?lap, .Car.Count, ?fact), fact?(?fact), !, Get(?fact, ?carCount), Clear(?fact),
+					   Clear(Standings.Lap, ?lap, Time), Clear(Standings.Lap, ?lap, Time.Sectors),
+					   Clear(Standings.Lap, ?lap, Position), Clear(Standings.Lap, ?lap, Weather),
+					   clearStanding(?lap, ?carCount), clearExtrapolatedLap(?lap, ?carCount)
+clearStanding(?)
+
+clearStanding(?, 0) <= !
+clearStanding(?, ?car) <= ?car < 0, !
+clearStanding(?lap, ?car) <= clearStanding(?lap, ?car, [Nr, ID, Delta, Laps, Time, Time.Sectors, Time.Average,
+														Position, Driver.Forname, Driver.Surname, Driver.Nickname, Driver.Category]),
+							 ?pCar = ?car - 1, clearStanding(?lap, ?pCar)
+
+clearStanding(?, ?, []) <= !
+clearStanding(?lap, ?car, [?name | ?names]) <= Clear(Standings.Lap, ?lap, Car, ?car, ?name),
+											   clearStanding(?lap, ?car, ?names)
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Car Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Car Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                        Tyre Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Tyre Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Lap Information Retrieval                       ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Lap Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Pitstop Information Retrieval                     ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Pitstop Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Weather Information Retrieval                     ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Weather Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                   Session & Stint Information Retrieval                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Session Information Retrieval.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Statistical Computations                        ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Statistical Computations.rules
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                               Utilities                                 ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Utilities.rules

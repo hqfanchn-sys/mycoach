@@ -1,0 +1,111 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Strategy Validation Rules       ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Public Rules Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+totalFuel(?fuelAmount, ?numRefuels) <= startFuel(?startFuel), pitstopFuel(?refuels, ?numRefuels), ?fuelAmount = ?startFuel + ?refuels
+
+startFuel(?startFuel) <= setup(?startFuel, ?, ?, ?)
+
+pitstopFuel(?refuelAmount, ?numRefuels) <= pitstopRefuels(1, ?refuelAmount, ?numRefuels)
+		
+startTyreCompound(?tyreCompound, ?tyreCompoundColor) <= setup(?, ?tyreCompound, ?tyreCompoundColor, ?)
+
+startTyreSet(?tyreSet) <= setup(?, ?, ?, ?tyreSet)
+
+pitstopTyreCompounds(?tyreCompounds) <= pitstopTyreCompounds(1, ?tyreCompounds)
+
+pitstopTyreSets(?tyreSets) <= pitstopTyreSets(1, ?tyreSets)
+
+refuels(?refuels) <= totalFuel(?, ?refuels)
+
+tyreCompounds([[?tyreCompound | ?tyreCompoundColor] | ?tyreCompounds]) <= startTyreCompound(?tyreCompound, ?tyreCompoundColor), pitstopTyreCompounds(?tyreCompounds)
+
+tyreSets([?tyreSet | ?tyreSets]) <= startTyreSet(?tyreSet), pitstopTyreSets(?tyreSets)
+
+tyreCompounds([], ?, [])
+tyreCompounds([[?compound | ?compoundColor] | ?tyreCompounds], ?compound, [?compoundColor | ?result]) <=
+		tyreCompounds(?tyreCompounds, ?compound, ?result)
+
+pitstops(?count) <= pitstopCount(1, ?temp), ?temp = ?count, !
+pitstops(0)
+
+pitstopLap(?nr, ?lap) <= pitstop(?nr, ?lap, ?, ?, ?, ?, ?)
+
+pitstopTime(?nr, ?minute) <= pitstop(?nr, ?, ?minute, ?, ?, ?, ?)
+
+pitstopFuel(?nr, ?fuelAmount) <= pitstop(?nr, ?, ?, ?fuelAmount, ?, ?, ?)
+
+pitstopTyreCompound(?nr, ?tyreCompound, ?tyreCompoundColor) <= pitstop(?nr, ?, ?, ?, ?tyreCompound, ?tyreCompoundColor, ?)
+
+pitstopTyreSet(?nr, ?tyreSet) <= pitstop(?nr, ?, ?, ?, ?, ?, ?tyreSet)
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;                             Internal Rules                              ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+pitstopCount(?nr, ?count) <= pitstop(?nr, ?, ?, ?, ?, ?, ?), ?nextNr = ?nr + 1, pitstopCount(?nextNr, ?count)
+pitstopCount(?nr, ?count) <= ?count = ?nr - 1
+ 
+pitstopRefuels(?pitstop, ?refuelAmount, ?numRefuels) <=
+		pitstop(?pitstop, ?, ?, ?pitstopRefuelAmount, ?, ?, ?), ?pitstopRefuelAmount > 0, !,
+		?nextPitstop = ?pitstop + 1, pitstopRefuels(?nextPitstop, ?nextRefuelAmount, ?nextNumRefuels),
+		?refuelAmount = ?pitstopRefuelAmount + ?nextRefuelAmount, ?numRefuels = ?nextNumRefuels + 1
+pitstopRefuels(?, 0, 0)
+
+pitstopTyreCompounds(?pitstop, ?tyreCompounds) <= pitstop(?pitstop, ?, ?, ?, false, ?, ?), !,
+												  ?nextPitstop = ?pitstop + 1, pitstopTyreCompounds(?nextPitstop, ?tyreCompounds)
+pitstopTyreCompounds(?pitstop, [[?tyreCompound | ?tyreCompoundColor] | ?tyreCompounds]) <=
+		pitstop(?pitstop, ?, ?, ?, ?tyreCompound, ?tyreCompoundColor, ?), !,
+		?nextPitstop = ?pitstop +1, pitstopTyreCompounds(?nextPitstop, ?tyreCompounds)
+pitstopTyreCompounds(?, [])
+
+pitstopTyreSets(?pitstop, ?tyreSets) <= pitstop(?pitstop, ?, ?, ?, false, ?, ?), !,
+										?nextPitstop = ?pitstop + 1, pitstopTyreSets(?nextPitstop, ?tyreSets)
+pitstopTyreSets(?pitstop, [?tyreSet | ?tyreSets]) <=
+		pitstop(?pitstop, ?, ?, ?, ?, ?, ?tyreSet), !,
+		?nextPitstop = ?pitstop +1, pitstopTyreSets(?nextPitstop, ?tyreSets)
+pitstopTyreSets(?, [])
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;                            Collection Rules                             ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+any?(?value, [?value | ?])
+any?(?value, [? | ?tail]) <= any?(?value, ?tail)
+
+all?(?value, [?value])
+all?(?value, [?value | ?tail]) <= all?(?value, ?tail)
+
+none?(?value, [])
+none?(?value, [?value | ?]) <= !, fail
+none?(?value, [? | ?tail]) <= none?(?value, ?tail)
+
+one?(?value, []) <= fail
+one?(?value, [?value | ?tail]) <= !, none?(?value, ?tail)
+one?(?value, [? | ?tail]) <= one?(?value, ?tail)
+				
+length([], 0)
+length([?h | ?t], ?length) <= length(?t, ?tLength), ?length = ?tLength + 1
+
+unique([], [])
+unique([?value | ?values], [?value | ?result]) <= none?(?value, ?values), !, unique(?values, ?result)
+unique([?value | ?values], ?result) <= unique(?values, ?result)
+
+reverse([], [])
+reverse([?h | ?t], ?rev) <= reverse(?t, ?rt), concat(?rt, [?h], ?rev)
+
+concat([], ?l, ?l)
+concat([?h | ?t], ?l, [?h | ?r]) <= concat(?t, ?l, ?r)
+
+remove([], ?, [])
+remove([?h | ?t], ?h, ?result) <= !, remove(?t, ?h, ?result)
+remove([?h | ?t], ?x, [?h | ?result]) <= remove(?t, ?x, ?result)

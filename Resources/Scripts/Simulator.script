@@ -1,0 +1,40 @@
+-------------------------------------------------------------------------------
+---   Modular Simulator Controller System - Simulator Module                ---
+---                                                                         ---
+---   Author:     Oliver Juwig (TheBigO)                                    ---
+---   License:    (2026) Creative Commons - BY-NC-SA                        ---
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+---                         Private Functions Section                       ---
+-------------------------------------------------------------------------------
+
+__call_simulator = extern("_callSimulator")
+__read_simulator = extern("_readSimulator")
+
+
+-------------------------------------------------------------------------------
+---                        Public Topics Section                            ---
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+---                             Simulator                                   ---
+-------------------------------------------------------------------------------
+
+Simulator = {}
+
+-------------------------------------------------------------------------------
+---                             Functions                                   ---
+-------------------------------------------------------------------------------
+
+Simulator.Read = function (simulator, ...)
+	local arguments = table.pack(...)
+	
+	return __read_simulator(simulator, table.unpack(arguments))
+end
+
+Simulator.Call = function (simulator, ...)
+	local arguments = table.pack(...)
+	
+	return __call_simulator(simulator, table.unpack(arguments))
+end

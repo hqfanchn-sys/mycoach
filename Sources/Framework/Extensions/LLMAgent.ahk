@@ -1,0 +1,345 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - LLM Agent                       ;;;
+;;;                                                                         ;;;
+;;;   Connects and integrates an LLM with a set of rules which create an    ;;;
+;;;   autonomous agent, which can follow goals and show situational         ;;;
+;;;   awareness.                                                            ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Global Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\Framework.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Local Include Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "Task.ahk"
+#Include "LLMConnector.ahk"
+#Include "LLMBooster.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class AgentEvent {
+	Name {
+		Get {
+			throw "Virtual property AgentEvent.Name must be implemented in a subclass..."
+		}
+	}
+
+	Event {
+		Get {
+			throw "Virtual property AgentEvent.Event must be implemented in a subclass..."
+		}
+	}
+}
+
+class AgentBooster extends LLMBooster {
+	iManager := false
+
+	iTranscript := false
+
+	iInstructions := false
+
+	Type {
+		Get {
+			return "Agent"
+		}
+	}
+
+	Booster {
+		Get {
+			return "Reasoning"
+		}
+	}
+
+	Descriptor {
+		Get {
+			return this.Options["Descriptor"]
+		}
+	}
+
+	Manager {
+		Get {
+			return this.iManager
+		}
+	}
+
+	Active {
+		Get {
+			return this.Options["Active"]
+		}
+	}
+
+	Code {
+		Get {
+			return this.Options["Code"]
+		}
+	}
+
+	Language {
+		Get {
+			return this.Options["Language"]
+		}
+	}
+
+	MaxTokens {
+		Get {
+			return false
+		}
+	}
+
+	Instructions[language?] {
+		Get {
+			local instructions, ignore, instrLanguage, directory, key, value
+
+			if !this.iInstructions {
+				instructions := CaseInsenseMap()
+
+				for ignore, directory in [kResourcesDirectory . "Instructions\", kUserHomeDirectory . "Instructions\"]
+					loop Files (directory . "Agent Booster.instructions.*") {
+						SplitPath A_LoopFilePath, , , &instrLanguage
+
+						if !instructions.Has(instrLanguage)
+							instructions[instrLanguage] := newMultiMap()
+
+						addMultiMapValues(instructions[instrLanguage], readMultiMap(A_LoopFilePath))
+					}
+
+				for key, value in getMultiMapValues(this.Configuration, "Agent Booster") {
+					if (InStr(key, this.Descriptor . ".Instructions.") = 1) {
+						if (value == true)
+							key := false
+						else {
+							key := ConfigurationItem.splitDescriptor(key)
+
+							key.RemoveAt(1)
+						}
+					}
+					else if (InStr(key, "Instructions.") = 1) {
+						if (value == true)
+							key := false
+						else
+							key := ConfigurationItem.splitDescriptor(key)
+					}
+					else
+						key := false
+
+					if key {
+						instrLanguage := key[4]
+
+						if !instructions.Has(instrLanguage)
+							instructions[instrLanguage] := newMultiMap()
+
+						setMultiMapValue(instructions[instrLanguage], key[2] . ".Instructions", key[3], value)
+					}
+				}
+
+				this.iInstructions := instructions
+			}
+
+			if isSet(language) {
+				if this.iInstructions.Has(language)
+					return this.iInstructions[language]
+				else if this.iInstructions.Has("en")
+					return this.iInstructions["en"]
+				else
+					return newMultiMap()
+			}
+			else
+				return this.iInstructions
+		}
+	}
+
+	Transcript {
+		Get {
+			return this.iTranscript
+		}
+	}
+
+	__New(manager, descriptor, configuration, language := false) {
+		local transcripts := getMultiMapValue(configuration, "Agent Booster", descriptor . ".Transcripts"
+														   , kLogsDirectory . "Transcripts\")
+		local allLanguages, index
+
+		transcripts := normalizeDirectoryPath(transcripts)
+
+		DirCreate(transcripts)
+
+		this.iManager := manager
+
+		this.Options["Descriptor"] := descriptor
+		this.Options["Language"] := language
+
+		this.iTranscript := (transcripts . "\" . descriptor . " Transcript.txt")
+
+		super.__New(configuration)
+
+		if this.Language {
+			allLanguages := availableLanguages("Grammars")
+
+			if allLanguages.Has(this.Language) {
+				this.Options["Code"] := this.Language
+				this.Options["Language"] := allLanguages[this.Language]
+			}
+			else if inList(getValues(allLanguages), this.Language)
+				this.Options["Code"] := getKeys(allLanguages)[inList(getValues(allLanguages), this.Language)]
+			else
+				this.Options["Code"] := false
+		}
+		else {
+			this.Options["Code"] := "EN"
+			this.Options["Language"] := "English"
+		}
+	}
+
+	loadFromConfiguration(configuration) {
+		local descriptor := this.Descriptor
+		local options := this.Options
+
+		super.loadFromConfiguration(configuration)
+
+		options["Language"] := getMultiMapValue(configuration, "Agent Booster", descriptor . ".Language", this.Language)
+		options["Active"] := getMultiMapValue(configuration, "Agent Booster", descriptor . ".Agent", false)
+	}
+
+	getInstructions() {
+		return []
+	}
+
+	getTools() {
+		return this.Manager.getTools("Agent")
+	}
+
+	connectorState(*) {
+	}
+
+	logInteraction(source, action, input, output) {
+		Task.startTask(() {
+			local directory
+
+			SplitPath(this.Transcript, , &directory)
+
+			DirCreate(directory)
+
+			FileAppend(translate("-- ") . translate(source) . translate(" --------") . "`n`n" . input . "`n`n" . translate("-- ") . translate(action) . translate(" ---------") . "`n`n" . output . "`n`n", this.Transcript, "UTF-16")
+		}, 0, kLowPriority)
+	}
+
+	logExplanation(explanation) {
+		Task.startTask(() {
+			local directory
+
+			SplitPath(this.Transcript, , &directory)
+
+			DirCreate(directory)
+
+			FileAppend(translate("-- ") . translate("Explanation") . translate(" --------") . "`n`n" . explanation . "`n`n", this.Transcript, "UTF-16")
+		}, 0, kLowPriority)
+	}
+}
+
+class EventBooster extends AgentBooster {
+	logInteraction(input, output) {
+		super.logInteraction("Event", "Reasoning", input, output)
+	}
+
+	trigger(event, trigger, goal := false, options := false) {
+		local variables := false
+		local doTrigger, code, language, instruction, variables, target, answer, calls
+
+		printCall(call) {
+			local arguments := call[2].Clone()
+
+			loop arguments.Length
+				if !arguments.Has(A_Index)
+					arguments[A_Index] := ""
+
+			arguments := values2String(", ", arguments*)
+
+			if (StrLen(arguments) > 80)
+				arguments := (SubStr(arguments, 1, 80) . translate("..."))
+
+			return ("Call: " . call[1].Name . "(" . arguments . ")")
+		}
+
+		if (this.Model && this.Active) {
+			code := this.Code
+			language := this.Language
+			doTrigger := true
+
+			if options {
+				if !isInstance(options, Map)
+					options := toMap(options)
+
+				doTrigger := (!options.Has("Trigger") || options["Trigger"])
+
+				if options.Has("Variables")
+					variables := options["Variables"]
+
+				if options.Has("Language")
+					code := options["Language"]
+			}
+
+			if doTrigger {
+				try {
+					if !this.Connector
+						this.startBooster()
+
+					this.Connector.Temperature := 0.2
+
+					if variables
+						variables.language := (language ? language : "")
+					else
+						variables := {language: language ? language : ""}
+
+					variables.event := trigger
+
+					instruction := this.Instructions[code]
+
+					target := substituteVariables(getMultiMapValue(instruction, "Agent.Instructions", "Event"), variables)
+
+					if goal {
+						variables.goal := goal
+
+						target .= ("`n`n" . substituteVariables(getMultiMapValue(instruction, "Agent.Instructions", "Goal")
+															  , variables))
+					}
+
+					instruction := this.Instructions[code]
+
+					answer := this.Connector.Ask(target
+											   , [substituteVariables(getMultiMapValue(instruction
+																					 , "Agent.Instructions", "Character")
+																	, variables)
+												, substituteVariables(getMultiMapValue(instruction
+																					 , "Agent.Instructions", "Knowledge")
+																	, variables)]
+											   , false, &calls := [])
+
+					if (calls.Length > 0) {
+						this.logInteraction((event.Name . ":" . event.Event) . " -> " . trigger, values2String("`n", collect(calls, printCall)*))
+
+						return true
+					}
+					else
+						return false
+				}
+				catch Any as exception {
+					logError(exception, true)
+				}
+			}
+		}
+
+		return false
+	}
+}

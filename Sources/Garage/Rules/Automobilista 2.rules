@@ -1,0 +1,29 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Automobilista 2 Setup Rules     ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Initialization                               ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Initialize] => (Prove: addSimulator("Automobilista 2")),
+				 (Prove: addCharacteristics("Automobilista 2", *, *, *)),
+				 (Prove: addSettings("Automobilista 2", *, *)),
+				 (Prove: removeSettings("Automobilista 2", *, 	[Electronics.MGUK.Delivery, Electronics.MGUK.Recovery, Electronics.MGUH.Mode,
+																 Bumpstop.Rate.Front.Left, Bumpstop.Rate.Front.Right,
+																 Bumpstop.Rate.Rear.Left, Bumpstop.Rate.Rear.Right,
+																 Aero.Wing.Front.Left, Aero.Wing.Front.Right,
+																 Aero.Wing.Rear.Left, Aero.Wing.Rear.Right,
+																 Aero.Height.Front.Left, Aero.Height.Front.Right,
+																 Aero.Height.Rear.Left, Aero.Height.Rear.Right,
+																 Radiator.Blanket.Oil]))
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Setup Recommendations                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Garage\Rules\Generic Recommendations.rules

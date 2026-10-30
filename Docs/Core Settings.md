@@ -1,0 +1,144 @@
+All applications were implemented on a framework specifically developed for Simulator Controller. This framework itself provides a couple of configuration options, which can be tweaked to adapt the Simulator Controller applications to slower or even to very fast PCs. The standard configuration is good for a typical gaming PC setup from 2021, for example a Ryzen 5 3600 CPU with 32 GB RAM.
+
+To change any of the low level configuration options, create a file named "Core Settings.ini" and place it in the *Simulator Controller\Config* folder which resides in your *Documents* folder. Then insert the options you want to change, but be sure to preceed them with the correct category header. Example:
+
+	[HTML]
+	Viewer.*=WebView2
+
+Please note, that all this confguration options are documented here for the experienced user with technical skills. Do not change any of them, until you are told so by me, or you do know what you are doing.
+
+### System Settings
+
+Let's start with some very low system level settings.
+
+| Category   | Setting  | Default | Description |
+|------------|----------|---------|-------------|
+| Locations  | Temp     | %homePath%\Documents\Simulator Controller\Temp | The location of all temporary files of Simulator Controller. Set this to a different location, if your Documents folder is under control of *One Drive* or alike.<br><br>If the location of the data folder of Simulator Controller had been changed during initial installation, different paths and locations apply, of course. |
+|            | Programs | %homePath%\Documents\Simulator Controller\Programs | The location of all additional or optional programs installed or created by Simulator Controller. Especially when using Whisper, this can consume quite a lot of disk space. Set this to a different location, if your Documents folder is on a drive with restricted size, but be sure to choose a fast alternative drive.<br><br>If the location of the data folder of Simulator Controller had been changed during initial installation, different paths and locations apply, of course.  |
+| Process    | Memory.Max | 2048 | The max memory in MB a process may consume, before it get killed by the watchdog. |
+|            | Memory.Critical | 80 | The percentage of max memory usage, when memory reporting starts and special debug code is activated. |
+|            | Memory.WatchDog | 10 | The number of seconds between each run of the memory watchdog. Low numbers may degrade system performance, but if the number is too high a process with a memory problem may be catched too late. *False* will disable the watchdog completely. |
+|            | Zombie.WatchDog | 10 | The number of seconds between each run of watchdog, that checks for processes, that are no longer needed. Low numbers may degrade system performance. *False* will disable the watchdog completely. |
+| Diagnostics | Critical | *True* | If this is *True* (which is the default), all internal erros and critical log messages get collected and are sent to the development team for further investigation. No private or personal data is transmitted, only the error messages and the stack information. This setting can be changed in the profile dialog of "Simulator Startup". |
+|             | Usage    | *True* | If this is *True* (which is the default), several statistical informations are collected about the usage pattern of Simulator Controller - which tools are used how often, what functions are used and so on. This information is sent to the development team to foster further development of Simulator Controller.  No private or personal data is included. This setting can be changed in the profile dialog of "Simulator Startup". |
+
+### Task Settings
+
+Next are the configuration settings for the task processing engine. Four priority levels are defined and tasks with higher priority will postpone the processing of tasks with lower priority, when scheduled. For systems with a faster CPU you can make the schedule window smaller, whereas slower PCs might need a less demanding schedule plan.
+
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| Task     | Schedule.Interrupt | 50 | The number of milliseconds to wait between each schedule of tasks at interrupt level. Interrupt tasks are very important for the repsonsiveness of the user interface, but if the value is too low on a slower PC, tasks with lower priority might get no time at all. Example: Polling the Push-To-Talk button on the steering wheel is running at interrupt priority. |
+|          | Schedule.High | 200 | The number of milliseconds to wait between each schedule of tasks with high priority. These tasks are very important stuff which can not wait until normal operations complete. Example: Detecting that one Assistant wants to issue an urgent notification to the driver thereby interrupting the speech of another Assistant. |
+|          | Schedule.Normal | 500 | The number of milliseconds to wait between each schedule of tasks with normal priority. The majority of all internal tasks are running at this priority level. Example: Processing a message received by another proces. |
+|          | Schedule.Low | 2000 | The number of milliseconds to wait between each schedule of tasks with low priority. All tasks that can wait until other processing has finihed are running at low priority. Example: The acquisition of telemetry data for the currently running session. |
+
+### Message Settings
+
+Built on top of the Task Manager, the Message Manager handles the communcation between the different applications. The delivery of messages as well as the internal processing of a received message also have a schedule window.
+
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| Messages | Schedule | 200 | The number of milliseconds to wait between each run of the message scheduler, which sends messages to and receives messages from other processes of Simulator Controller. |
+|          | Dispatch | 100 | All received messages are placed in a queue for processing. This setting defines the number of milliseconds to let other activities run between each message processing. |
+
+### Development Settings
+
+The next group of settings is used mainly for development purposes. It allows to control the level of self-diagnosing of the framework during development and testing, but can also be used to track down really complex bugs in the production code. Please note, that some of these settings can also be toggled using the choices in the respective application menus in the tray of the Windows task bar during runtime.
+
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| Build    | Configuration | Production | Chooses the runtime mode (*Production* or *Development*) of the framework. This normaly determined during compile time, but it is possible to activate parts of the *Development* mode even for production code.  |
+| Debug    | Debug | *depending on configuration* | Specifies, whether the framework is running in a special debug mode. Default is *False* for a production (release) configuration and *True* for a development configuration. This option overwrites the choice as set in "Simulator Configuration" and it can be switched using the application menu. |
+|          | LogLevel | *depending on configuration* | Defines the level of verbosity of the logging messages. Allowed values are *Debug*, *Info*, *Warn*, *Critical* and *Off*. Defult is *Warn* for production configuration and *Debug* for devlopment configuration. This option overwrites the choice as set in "Simulator Configuration" and it can be switched using the application menu. |
+|          | LogStartup | False | If *True*, special logging is enabled which gives you insights into the timing during the startup process of any of the applications of Simulator Controller. Use this, if any of the applications seems to hang during startup. |
+|          | LogSimulator | False | If *True*, special logging is enabled which gives you insights into the data acquisition using the simulator API. Warning: This can generate a lot of logging output on log levels *Info* and *Debug* and will slow things down considerable. |
+|          | Verbose | *depending on configuration* | Enables or disables additional and very verbose diagnostic output. Never use it in a real race, since error dialogs might popup while driving. Default is *True* for non-compiled code, when *Debug* is enabled in a *Development* configuration, *False* otherwise. |
+
+Following are special debug settings that enable verbosity and diagnostic output of specific components and applications.
+
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| Strategy | Protocol | False | If *True*, the Strategist protocols the history of strategies and also his communication with the Race Engineer in the directory %homePath%\Documents\Simulator Controller\Temp\Race Strategist\Strategy. |
+| Rules    | TraceLevel | Off | This setting lets you enable special trace output for the integrated rule engine. Allowed values are *Off*, *Lite*, *Medium*, *Full*. Trace output will be written to the standard log file. Please note, that any tracing will slow things down considerably and with *Full*, you will be bring the system to halt. |
+| Booster  | ExplainReasoning | False | If *True*, a connected LLM is asked to provide an explanation of its thoughts and conclusions, whenever an action in the *Conversation* and/or *Reasoning* booster is invoked. Whether the LLM will indeed provide an explanation depends on its capabilities. The explanation will be written to the transcript in the *Logs* directory. Please note, that this setting defaults to *True*, when running in debug mode. |
+| Windows  | Designer | *depending on configuration* | If *True*, all controls in a window will show a small thin border, which helps in positioning during development. Default is *False* for a production (release) configuration and *True* for a development configuration. |
+
+### Voice Settings
+
+The following group let's you control a couple of aspects of the voice recognition engine.
+
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| Voice     | Activation Recognizer  | *    | Lets you choose the speech recognizer engine for the activation command used by the voice recognition. Supported values here are: "Server", "Desktop", "Azure\|tokenIssuerEndpoint\|subscriptionKey" (with *tokenIssuerEndpoint* and *subscriptionKey* substituted by their corresponding values), "Google\|apiKey" (with *apiKey* substituted by its corresponding value), "OpenAI\|serverURL\|apiKey" (with *serverURL* and *apiKey* substituted by their corresponding values), "ElevenLabs\|apiKey" (with *apiKey* substituted by its corresponding value), "Whisper Server\!serverURL" (with *serverURL* substituted with the URL of the Whisper Server) and possibly "Whisper Local" (if installed). Default is "*" which represents the currently configured voice recognition engine.<br><br>Good to know: "Server" might be useful in noisy environments, since it is a reecognition engine originally built for telephony, but its overall recognition quality is not that good as that of the other engines. |
+|      | Activation Speed  | 500 (Windows default)    | The maximum number of milliseconds between a click or press on the Push-To-Talk, so that an activation mode is triggered. Default is the Windows setting for the mouse double click speed (typically 500 ms, if not changed by the user). |
+|      | Keyboard Hook  | False    | If set and *True*, a special keyboard hook is installed which may help when using a key on the keyboard as Push-to-Talk button, but the simulator consumes all keyboard presses. But be careful, the technique used here is also used by key loggers and your AntiVirus software may have a problem with that. |
+|      | High Rating  | 0.85     | This value represents the Sorenson-Dice rating for a good enough match of a command phrase, when comparing a spoken command against the registered command syntax. The range of the rating is from 0.0 (no match at all) up to 1.0 (perfect word by word match). When a registered phrase is found with a *High Rating* quality index or higher, this command is used, regardless, whether there are remaining phrases to be tested. By tuning this setting, you can specify how precise the spoken commands must follow the registered syntax. |
+|      | Low Rating | 0.7     | This value represents the Sorenson-Dice rating a registered command syntax must reach, when compared to a spoken command, so that this command is even considered. The range of the rating is from 0.0 (no match at all) up to 1.0 (perfect word by word match). |
+|      | Interruptable | False | If not *False*, the currently active speech will be interrupted, if Push-to-Talk is pressed. If the value is "All", all currently pending speeches will be discarded as well, before the listener is activated. |
+|      | ElevenLabs.Sample Frequency | 16000     | This is used for internal audio processing and represents the resolution of voice audion in Hz. This value is also used when requesting voice audio from the ElvenLabs text to speech API. The value here represents the *pcm_16000* format, of course. |
+|      | Whisper.Compute Type  | False | This setting only applies, when using Whisper as the voice recognition method. If not *False*, it specifies the computation method used on the graphics card, when evaluating the neural network. Allowed values are *default*, *auto*, *int8*, *int8_float32*, *int8_float16*, *int8_bfloat16*, *int16*, *float16*, *bfloat16*, *float32*. You won't touch this setting in most cases, with the exception of RTX 50xx GPUs, where it must be set to "float16". |
+|      | Whisper.Options  | - | Using this setting, that only applies, when using Whisper as the voice recognition method, you can supply additional arguments to Whisper. An example would be "--cuda:1", which will select a specific GPU for running the voice recognition. |
+
+### LLM Settings
+
+Here you will find very special settings for the large language model runtime processing, especially for the optional LLm Runtime.
+
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| LLM Runtime | Context Size  | 32768    | This is the number of tokens in the context window of the model. Roughly the amount of data, the model has in its memory. |
+|             | Batch Size    | 2        | This is the number of token sequences processed in parallel by the model. Larger numbers will generally increase the performance, but will also increase the amount of consumed memory, either on the GPU or by the CPU. Consumer GPUs cannot handle parallel execution that good, but if you happen to have an Enterprise GPU, you can use much larger values here. |
+|             | Threads  | *number of cores* | This is the number of parallel threads used, when evaluating model layers on the CPU. If you cannot offload the model to the GPU and encounter stutter, reduce this number. |
+|             | Grammar | Strict | This is a very special one. Values can be either *Strict* or *Relaxed*, which specify how the output of the model should be matched against any formal specifications. This is especially useful, when tools have been made available to the model. Larger models normally do not have a problem with strict output generation, whereas smaller models will fail here most of the time. In this case, a *Relaxed* value may help, but this may introduce unexpected results. |
+
+### Script Settings
+
+The Script Engine used by the Assistants is based on the well-known *Lua* scripting language. *Lua* can use libraries or modules, which can be loaded on demand using the *require* statement. These libraries will be searched in those directories defined in a correspnding *Path* setting. If you have defined your own libraries, put them in a folder and point the settings below to this folder. However, if you are using the *Lua* package manager *luarocks* and use only libraries from there, this is not necessary, as long as the packages are located in "%appdata%\luarocks\share\lua\5.4" and "%appdata%\luarocks\lib\lua\5.4", which are the defaults for *luarocks*.
+
+| Category      | Setting        | Default   | Description |
+|---------------|----------------|-----------|-------------|
+| Script Engine | Engine         | lua54.dll | The *Lua* engine to be used. Available *Lua* versions are 5.4 and 5.5, but 5.5 is not fully tested yet. |
+|               | Modules Path   | %homePath%\Documents\Simulator Controller\Scripts\\?.script;%homePath%\Documents\Simulator Controller\Scripts\\?.lua;%APPDATA%\luarocks\share\lua\5.4\\?.lua | The path to search for *Lua* modules. Please note the "?.lua" at the end which matches *Lua* source files. When placing scripts in the %homePath%\Documents\Simulator Controller\Scripts direectory, they can have also the extension ".script". The default value contains the local script folder and also the default location for *luarocks* modules. |
+|               | Libraries Path | %APPDATA%\luarocks\lib\lua\5.4\\?.lua | The path to search for libraries written in other languages which can be used by *Lua*. Please note the "?.dll". The default value points to the default location of *luarocks* libraries. |
+
+### HTML Engine Settings
+
+Some applications of Simulator Controller uses an integrated HTML renderer to display complex documents or graphs and diagrams. By default this engine is based on the old IE 11, which is still integrated in Windows, but the newer WebView2 engine can also be used. But this one requires a lot more resources. Also, the runtime for the Google Charts library can be confired here.
+
+| Category      | Setting        | Default | Description |
+|---------------|----------------|---------|-------------|
+| HTML          | Viewer.\*      | IE11    | Many application uses and embedded HTML viewer to show graphs or other content. Actually there are two HTML engines available - *IE11*, which is based on the old Internet Explorer, which is out of support by Micorsoft and the new *WebView2* engine, which is based on Chromium engine. Since the later uses quite some resources, *IE11* is the default as long as it is available in Windows. Beside specifying the engine for all applications using the "Viewer.\*" setting, individual applications can be configured by appending the application name. Example: "Viewer.Setup Workbench"<br><br>Note: The setting "Viewer" is still supported and equal to "Viewer.\*", but deprecated. |
+|               | Charts         | Online  | The value, which must be one of *Online* or *Offline*, specifies how the Google Charts library is loaded. *Offline* will only work, if the HTML Viewer is set to *WebView2*, and is ignored for *IE11*. Do **not** change this setting unless told you so by the development team. |
+
+### Archive Settings
+
+Using these settings, you can control how ZIP archives will be compressed and expanded.
+
+| Category      | Setting        | Default | Description |
+|---------------|----------------|---------|-------------|
+| Archive       | Compressor     | Tar     | Supported values are *PowerShell* and *Tar*. Specifies which Windows command will be used to create ZIP archives. *Tar* is much faster, but depending on Windows security settings, *PowerShell* may be used as well. |
+|               | Expander       | Tar     | Supported values are also *PowerShell* and *Tar*. Specifies which Windows command will be used to extract ZIP archives. *Tar* is much faster, but it cannot handle archives with symbolic links in it. Therefore, if you have moved your user *Documents* folder to a different drive, *Powershell* must be used instead. |
+
+### Simulator Settings
+
+The settings in this section let you control, how the all the data is acquired from the simulator.
+
+| Category  | Setting        | Default      | Description |
+|-----------|----------------|--------------|-------------|
+| Simulator | Data Provider  | Connector    | This defines the integration method used to acquire data from the different simulators. "Provider" (or "EXE") is more reliable, but somewhat slower than "Connector" (or "DLL"), which is the default. If you encounter obviously wrong or missing data in race reports, for example, you can use the other method. |
+| Simulator.[simulator] | API Type | *depending on simulator* | *simulator* must be the name of the simulator. Currently only supported for *Le Mans Ultimate*. Let's you choose between the *old* *rFactor2* style API (value: "RF2") and the *newer* *Le Mans Ultimate* style API (value: "LMU"). Default is "LMU". |
+| Simulator.Le Mans Ultimate | REST API | True | If *True*, which is the default, data which is been missing in the shared memory API is acquired using the REST/JSON API of *Le Mans Ultimate*. The requests against this API can impose a performance penalty on slower PCs. It therefore can be disabled. Please note, that this setting is only useful, when the setting "Simulator.Le Mans Ultimate" / "API Type" is set to "LMU". In "RF2" mode, the REST/JSON API is required for crucial data and the value of the setting "Simulator.Le Mans Ultimate" / "REST API" should be set to *True*. |
+| Simulator.Le Mans Ultimate | Timeout | 1000 | The number of milliseconds for the HTTP requests to the REST/JSON API of *Le Mans Ultimate*. Increasing this value may help when encountering premature session ends on slower systems. |
+
+
+### Miscellaneous Settings
+
+And finally a couple of other settings which configure low level components of Simulator Controller:
+
+| Category | Setting | Default | Description |
+|----------|---------|---------|-------------|
+| Controller  | External Dispatch | 100   | Specifies how long the central event loop waits in milliseconds before it checks again for external controller commands as described [here](https://github.com/SeriousOldMan/Simulator-Controller/wiki/Using-Simulator-Controller#external-commands). |
+| Stream Deck     | Protocol  | Message    | Specifies the communication method between Stream Deck and Simulator Controller. "Message", the default uses traditional message-based inter-process communication, whereas "File" writes the messages to a shared file. Use "File" only, if you encounter stability issues with message-based communication. |
+| Team Server | Update Frequency  | 10    | Specifies the minimum number of seconds to wait between each update of the data acquired from the currently running simulator, when running a team session. This value (which you should only change by being told so), restricts the value set in the ["Session Database"](https://github.com/SeriousOldMan/Simulator-Controller/wiki/Session-Database) tool for the Data Update Frequency, so that the update frequency cannot get smaller in team sessions to protect the Team Server from update stalling. |
+| Windows    | ConstrainWindow  | True    | If *True*, windows will be constrained to a minimum size. If *False*, windows can be made smaller, but it may be possible that content may be made invisible in this case. |
+|            | ConstrainControls | True    | If *True*, controls will be constrained to a minimum size according to their resize rules. If *False*, no such rules apply, but it may be possible that the controls get to small for normal interaction. |

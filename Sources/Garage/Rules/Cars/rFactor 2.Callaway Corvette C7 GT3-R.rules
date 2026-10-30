@@ -1,0 +1,19 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - rFactor 2                       ;;;
+;;;                                         Callaway Corvette C7 GT3-R      ;;;
+;;;                                         Setup Rules                     ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                            Initialization                               ;;;
+;;;-------------------------------------------------------------------------;;;
+
+[?Initialize] => (Prove: addSettings("rFactor 2", "Callaway Corvette C7 GT3-R", [Electronics.ABS, Radiator.Blanket.Water, Radiator.Blanket.Oil])),
+				 (Prove: removeSettings("rFactor 2", "Callaway Corvette C7 GT3-R", [Aero.Splitter.Front,
+																					Damper.Compression.Fast.Front.Left, Damper.Compression.Fast.Front.Right,
+																					Damper.Compression.Fast.Rear.Left, Damper.Compression.Fast.Rear.Right,
+																					Damper.Rebound.Fast.Front.Left, Damper.Rebound.Fast.Front.Right,
+																					Damper.Rebound.Fast.Rear.Left, Damper.Rebound.Fast.Rear.Right]))

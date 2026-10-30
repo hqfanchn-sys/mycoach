@@ -1,0 +1,614 @@
+﻿;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Telemetry Collector             ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                         Local Include Section                           ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include "..\..\Framework\Extensions\HTTP.ahk"
+#Include "..\..\Framework\Extensions\JSON.ahk"
+#Include "..\..\Plugins\Simulator Providers.ahk"
+#Include "SessionDatabase.ahk"
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                       Public Constants Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+global kTelemetryChannels := [{Name: "Distance", Indices: [1], Channels: [], Units: ["meter"]}
+							, {Name: "Speed", Indices: [7], Size: 1, Channels: ["Speed"], Units: ["km/h"]
+											, Converter: [(s) => isNumber(s) ? convertUnit("Speed", s) : kNull]}
+							, {Name: "Throttle", Indices: [2], Size: 0.5, Channels: ["Throttle"], Units: ["0 - 1"]}
+							, {Name: "Brake", Indices: [3], Size: 0.5, Channels: ["Brake"], Units: ["0 - 1"]}
+							, {Name: "Throttle/Brake", Indices: [2, 3], Size: 0.5
+													 , Channels: ["Throttle", "Brake"], Units: ["0 - 1", "0 - 1"]}
+							, {Name: "Steering", Indices: [4], Size: 0.8, Channels: ["Steering"], Units: ["-1 - 1"]}
+							, {Name: "TC", Indices: [8], Size: 0.3, Channels: ["TC"], Units: ["0 - 1"]}
+							, {Name: "ABS", Indices: [9], Size: 0.3, Channels: ["ABS"], Units: ["0 - 1"]}
+							, {Name: "TC/ABS", Indices: [8, 9], Size: 0.3
+											 , Channels: ["TC", "ABS"], Units: ["0 - 1", "0 - 1"]}
+							, {Name: "RPM", Indices: [6], Size: 0.5, Channels: ["RPM"], Units: ["rot/m"]}
+							, {Name: "Gear", Indices: [5], Size: 0.5, Channels: ["Gear"], Units: ["-1 - N"]}
+							, {Name: "Long G", Indices: [10], Size: 1, Channels: ["Long G"], Units: ["m/s^2"]}
+							, {Name: "Lat G", Indices: [11], Size: 1, Channels: ["Lat G"], Units: ["m/s^2"]}
+							, {Name: "Lat G/Long G", Indices: [10, 11], Size: 1
+												   , Channels: ["Long G", "Lat G"], Units: ["m/s^2", "m/s^2"]}
+							, {Name: "Curvature", Function: computeCurvature, Indices: [false], Size: 1
+												, Channels: ["Curvature"], Units: ["float"]}
+							, {Name: "Time", Indices: [14], Size: 1, Channels: ["Time"], Units: ["ms"]
+										   , Converter: [normalizeTime]}
+							, {Name: "PosX", Indices: [12], Channels: [], Units: ["integer"]}
+							, {Name: "PosY", Indices: [13], Channels: [], Units: ["integer"]}
+							, {Name: "YawRate", Indices: [15], Size: 1, Channels: ["YawRate"], Units: ["rad/s"]}
+							, {Name: "SuspDefl FL", Indices: [16], Size: 1, Channels: ["SuspDefl FL"], Units: ["meter"]}
+							, {Name: "SuspDefl FR", Indices: [17], Size: 1, Channels: ["SuspDefl FR"], Units: ["meter"]}
+							, {Name: "SuspDefl RL", Indices: [18], Size: 1, Channels: ["SuspDefl RL"], Units: ["meter"]}
+							, {Name: "SuspDefl RR", Indices: [19], Size: 1, Channels: ["SuspDefl RR"], Units: ["meter"]}]
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                          Public Classes Section                         ;;;
+;;;-------------------------------------------------------------------------;;;
+
+class TelemetryCollector {
+	iProvider := "Internal"
+	iProviderURL := false
+
+	iSimulator := false
+	iTrack := false
+	iTrackLength := false
+
+	iTelemetryDirectory := false
+	iTelemetryCollectorPID := false
+
+	iExitCallback := false
+
+	iSecondMonitorTask := false
+
+	class SecondMonitorRESTProvider {
+		iTelemetryCollector := false
+		iEndpointURL := false
+
+		iLoadedLaps := Map()
+
+		TelemetryCollector {
+			Get {
+				return this.iTelemetryCollector
+			}
+		}
+
+		EndpointURL {
+			Get {
+				return this.iEndpointURL
+			}
+		}
+
+		LoadedLaps {
+			Get {
+				return this.iLoadedLaps
+			}
+		}
+
+		__New(collector, endpointURL) {
+			try {
+				if (SubStr(endpointURL, StrLen(endpointURL), 1) != "/")
+					endpointURL .= "/"
+			}
+			catch Any as exception {
+				logError(exception)
+			}
+
+			this.iTelemetryCollector := collector
+			this.iEndpointURL := endpointURL
+		}
+
+		read(endpoint, type := "JSON") {
+			local data
+
+			try {
+				data := WinHttpRequest({Timeouts: [0, 500, 500, 500]}).GET(this.EndpointURL . endpoint, "", false, {Encoding: "UTF-8"})
+
+				return ((type = "JSON") ? data.JSON : data.Text)
+			}
+			catch Any as exception {
+				logError(exception)
+
+				data := false
+			}
+
+			return data
+		}
+
+		availableLaps() {
+			local laps := []
+			local lastLap
+
+			try {
+				info := this.read("DriversInfo")
+
+				loop choose(info, (di) => di["isPlayer"])[1]["completedLaps"]
+					if !this.LoadedLaps.Has(A_Index)
+						laps.Push(A_Index)
+			}
+			catch Any as exception {
+				logError(exception)
+			}
+
+			return laps
+		}
+
+		loadLaps() {
+			do(this.availableLaps(), (lap) => this.loadLap(lap))
+		}
+
+		loadLap(lap) {
+			local inputFileName, importFileName, text, pid, info
+
+			lap := Integer(lap)
+
+			inputFileName := temporaryFileName("Telemetry", "json")
+			importFileName := (this.TelemetryCollector.TelemetryDirectory . "Lap " . lap . ".telemetry")
+
+			deleteFile(inputFileName)
+			deleteFile(importFileName)
+
+			try {
+				text := this.read("TelemetryInfo/GetForPlayerAndLap?lapNumber=" . lap, "Text")
+
+				if (!text || (Trim(text) = ""))
+					throw "Empty data received in TelemetryCollector.SecondMonitorRESTProvider.loadLap..."
+
+				FileAppend(text, inputFileName)
+
+				Run("`"" . kBinariesDirectory . "Connectors\Second Monitor Reader\Second Monitor Reader.exe`" `"" . inputFileName . "`" `"" . importFileName . "`" `"" . (importFileName . ".info") . "`"", , "Hide", &pid)
+
+				Sleep(500)
+
+				count := 0
+
+				while (ProcessExist(pid) && (count++ < 100))
+					Sleep(100)
+
+				this.LoadedLaps[lap] := lap
+
+				SessionDatabase.normalizeTelemetry(this.TelemetryCollector.Simulator, importFileName)
+
+				info := readMultiMap(importFileName . ".info")
+
+				setMultiMapValue(info, "Info", "Driver", SessionDatabase.getName("Driver"))
+
+				writeMultiMap(importFileName . ".info", info)
+
+				return importFileName
+			}
+			catch Any as exception {
+				logError(exception)
+			}
+			finally {
+				if !isDebug()
+					deleteFile(inputFileName)
+			}
+		}
+
+		loadSection(startTime) {
+			local directory := this.TelemetryCollector.TelemetryDirectory
+			local inputFileName := temporaryFileName("Telemetry", "json")
+			local importFileName := temporaryFileName("Import", "telemetry")
+			local text, pid
+
+			deleteFile(inputFileName)
+			deleteFile(importFileName)
+
+			try {
+				text := this.read("TelemetryInfo/GetForPlayerSinceTime?sessionTimeSeconds=" . startTime, "Text")
+
+				if (!text || (Trim(text) = ""))
+					throw "Empty data received in TelemetryCollector.SecondMonitorRESTProvider.loadSection..."
+
+				FileAppend(text, inputFileName)
+
+				Run("`"" . kBinariesDirectory . "Connectors\Second Monitor Reader\Second Monitor Reader.exe`" `"" . inputFileName . "`" `"" . importFileName . "`"", , "Hide", &pid)
+
+				Sleep(500)
+
+				count := 0
+
+				while (ProcessExist(pid) && (count++ < 100))
+					Sleep(100)
+
+				SessionDatabase.normalizeTelemetry(this.TelemetryCollector.Simulator, importFileName)
+
+				return importFileName
+			}
+			catch Any as exception {
+				logError(exception)
+
+				return false
+			}
+			finally {
+				if !isDebug()
+					deleteFile(inputFileName)
+			}
+		}
+	}
+
+	class TelemetryFuture {
+		iTelemetryCollector := false
+		iFileName := false
+
+		iCollected := false
+
+		TelemetryCollector {
+			Get {
+				return this.iTelemetryCollector
+			}
+		}
+
+		FileName {
+			Get {
+				this.stop()
+
+				return this.iFileName
+			}
+
+			Set {
+				if value
+					this.Collected := true
+
+				return (this.iFileName := value)
+			}
+		}
+
+		Collected {
+			Get {
+				return this.iCollected
+			}
+
+			Set {
+				return (this.iCollected := value)
+			}
+		}
+
+		__New(collector) {
+			this.iTelemetryCollector := collector
+		}
+
+		__Delete() {
+			this.dispose()
+		}
+
+		dispose() {
+			this.stop()
+
+			if this.FileName
+				deleteFile(this.FileName)
+		}
+
+		stop() {
+		}
+	}
+
+	class InternalTelemetryFuture extends TelemetryCollector.TelemetryFuture {
+		__New(collector) {
+			local directory := collector.TelemetryDirectory
+
+			super.__New(collector)
+
+			if FileExist(directory . "Telemetry.cmd")
+				throw "Partial telemetry collection still running in TelemetryCollector.InternalTelemetryFuture.__New..."
+			else {
+				deleteFile(directory . "\Telemetry.section")
+
+				FileAppend("COLLECT", directory . "\Telemetry.cmd")
+			}
+		}
+
+		stop() {
+			local directory, inFileName, outFileName
+
+			if !this.Collected {
+				directory := this.TelemetryCollector.TelemetryDirectory
+				inFileName := (directory . "Telemetry.section")
+				outFileName := temporaryFileName("Telemetry", "section")
+
+				deleteFile(directory . "Telemetry.cmd")
+
+				if FileExist(inFileName) {
+					loop
+						try {
+							FileMove(inFileName, outFileName, 1)
+
+							break
+						}
+						catch Any as exception {
+							logError(exception)
+
+							Sleep(1)
+						}
+
+					this.FileName := outFileName
+				}
+
+				this.Collected := true
+			}
+		}
+	}
+
+	class SecondMonitorTelemetryFuture extends TelemetryCollector.TelemetryFuture {
+		iSecondMonitorProvider := false
+		iStartTime := false
+
+		__New(collector) {
+			super.__New(collector)
+
+			this.iSecondMonitorProvider := TelemetryCollector.SecondMonitorRESTProvider(collector, collector.ProviderURL)
+
+			try {
+				this.iStartTime := this.iSecondMonitorProvider.read("SessionInfo")["sessionIdentification"]["sessionTimeInSeconds"]
+			}
+			catch Any as exception {
+				logError(exception)
+			}
+		}
+
+		stop() {
+			local directory, inFileName, outFileName
+
+			if !this.Collected {
+				this.FileName := this.iSecondMonitorProvider.loadSection(this.iStartTime)
+
+				this.Collected := true
+			}
+		}
+	}
+
+	Provider {
+		Get {
+			return this.iProvider
+		}
+	}
+
+	ProviderURL {
+		Get {
+			return this.iProviderURL
+		}
+	}
+
+	Simulator {
+		Get {
+			return this.iSimulator
+		}
+	}
+
+	Track {
+		Get {
+			return this.iTrack
+		}
+	}
+
+	TrackLength {
+		Get {
+			return this.iTrackLength
+		}
+	}
+
+	TelemetryDirectory {
+		Get {
+			return this.iTelemetryDirectory
+		}
+	}
+
+	Collecting {
+		Get {
+			return (this.iTelemetryCollectorPID || this.iSecondMonitorTask)
+		}
+	}
+
+	__New(provider, telemetryDirectory, simulator, track, trackLength) {
+		if (provider != "Internal") {
+			provider := string2Values("|", provider)
+
+			this.iProvider := provider[1]
+
+			if (provider.Length > 1)
+				this.iProviderURL := provider[2]
+		}
+
+		this.iTelemetryDirectory := (normalizeDirectoryPath(telemetryDirectory) . "\")
+
+		this.initialize(simulator, track, trackLength)
+	}
+
+	initialize(simulator, track, trackLength) {
+		this.iSimulator := simulator
+		this.iTrack := track
+		this.iTrackLength := trackLength
+	}
+
+	startup(restart := false) {
+		local sessionDB := SessionDatabase()
+		local code, exePath, protocol, arguments, pid, trackData, trackSpline
+
+		if isDebug()
+			logMessage(kLogWarn, "Startup telemetry collector...")
+
+		if (this.Provider = "Internal") {
+			if (this.iTelemetryCollectorPID && restart)
+				this.shutdown(true)
+
+			if (this.iTelemetryCollectorPID && !ProcessExist(this.iTelemetryCollectorPID))
+				this.iTelemetryCollectorPID := false
+
+			if !this.iTelemetryCollectorPID {
+				code := sessionDB.getSimulatorCode(this.Simulator)
+
+				protocol := "SHM"
+				exePath := "..."
+				pid := false
+
+				try {
+					protocol := SimulatorProvider.getProtocol(code, "Spotter")
+
+					if protocol {
+						if protocol.HasProp("Arguments")
+							arguments := values2String(A_Space, collect(protocol.Arguments, (a) => ("`"" . a . "`""))*)
+						else
+							arguments := ""
+
+						exePath := protocol.File
+						protocol := protocol.Protocol
+
+						if !FileExist(exePath)
+							throw "File not found..."
+
+						DirCreate(normalizeDirectoryPath(this.TelemetryDirectory))
+
+						deleteFile(this.TelemetryDirectory . "Track.spline")
+
+						trackData := sessionDB.getTrackData(code, this.Track)
+						trackSpline := sessionDB.getTrackSpline(code, this.Track)
+
+						Run("`"" . exePath . "`" " . arguments . " -Telemetry " . this.TrackLength
+						  . " `"" . normalizeDirectoryPath(this.TelemetryDirectory) . "`""
+						  . (trackData ? (" `"" . trackData . "`"") : " -")
+						  . (trackSpline ? (" `"" . trackSpline . "`"") : " -")
+						  , kBinariesDirectory, "Hide", &pid)
+					}
+				}
+				catch Any as exception {
+					logError(exception, true)
+
+					logMessage(kLogCritical, substituteVariables(translate("Cannot start %simulator% %protocol% Spotter (")
+															   , {simulator: code, protocol: protocol})
+										   . exePath . translate(") - please rebuild the applications in the binaries folder (")
+										   . kBinariesDirectory . translate(")"))
+
+					if !kSilentMode
+						showMessage(substituteVariables(translate("Cannot start %simulator% %protocol% Spotter (%exePath%) - please check the configuration...")
+													  , {exePath: exePath, simulator: code, protocol: protocol})
+								  , translate("Modular Simulator Controller System"), "Alert.png", 5000, "Center", "Bottom", 800)
+				}
+
+				if pid {
+					this.iTelemetryCollectorPID := pid
+
+					if !this.iExitCallback {
+						this.iExitCallback := ObjBindMethod(this, "shutdown", true)
+
+						OnExit(this.iExitCallback)
+					}
+
+					return true
+				}
+				else
+					return false
+			}
+			else
+				return true
+		}
+		else {
+			if (this.iSecondMonitorTask && restart)
+				this.shutdown(true)
+
+			if !this.iSecondMonitorTask {
+				this.iSecondMonitorTask := PeriodicTask(ObjBindMethod(TelemetryCollector.SecondMonitorRESTProvider(this, this.ProviderURL)
+																	, "loadLaps")
+													  , 5000, kLowPriority)
+
+				this.iSecondMonitorTask.start()
+
+				return true
+			}
+			else
+				return false
+		}
+	}
+
+	shutdown(force := false, arguments*) {
+		local pid := this.iTelemetryCollectorPID
+		local tries
+
+		if isDebug()
+			logMessage(kLogWarn, "Shutdown telemetry collector...")
+
+		if ((arguments.Length > 0) && inList(["Logoff", "Shutdown"], arguments[1]))
+			return false
+
+		if ((this.Provider = "Internal") && pid) {
+			if FileExist(this.TelemetryDirectory . "Track.spline")
+				SessionDatabase().updateTrackSpline(this.Simulator, this.Track
+												  , this.TelemetryDirectory . "Track.spline")
+
+			ProcessClose(pid)
+
+			if (force && ProcessExist(pid)) {
+				Sleep(500)
+
+				tries := 5
+
+				while (tries-- > 0) {
+					pid := ProcessExist(pid)
+
+					if pid {
+						ProcessClose(pid)
+
+						Sleep(500)
+					}
+					else
+						break
+				}
+			}
+
+			this.iTelemetryCollectorPID := false
+		}
+		else if (this.Provider = "Second Monitor")
+			if this.iSecondMonitorTask {
+				this.iSecondMonitorTask.stop()
+
+				this.iSecondMonitorTask := false
+			}
+
+		return false
+	}
+
+	collectTelemetry() {
+		if (this.Provider = "Internal")
+			return TelemetryCollector.InternalTelemetryFuture(this)
+		else
+			return TelemetryCollector.SecondMonitorTelemetryFuture(this)
+	}
+}
+
+
+;;;-------------------------------------------------------------------------;;;
+;;;                      Private Functions Section                          ;;;
+;;;-------------------------------------------------------------------------;;;
+
+computeCurvature(data) {
+	local absG
+
+	if data.Has(11) {
+		absG := Abs(data[11])
+
+		if (absG > 0.1)
+			return - Log(((data[7] / 3.6) ** 2) / absG)
+		else
+			return kNull
+	}
+	else
+		return kNull
+}
+
+normalizeTime(time) {
+	if InStr(time, ":") {
+		time := string2Values(":", time)
+
+		return ((time[1] * 60000) + (time[2] * 1000))
+	}
+	else
+		return (isNumber(time) ? time : kNull)
+}

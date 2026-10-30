@@ -1,0 +1,30 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;   Modular Simulator Controller System - Agent Actions                   ;;;
+;;;                                                                         ;;;
+;;;   Author:     Oliver Juwig (TheBigO)                                    ;;;
+;;;   License:    (2026) Creative Commons - BY-NC-SA                        ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;-------------------------------------------------------------------------;;;
+;;;                             Action Callbacks                            ;;;
+;;;-------------------------------------------------------------------------;;;
+
+#Include %kResourcesDirectory%Rules\Action Callbacks.rules
+
+Assistant.Raise(?p0) <= Call(raiseEvent, ?p0)
+Assistant.Raise(?p0, ?p1) <= Call(raiseEvent, ?p0, ?p1)
+Assistant.Raise(?p0, ?p1, ?p2) <= Call(raiseEvent, ?p0, ?p1, ?p2)
+Assistant.Raise(?p0, ?p1, ?p2, ?p3) <= Call(raiseEvent, ?p0, ?p1, ?p2, ?p3)
+Assistant.Raise(?p0, ?p1, ?p2, ?p3, ?p4) <= Call(raiseEvent, ?p0, ?p1, ?p2, ?p3, ?p4)
+Assistant.Raise(?p0, ?p1, ?p2, ?p3, ?p4, ?p5) <= Call(raiseEvent, ?p0, ?p1, ?p2, ?p3, ?p4, ?p5)
+Assistant.Raise(?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6) <= Call(raiseEvent, ?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6)
+Assistant.Raise(?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6, ?p7) <= Call(raiseEvent, ?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6, ?p7)
+
+Assistant.Trigger(?p0) <= Call(triggerAction, ?p0)
+Assistant.Trigger(?p0, ?p1) <= Call(triggerAction, ?p0, ?p1)
+Assistant.Trigger(?p0, ?p1, ?p2) <= Call(triggerAction, ?p0, ?p1, ?p2)
+Assistant.Trigger(?p0, ?p1, ?p2, ?p3) <= Call(triggerAction, ?p0, ?p1, ?p2, ?p3)
+Assistant.Trigger(?p0, ?p1, ?p2, ?p3, ?p4) <= Call(triggerAction, ?p0, ?p1, ?p2, ?p3, ?p4)
+Assistant.Trigger(?p0, ?p1, ?p2, ?p3, ?p4, ?p5) <= Call(triggerAction, ?p0, ?p1, ?p2, ?p3, ?p4, ?p5)
+Assistant.Trigger(?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6) <= Call(triggerAction, ?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6)
+Assistant.Trigger(?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6, ?p7) <= Call(triggerAction, ?p0, ?p1, ?p2, ?p3, ?p4, ?p5, ?p6, ?p7)
